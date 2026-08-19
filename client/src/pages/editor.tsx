@@ -1,0 +1,5455 @@
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Input } from "@/components/ui/input";
+import { useAuth, clearClientAuth } from "@/lib/auth";
+import { useLocation, useParams } from "wouter";
+import { queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
+import { useIsMobile } from "@/hooks/use-mobile";
+import type { Project, ProjectMessage, ProjectImage, ProjectVersion, ProjectFile } from "@shared/schema";
+import { isEditorVisibleProjectFile, isInternalAgentFile } from "@shared/project-files";
+import JSZip from "jszip";
+import { UITemplatesModal } from "@/components/ui-templates";
+
+/** Server-side generation still running (tab may have been closed). */
+function isCraftGeneratingHtml(code?: string | null): boolean {
+  return !!(code && code.includes('data-craft-generating="1"'));
+}
+
+type InteractiveHeroStatus = {
+  present?: boolean;
+  pending?: boolean;
+  fallback?: boolean;
+  hollow?: boolean;
+  mediaBroken?: boolean;
+  canRegen?: boolean;
+};
+
+type ProjectWithHero = Project & { interactiveHero?: InteractiveHeroStatus };
+import {
+  ArrowLeft,
+  Send,
+  Download,
+  Sparkles,
+  Loader2,
+  Code2,
+  Eye,
+  ExternalLink,
+  Monitor,
+  Smartphone,
+  Tablet,
+  Image as ImageIcon,
+  Paperclip,
+  ChevronLeft,
+  ChevronRight,
+  Maximize2,
+  Crosshair,
+  Wand2,
+  CheckCircle2,
+  XCircle,
+  Trash2,
+  ImagePlus,
+  RotateCcw,
+  MousePointer2,
+  Type,
+  History,
+  Clock,
+  FileText,
+  Layout,
+  Plus,
+  X,
+  Video,
+  Music,
+  Globe,
+  Camera,
+  Box,
+  BarChart2,
+  ShieldCheck,
+  ShieldAlert,
+  CheckCircle,
+  AlertTriangle,
+  AlertCircle,
+  MessageSquare,
+} from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+/** Temporarily hidden in the toolbar — re-enable when Hunyuan3D generation ships. */
+const ENABLE_3D_GENERATION = false;
+
+const SkeuoPanel = ({ children, className = "" }: { children: React.ReactNode; className?: string }) => (
+  <div className={`bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 shadow-sm rounded-2xl overflow-hidden flex flex-col ${className}`}>
+    {children}
+  </div>
+);
+
+function CopyRow({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    navigator.clipboard?.writeText(value).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); });
+  }
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "#f1f5f9", borderRadius: 8, padding: "0.45rem 0.75rem", fontFamily: "monospace", fontSize: "0.8rem" }}>
+      <span style={{ color: "#1e40af", fontWeight: 600 }}>{label}</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span style={{ color: "#374151" }}>{value}</span>
+        <button onClick={copy} style={{ background: "none", border: "none", cursor: "pointer", color: copied ? "#16a34a" : "#6b7280", fontSize: "0.7rem", padding: "2px 6px", borderRadius: 4 }} title="Скопировать">
+          {copied ? "✓" : "📋"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DnsInstructions({ customDomain, aRecordIp, domainChecking, domainVerified, domainDnsReady, domainStatusMessage, onCheck, testId }: {
+  customDomain: string;
+  aRecordIp: string;
+  domainChecking: boolean;
+  domainVerified: boolean | null;
+  domainDnsReady: boolean;
+  domainStatusMessage: string;
+  onCheck: () => void;
+  testId?: string;
+}) {
+  const apex = customDomain.replace(/^www\./, "");
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+      <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 12, padding: "0.75rem 1rem" }}>
+        <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "#1d4ed8", marginBottom: 10 }}>
+          Осталось одно действие — добавьте A-записи в DNS домена
+        </div>
+        <div style={{ fontSize: "0.78rem", color: "#374151", lineHeight: 1.8 }}>
+          <div style={{ marginBottom: 8 }}>
+            <b>1.</b> Откройте панель управления DNS у вашего регистратора (например, <a href="https://www.reg.ru/user/domain-list" target="_blank" rel="noreferrer" style={{ color: "#1d4ed8", textDecoration: "underline" }}>reg.ru</a> → <b>Домены</b> → <b>{apex}</b> → «<b>Управление DNS-записями</b>»)
+          </div>
+          <div style={{ marginBottom: 8 }}><b>2.</b> Добавьте две A-записи, указывающие на наш сервер:</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, margin: "4px 0 10px" }}>
+            <CopyRow label="A  @ (или пусто)" value={aRecordIp || "—"} />
+            <CopyRow label="A  www" value={aRecordIp || "—"} />
+          </div>
+          <div><b>3.</b> Сохраните. DNS обновится обычно за 5–30 минут (иногда до 24 часов), после чего сайт откроется на <b>{apex}</b> с бесплатным SSL-сертификатом.</div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+        <Button size="sm" variant="outline" onClick={onCheck} disabled={domainChecking} style={{ borderRadius: 10, fontSize: "0.78rem" }} data-testid={testId}>
+          {domainChecking ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+          Проверить DNS
+        </Button>
+        {domainChecking === false && domainVerified === false && !domainDnsReady && domainVerified !== null && (
+          <span style={{ fontSize: "0.75rem", color: "#f59e0b", fontWeight: 500 }}>{domainStatusMessage || "DNS ещё обновляется — подождите"}</span>
+        )}
+        {domainChecking === false && domainVerified === false && domainDnsReady && (
+          <span style={{ fontSize: "0.75rem", color: "#3b82f6", fontWeight: 500 }}>🔒 {domainStatusMessage || "DNS готов, SSL выпускается (до 1 минуты)"}</span>
+        )}
+        {domainChecking === false && domainVerified === true && (
+          <span style={{ fontSize: "0.75rem", color: "#16a34a", fontWeight: 500 }}>✓ Домен полностью работает!</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function EditorPage() {
+  const params = useParams<{ id: string }>();
+  const projectId = parseInt(params.id || "0");
+  const [, setLocation] = useLocation();
+  const { user } = useAuth();
+  const { toast } = useToast();
+  const isMobile = useIsMobile();
+
+  const [prompt, setPrompt] = useState("");
+  const [agentMode, setAgentMode] = useState<"auto" | "edit" | "chat">("auto");
+  const [isGenerating, setIsGenerating] = useState(false);
+  /** Site HTML is ready; Kling/motion still baking — show preview, not blackout. */
+  const [animBaking, setAnimBaking] = useState(false);
+  /** Bump to force iframe remount when baked hero HTML arrives (srcDoc alone can stick). */
+  const [previewEpoch, setPreviewEpoch] = useState(0);
+  const [streamedCode, setStreamedCode] = useState("");
+  const [streamedFile, setStreamedFile] = useState("index.html");
+  const [optimisticFiles, setOptimisticFiles] = useState<Record<string, string>>({});
+  const saveSeqRef = useRef(0);
+  const previewBlobUrlRef = useRef<string | null>(null);
+  const [showCode, setShowCode] = useState(false);
+  const [editableCode, setEditableCode] = useState("");
+  const [codeSaving, setCodeSaving] = useState(false);
+  const [previewDevice, setPreviewDevice] = useState<"desktop" | "tablet" | "mobile">(() =>
+    typeof window !== "undefined" && window.innerWidth < 768 ? "mobile" : "desktop"
+  );
+  const [attachedImages, setAttachedImages] = useState<Array<{id: string, base64: string, mimeType: string, preview: string | null, fileName: string, url?: string, uploading?: boolean}>>([]);
+  const [attachedVideos, setAttachedVideos] = useState<Array<{id: string, url: string, fileName: string, uploading: boolean}>>([]);
+  const [attachedModels, setAttachedModels] = useState<Array<{id: string, url: string, fileName: string, uploading: boolean}>>([]);
+  const [attachedAudios, setAttachedAudios] = useState<Array<{id: string, url: string, fileName: string, uploading: boolean}>>([]);
+  const [sidebarOpen, setSidebarOpen] = useState(() =>
+    typeof window !== "undefined" ? window.innerWidth >= 768 : true
+  );
+  const [mobileView, setMobileView] = useState<"chat" | "preview">("preview");
+  const [generationStatus, setGenerationStatus] = useState<string | null>(null);
+  const [streamingReply, setStreamingReply] = useState("");
+  const [editMode, setEditMode] = useState(false);
+  const [selectorMode, setSelectorMode] = useState(false);
+  const [selectedElement, setSelectedElement] = useState<{
+    tag: string;
+    text: string;
+    classes: string;
+    path: string;
+    outerSnippet: string;
+    snippetTruncated?: boolean;
+  } | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  /** Preserve preview scroll when remounting iframe (Редактор / Выбрать). */
+  const pendingScrollYRef = useRef<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const pendingImageTarget = useRef<string | null>(null);
+  // Latest HTML from in-iframe edits — persisted silently so srcDoc is not rewritten (avoids reload loop).
+  const latestEditHtmlRef = useRef<string | null>(null);
+  const editModeRef = useRef(false);
+  const selectorModeRef = useRef(false);
+  editModeRef.current = editMode;
+  selectorModeRef.current = selectorMode;
+
+  const [imagePickerOpen, setImagePickerOpen] = useState(false);
+  const [imagePickerTab, setImagePickerTab] = useState<"library" | "upload">("library");
+  const replaceFileInputRef = useRef<HTMLInputElement>(null);
+
+  const [imgGenOpen, setImgGenOpen] = useState(false);
+  const [faviconUploading, setFaviconUploading] = useState(false);
+  const faviconInputRef = useRef<HTMLInputElement>(null);
+  const [faviconCropOpen, setFaviconCropOpen] = useState(false);
+  const [yandexOpen, setYandexOpen] = useState(false);
+  const [yandexMetrika, setYandexMetrika] = useState("");
+  const [yandexWebmaster, setYandexWebmaster] = useState("");
+  const [yandexSaving, setYandexSaving] = useState(false);
+  const [agentVersion, setAgentVersion] = useState<"v1" | "v2">(() => {
+    try {
+      const saved = localStorage.getItem("craft-agent-version");
+      if (saved === "v1" || saved === "v2") return saved;
+    } catch {}
+    const p = new URLSearchParams(window.location.search);
+    const q = p.get("agent");
+    // URL from dashboard can force V2 for first create only.
+    if (q === "v2") return "v2";
+    if (q === "v1") return "v1";
+    return "v2";
+  });
+  /** Interactive create options from dashboard URL (URL is cleared after first kick). */
+  const interactiveCreateRef = useRef<{
+    interactive: boolean;
+    style: string;
+    productUrl: string;
+  }>({ interactive: false, style: "parallax", productUrl: "" });
+  /** True only for the URL-driven first build of an empty site. */
+  const firstCreateKickRef = useRef(false);
+  /** Agent version forced by the dashboard create URL for the first kick. */
+  const firstCreateAgentRef = useRef<"v1" | "v2" | null>(null);
+
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [auditRunning, setAuditRunning] = useState(false);
+  const [auditChecks, setAuditChecks] = useState<Array<{id: string; name: string; status: "ok"|"missing"|"partial"; note: string}> | null>(null);
+  const [auditHasIssues, setAuditHasIssues] = useState(false);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [auditOrgDetails, setAuditOrgDetails] = useState("");
+  const [faviconRawSrc, setFaviconRawSrc] = useState<string>("");
+  const [faviconRawMime, setFaviconRawMime] = useState<string>("image/png");
+  const [cropBox, setCropBox] = useState({ x: 0, y: 0, size: 100 });
+  const [cropDrag, setCropDrag] = useState<{ mode: "move" | "resize"; startX: number; startY: number; origBox: { x: number; y: number; size: number } } | null>(null);
+  const cropImgRef = useRef<HTMLImageElement>(null);
+  const cropContainerRef = useRef<HTMLDivElement>(null);
+  const [imgPrompt, setImgPrompt] = useState("");
+  const [imgSize, setImgSize] = useState("16:9");
+  const [imgGenerating, setImgGenerating] = useState(false);
+  const [imgStatus, setImgStatus] = useState<"idle" | "creating" | "waiting" | "success" | "fail">("idle");
+  const [imgResultUrls, setImgResultUrls] = useState<string[]>([]);
+  const [imgError, setImgError] = useState("");
+  const [imgRefs, setImgRefs] = useState<{ preview: string; url: string; uploading: boolean }[]>([]);
+  const imgRefInputRef = useRef<HTMLInputElement>(null);
+
+  const [gen3dOpen, setGen3dOpen] = useState(false);
+  const [gen3dImageUrl, setGen3dImageUrl] = useState("");
+  const [gen3dImagePreview, setGen3dImagePreview] = useState("");
+  const [gen3dType, setGen3dType] = useState("Normal");
+  const [gen3dPbr, setGen3dPbr] = useState(false);
+  const [gen3dGenerating, setGen3dGenerating] = useState(false);
+  const [gen3dStatus, setGen3dStatus] = useState<"idle" | "creating" | "waiting" | "success" | "fail">("idle");
+  const [gen3dResultUrl, setGen3dResultUrl] = useState("");
+  const [gen3dError, setGen3dError] = useState("");
+  const [gen3dStatusUrl, setGen3dStatusUrl] = useState("");
+  const gen3dInputRef = useRef<HTMLInputElement>(null);
+  const gen3dRetryRef = useRef(0);
+
+  // Video-to-scroll-animation dialog
+  const [videoAnimOpen, setVideoAnimOpen] = useState(false);
+  const [videoAnimStep, setVideoAnimStep] = useState<"upload" | "processing" | "select" | "done">("upload");
+  const [videoAnimFrames, setVideoAnimFrames] = useState<string[]>([]);
+  const [videoAnimSections, setVideoAnimSections] = useState<string[]>([]);
+  const [videoAnimSectionIdx, setVideoAnimSectionIdx] = useState(0);
+  const [videoAnimHasExisting, setVideoAnimHasExisting] = useState(false);
+  const [videoAnimReplaceExisting, setVideoAnimReplaceExisting] = useState(false);
+  const [videoAnimProgress, setVideoAnimProgress] = useState("");
+  const [videoAnimError, setVideoAnimError] = useState("");
+  const [videoAnimInserting, setVideoAnimInserting] = useState(false);
+  const videoAnimInputRef = useRef<HTMLInputElement>(null);
+
+  const [mockupMode, setMockupMode] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
+  const [showGenerations, setShowGenerations] = useState(false);
+  const [isRegenAnim, setIsRegenAnim] = useState(false);
+  const [showPublishModal, setShowPublishModal] = useState(false);
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [publishResult, setPublishResult] = useState<string | null>(null);
+  const [publishError, setPublishError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [customDomain, setCustomDomain] = useState("");
+  const [domainAdding, setDomainAdding] = useState(false);
+  const [domainResult, setDomainResult] = useState<{ added: boolean; instructions: boolean } | null>(null);
+  const [domainError, setDomainError] = useState<string | null>(null);
+  const [domainVerified, setDomainVerified] = useState<boolean | null>(null);
+  const [domainDnsReady, setDomainDnsReady] = useState<boolean>(false);
+  const [domainStatusMessage, setDomainStatusMessage] = useState<string>("");
+  const [domainChecking, setDomainChecking] = useState(false);
+  const [domainIp, setDomainIp] = useState<string>("");
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const animPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const { data: project, isLoading: projectLoading, isError: projectError, refetch: refetchProject } = useQuery<ProjectWithHero>({
+    queryKey: ["/api/projects", projectId],
+  });
+
+  const { data: messages = [] } = useQuery<ProjectMessage[]>({
+    queryKey: ["/api/projects", projectId, "messages"],
+  });
+
+  const { data: projectImages = [] } = useQuery<ProjectImage[]>({
+    queryKey: ["/api/projects", projectId, "images"],
+  });
+
+  const { data: versions = [] } = useQuery<ProjectVersion[]>({
+    queryKey: ["/api/projects", projectId, "versions"],
+  });
+
+  const [showVersions, setShowVersions] = useState(false);
+  const [addPageOpen, setAddPageOpen] = useState(false);
+  const [newPageName, setNewPageName] = useState("");
+  const [newPageTitle, setNewPageTitle] = useState("");
+
+  const { data: projectFiles = [] } = useQuery<ProjectFile[]>({
+    queryKey: ["/api/projects", projectId, "files"],
+  });
+
+  const [activeFile, setActiveFile] = useState("index.html");
+
+  const allFiles = (() => {
+    const fromServer = [
+      { filename: "index.html", code: optimisticFiles["index.html"] || streamedCode || project?.generatedCode || "" },
+      ...projectFiles
+        .filter(f => f.filename !== "index.html" && isEditorVisibleProjectFile(f.filename))
+        .map(f => ({ filename: f.filename, code: optimisticFiles[f.filename] || f.code })),
+    ];
+    const known = new Set(fromServer.map(f => f.filename));
+    for (const [fn, code] of Object.entries(optimisticFiles)) {
+      if (!known.has(fn) && isEditorVisibleProjectFile(fn)) fromServer.push({ filename: fn, code });
+    }
+    return fromServer;
+  })();
+
+  const activeFileCode = (() => {
+    if (optimisticFiles[activeFile]) return optimisticFiles[activeFile];
+    if (streamedFile === activeFile && streamedCode) return streamedCode;
+    if (activeFile === "index.html") return streamedCode || project?.generatedCode || "";
+    return projectFiles.find(f => f.filename === activeFile)?.code || "";
+  })();
+
+  const currentCode = activeFileCode;
+
+  useEffect(() => {
+    if (!isMobile) return;
+    setPreviewDevice("mobile");
+    setSidebarOpen(mobileView === "chat");
+  }, [isMobile, mobileView]);
+
+  useEffect(() => {
+    if (isMobile && isGenerating) {
+      setMobileView("chat");
+      setSidebarOpen(true);
+    }
+  }, [isGenerating, isMobile]);
+
+  useEffect(() => {
+    if (isInternalAgentFile(activeFile)) {
+      setActiveFile("index.html");
+      return;
+    }
+    if (
+      activeFile !== "index.html" &&
+      !projectFiles.some((f) => f.filename === activeFile && isEditorVisibleProjectFile(f.filename))
+    ) {
+      setActiveFile("index.html");
+    }
+  }, [activeFile, projectFiles]);
+
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const initialPrompt = urlParams.get("prompt");
+    const enhanced = urlParams.get("enhanced") === "1";
+    const initialResearch = urlParams.get("research") || "";
+    const initialMultiPages = urlParams.get("multipages") || "";
+    const initialSeoH1 = urlParams.get("seoh1") || "";
+    const initialSeoH2s = urlParams.get("seoh2s") || "";
+    const initialLeadForm = urlParams.get("leadform") !== "0";
+    const initialInteractive = urlParams.get("interactive") === "1";
+    const initialInteractiveStyle = urlParams.get("istyle") || "parallax";
+    const initialProductImageUrl = urlParams.get("iproductUrl") || "";
+    interactiveCreateRef.current = {
+      interactive: initialInteractive,
+      style: initialInteractiveStyle,
+      productUrl: initialProductImageUrl,
+    };
+    const isMockup = urlParams.get("mockup") === "1";
+    const mockupUrlsParam = urlParams.get("mockupUrls") || urlParams.get("mockupUrl") || "";
+    const mockupUrlList = mockupUrlsParam.split(",").map(s => s.trim()).filter(Boolean);
+    if (initialPrompt && !project?.generatedCode && messages.length === 0) {
+      const initMockup = async () => {
+        let mockupImages: Array<{base64: string, mimeType: string, preview: string | null, fileName: string, url?: string}> | undefined;
+        if (isMockup && mockupUrlList.length > 0) {
+          // Keep persistent URLs instead of downloading them back in the browser.
+          // Object storage may not allow CORS reads even though the image itself is
+          // valid; the server-side vision pipeline can consume these URLs directly.
+          mockupImages = mockupUrlList.map((url, i) => ({
+            base64: "",
+            mimeType: "image/jpeg",
+            preview: url,
+            url,
+            fileName: `reference_${i + 1}.jpg`,
+          }));
+          setMockupMode(true);
+        }
+        setPrompt(initialPrompt);
+        if (!isMockup || mockupImages) {
+          firstCreateKickRef.current = true;
+          // Professional (mockup or agent=v1 from dashboard) → Claude V1; else Gemini V2.
+          const kickVersion =
+            isMockup || urlParams.get("agent") === "v1" ? "v1" : "v2";
+          firstCreateAgentRef.current = kickVersion;
+          setAgentVersion(kickVersion);
+          try { localStorage.setItem("craft-agent-version", kickVersion); } catch {}
+          setTimeout(() => handleGenerate(initialPrompt, enhanced, initialResearch, initialMultiPages, initialSeoH1, initialSeoH2s, mockupImages, initialLeadForm, initialInteractive, initialInteractiveStyle, initialProductImageUrl || undefined), 500);
+        }
+      };
+      initMockup();
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, [project, messages.length]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  useEffect(() => {
+    if (showCode) setEditableCode(currentCode || "");
+  }, [showCode, currentCode]);
+
+  useEffect(() => {
+    return () => {
+      if (animPollRef.current) clearInterval(animPollRef.current);
+      if (previewBlobUrlRef.current) {
+        URL.revokeObjectURL(previewBlobUrlRef.current);
+        previewBlobUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  const applyBakedPreview = useCallback((rawCode: string, proj?: any) => {
+    if (!rawCode || isCraftGeneratingHtml(rawCode)) return;
+    setStreamedCode(rawCode);
+    setOptimisticFiles((prev) => ({ ...prev, "index.html": rawCode }));
+    if (proj) {
+      queryClient.setQueryData(["/api/projects", projectId], proj);
+    } else {
+      queryClient.setQueryData(["/api/projects", projectId], (old: any) =>
+        old ? { ...old, generatedCode: rawCode } : old,
+      );
+    }
+    // Force iframe remount so the new hero engine (video/frames) actually loads.
+    setPreviewEpoch((n) => n + 1);
+  }, [projectId, queryClient]);
+
+  // Auto-resume when the editor loads and generation (or video) is still running
+  // server-side — covers page refresh / tab close / dropped SSE.
+  useEffect(() => {
+    if (!project) return;
+    const code = project.generatedCode || "";
+    const waitingSite = isCraftGeneratingHtml(code);
+    const waitingAnim = code.includes('data-scroll-anim-pending="1"');
+    if (!waitingSite && !waitingAnim) return;
+    if (animPollRef.current) return; // poll already running (from live generation)
+
+    if (waitingSite) {
+      setIsGenerating(true);
+      setAnimBaking(false);
+      setGenerationStatus("Генерация продолжается на сервере…");
+    } else {
+      // Site ready — show pending HTML; bake video in the background.
+      setIsGenerating(false);
+      setAnimBaking(true);
+      setStreamedCode(code);
+      setGenerationStatus(
+        code.includes('data-animational-pending="1"')
+          ? "Собираем анимационный сайт…"
+          : "Рендерю видеоанимацию…",
+      );
+    }
+
+    const pollStart = Date.now();
+    const POLL_TIMEOUT = 45 * 60 * 1000;
+
+    const finishAll = (rawCode: string, proj?: any) => {
+      if (animPollRef.current) { clearInterval(animPollRef.current); animPollRef.current = null; }
+      setIsGenerating(false);
+      setAnimBaking(false);
+      setGenerationStatus(null);
+      if (rawCode && !isCraftGeneratingHtml(rawCode)) {
+        applyBakedPreview(rawCode, proj);
+      }
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "messages"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+    };
+
+    animPollRef.current = setInterval(async () => {
+      try {
+        const [statusResp, projectResp] = await Promise.all([
+          fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" }),
+          fetch(`/api/projects/${projectId}`, { credentials: "include" }),
+        ]);
+        if (!projectResp.ok) return;
+        const status = statusResp.ok ? await statusResp.json().catch(() => null) : null;
+        const proj = await projectResp.json();
+        const c: string = proj?.generatedCode || "";
+        const stillSite = isCraftGeneratingHtml(c);
+        const stillAnim = c.includes('data-scroll-anim-pending="1"');
+        const timedOut = Date.now() - pollStart > POLL_TIMEOUT;
+
+        // Site HTML ready (even if video still baking) → show it and switch status.
+        if (!stillSite && c && c.length > 80) {
+          if (stillAnim && !timedOut) {
+            setStreamedCode(c);
+            queryClient.setQueryData(["/api/projects", projectId], proj);
+            setIsGenerating(false);
+            setAnimBaking(true);
+            setGenerationStatus(
+              c.includes('data-animational-pending="1"')
+                ? "Собираем анимационный сайт…"
+                : "Рендерю видеоанимацию…",
+            );
+            return;
+          }
+          // Anim finished (or timed out) — embed immediately without full page reload.
+          finishAll(c, proj);
+          return;
+        }
+
+        if (timedOut || status?.orphanPlaceholder || (status?.animReady && !stillSite) || (!status?.active && !stillSite && !stillAnim)) {
+          if (status?.orphanPlaceholder || (timedOut && stillSite)) {
+            if (animPollRef.current) { clearInterval(animPollRef.current); animPollRef.current = null; }
+            setIsGenerating(false);
+            setAnimBaking(false);
+            setGenerationStatus(null);
+            queryClient.setQueryData(["/api/projects", projectId], (old: any) =>
+              old ? { ...old, generatedCode: stillSite ? "" : c } : old,
+            );
+            queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+            queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "messages"] });
+            toast({
+              title: "Генерация прервалась",
+              description: "Сервер перезапустился во время создания сайта. Отправьте запрос ещё раз — токены за незавершённую генерацию можно уточнить в поддержке.",
+              variant: "destructive",
+            });
+            return;
+          }
+          finishAll(c, proj);
+        }
+      } catch {}
+    }, 4000);
+  }, [project, projectId, applyBakedPreview, queryClient]);
+
+  const handleAddPage = useCallback(async () => {
+    let name = newPageName.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+    if (!name) return;
+    if (!name.endsWith(".html")) name += ".html";
+    if (name === "index.html" || allFiles.some(f => f.filename === name)) {
+      toast({ title: "Ошибка", description: "Страница с таким именем уже существует", variant: "destructive" });
+      return;
+    }
+    try {
+      const baseCode = project?.generatedCode || "";
+      const headMatch = baseCode.match(/<head[^>]*>([\s\S]*?)<\/head>/i);
+      const headerMatch = baseCode.match(/<header[^>]*>[\s\S]*?<\/header>/i);
+      const navMatch = baseCode.match(/<nav[^>]*>[\s\S]*?<\/nav>/i);
+      const footerMatch = baseCode.match(/<footer[^>]*>[\s\S]*?<\/footer>/i);
+      const topSection = headerMatch ? headerMatch[0] : (navMatch ? navMatch[0] : "");
+      const headContent = headMatch ? headMatch[1].replace(/<title>[\s\S]*?<\/title>/i, "") : "";
+      const pageName = name.replace(".html", "");
+      const fallbackLabel = pageName.charAt(0).toUpperCase() + pageName.slice(1);
+      const pageLabel = newPageTitle.trim() || fallbackLabel;
+      const template = `<!DOCTYPE html>\n<html lang="ru">\n<head>\n<meta charset="UTF-8">\n<meta name="viewport" content="width=device-width, initial-scale=1.0">\n<title>${pageLabel}</title>\n${headContent}\n</head>\n<body>\n${topSection}\n\n<section style="min-height:80vh;display:flex;align-items:center;justify-content:center;padding:4rem 2rem">\n<div style="text-align:center;max-width:800px">\n<h1>${pageLabel}</h1>\n<p>Содержимое страницы. Опишите в чате, что здесь разместить.</p>\n</div>\n</section>\n\n${footerMatch ? footerMatch[0] : ""}\n</body>\n</html>`;
+      await fetch(`/api/projects/${projectId}/files/${name}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ code: template }),
+      });
+
+      await fetch(`/api/projects/${projectId}/sync-nav`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ pageTitles: { [name]: pageLabel } }),
+      });
+
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+      latestEditHtmlRef.current = null;
+      setSelectedElement(null);
+      setActiveFile(name);
+      setAddPageOpen(false);
+      setNewPageName("");
+      setNewPageTitle("");
+      toast({ title: "Готово", description: `Страница ${pageLabel} создана и добавлена в навигацию` });
+    } catch {
+      toast({ title: "Ошибка", description: "Не удалось создать страницу", variant: "destructive" });
+    }
+  }, [newPageName, newPageTitle, projectId, allFiles, project, toast]);
+
+  const handleGenerate = useCallback(async (customPrompt?: string, skipEnhance?: boolean, deepResearchData?: string, multiPagesData?: string, seoH1Data?: string, seoH2sData?: string, injectedImages?: Array<{base64: string, mimeType: string, preview: string | null, fileName: string, url?: string}>, leadFormEnabled?: boolean, interactiveMode?: boolean, interactiveStyle?: string, interactiveProductImageUrl?: string) => {
+    let text = customPrompt || prompt;
+    const selectionForRequest = selectedElement
+      ? { ...selectedElement, page: activeFile }
+      : null;
+    const effectiveImages = injectedImages || attachedImages;
+    const effectiveVideos = attachedVideos.filter(v => !v.uploading && v.url);
+    const effectiveModels = attachedModels.filter(m => !m.uploading && m.url);
+    const effectiveAudios = attachedAudios.filter(a => !a.uploading && a.url);
+    if (!text.trim() && effectiveImages.length === 0 && effectiveVideos.length === 0 && effectiveModels.length === 0 && effectiveAudios.length === 0) return;
+    if (!injectedImages && (attachedImages.some(i => i.uploading) || attachedVideos.some(v => v.uploading) || attachedModels.some(m => m.uploading) || attachedAudios.some(a => a.uploading))) {
+      toast({ title: "Подождите", description: "Файлы ещё загружаются..." });
+      return;
+    }
+    if (!text.trim()) {
+      text = "Размести прикреплённые медиафайлы на сайте в подходящих по смыслу секциях.";
+    }
+
+    // In-iframe visual edits are persisted asynchronously. Wait for the latest
+    // preview snapshot before the agent reads DB code, otherwise it patches a
+    // stale page that differs from what the user selected.
+    const pendingHtml = latestEditHtmlRef.current;
+    if (pendingHtml) {
+      const saveUrl = activeFile === "index.html"
+        ? `/api/projects/${projectId}/code`
+        : `/api/projects/${projectId}/files/${encodeURIComponent(activeFile)}`;
+      const saveBody = activeFile === "index.html"
+        ? { generatedCode: pendingHtml }
+        : { code: pendingHtml };
+      try {
+        const saveResp = await fetch(saveUrl, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(saveBody),
+          credentials: "include",
+        });
+        if (!saveResp.ok) throw new Error(`save failed (${saveResp.status})`);
+      } catch {
+        toast({
+          title: "Не удалось синхронизировать редактор",
+          description: "Правка не отправлена агенту, чтобы он не изменил устаревшую версию страницы.",
+          variant: "destructive",
+        });
+        return;
+      }
+    }
+
+    if (selectionForRequest) {
+      const elRef = `[Выбранный элемент:\nСтраница: ${selectionForRequest.page}\nDOM-путь: ${selectionForRequest.path}\nЭлемент: <${selectionForRequest.tag}>${selectionForRequest.classes ? ` class="${selectionForRequest.classes}"` : ''}\nТекст: "${selectionForRequest.text.substring(0, 160)}"\nHTML_BEGIN\n${selectionForRequest.outerSnippet}\nHTML_END\n]\n\n`;
+      text = elRef + text;
+      setSelectedElement(null);
+      setSelectorMode(false);
+    }
+
+    setIsGenerating(true);
+    setAnimBaking(false);
+    // Start each generation fresh: drop any stale blob `src` (it would otherwise
+    // override `srcDoc` and freeze the preview) and cancel a leftover anim poll.
+    if (iframeRef.current) iframeRef.current.removeAttribute("src");
+    if (previewBlobUrlRef.current) {
+      URL.revokeObjectURL(previewBlobUrlRef.current);
+      previewBlobUrlRef.current = null;
+    }
+    if (animPollRef.current) { clearInterval(animPollRef.current); animPollRef.current = null; }
+    setStreamingReply("");
+    setStreamedCode("");
+    setPrompt("");
+    // Auto / Edit / Discuss all charge the same agent turn: 100 for new site, 30 otherwise.
+    queryClient.setQueryData(["/api/auth/user"], (old: any) => {
+      if (!old) return old;
+      const cost = project?.generatedCode ? 30 : 100;
+      return { ...old, credits: Math.max(0, old.credits - cost) };
+    });
+
+    const images = effectiveImages
+      .filter(img => !!img.base64 && !img.url)
+      .map(img => ({ base64: img.base64, mimeType: img.mimeType, fileName: img.fileName }));
+    const sentPreviews = effectiveImages.filter(img => img.preview).map(img => ({ preview: img.preview!, fileName: img.fileName }));
+    const imageUrls = effectiveImages.filter(img => img.url).map(img => ({ url: img.url!, fileName: img.fileName }));
+    const videoUrls = effectiveVideos.map(v => ({ url: v.url, fileName: v.fileName }));
+    const modelUrlsToSend = effectiveModels.map(m => ({ url: m.url, fileName: m.fileName }));
+    const audioUrls = effectiveAudios.map(a => ({ url: a.url, fileName: a.fileName }));
+
+    setAttachedImages([]);
+    setAttachedVideos([]);
+    setAttachedModels([]);
+    setAttachedAudios([]);
+
+    const imageInfo = sentPreviews.length > 0 ? `\n__IMAGES__${JSON.stringify(sentPreviews)}` : "";
+    const videoInfo = videoUrls.length > 0 ? `\n__VIDEOS__${JSON.stringify(videoUrls.map(v => ({ fileName: v.fileName })))}` : "";
+    const modelInfo = modelUrlsToSend.length > 0 ? `\n__MODELS__${JSON.stringify(modelUrlsToSend.map(m => ({ fileName: m.fileName })))}` : "";
+    const audioInfo = audioUrls.length > 0 ? `\n__AUDIOS__${JSON.stringify(audioUrls.map(a => ({ fileName: a.fileName })))}` : "";
+    const tempUserMessage: ProjectMessage = {
+      id: Math.random(),
+      projectId,
+      role: "user",
+      content: text + imageInfo + videoInfo + modelInfo + audioInfo,
+      createdAt: new Date()
+    };
+    
+    queryClient.setQueryData(["/api/projects", projectId, "messages"], (old: ProjectMessage[] | undefined) => {
+      const messages = [...(old || []), tempUserMessage];
+      return messages;
+    });
+
+    setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, 100);
+
+    let waitingForAnim = false;
+    let gotFinalCode = false;
+    let errorShown = false;
+    let handledWithoutStream = false;
+    const baselineCode = project?.generatedCode || "";
+    const baselineUpdatedAt = project?.updatedAt ? new Date(project.updatedAt).getTime() : 0;
+    const baselineMsgCount = messages.length;
+    try {
+      const isMockupActive = injectedImages ? true : mockupMode;
+      const hasMockupRefs = images.length > 0 || imageUrls.length > 0;
+      const bodyData: any = { prompt: text, images, activeFile, agentMode, skipEnhance: !!skipEnhance, mockupMode: isMockupActive && hasMockupRefs };
+      if (selectionForRequest) bodyData.selectedElement = selectionForRequest;
+      if (imageUrls.length > 0) {
+        bodyData.imageUrls = imageUrls;
+      }
+      if (videoUrls.length > 0) {
+        bodyData.videoUrls = videoUrls;
+      }
+      if (modelUrlsToSend.length > 0) {
+        bodyData.modelUrls = modelUrlsToSend;
+      }
+      if (audioUrls.length > 0) {
+        bodyData.audioUrls = audioUrls;
+      }
+      if (deepResearchData) {
+        bodyData.deepResearchData = deepResearchData;
+      }
+      if (multiPagesData) {
+        bodyData.multiPagesData = multiPagesData;
+      }
+      if (seoH1Data) {
+        bodyData.seoH1 = seoH1Data;
+        bodyData.seoH2s = seoH2sData || "";
+      }
+      if (leadFormEnabled === false) {
+        bodyData.leadForm = false;
+      }
+      bodyData.agentVersion = agentVersion;
+      // Empty first builds: honor dashboard kick (Professional → v1); mockup → v1;
+      // otherwise keep the UI toggle (do not force v2 over an explicit Professional/v1 choice).
+      const siteEmpty = !project?.generatedCode || isCraftGeneratingHtml(project?.generatedCode || "");
+      const isMockupGen = !!(isMockupActive && hasMockupRefs);
+      if (siteEmpty) {
+        const forced = firstCreateAgentRef.current;
+        if (forced) {
+          bodyData.agentVersion = forced;
+          firstCreateAgentRef.current = null;
+        } else if (isMockupGen || agentVersion === "v1") {
+          bodyData.agentVersion = "v1";
+        } else {
+          bodyData.agentVersion = "v2";
+        }
+      }
+      const interactiveOpts = interactiveCreateRef.current;
+      const useInteractive = interactiveMode || (siteEmpty && interactiveOpts.interactive);
+      if (useInteractive) {
+        bodyData.interactiveMode = true;
+        const style = interactiveStyle || interactiveOpts.style;
+        if (style) bodyData.interactiveStyle = style;
+        const productUrl = interactiveProductImageUrl || interactiveOpts.productUrl;
+        if (productUrl) bodyData.interactiveProductImageUrl = productUrl;
+      }
+      let response = await fetch(`/api/projects/${projectId}/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bodyData),
+        credentials: "include",
+      });
+      if (response.status === 401) {
+        await new Promise((r) => setTimeout(r, 1200));
+        response = await fetch(`/api/projects/${projectId}/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(bodyData),
+          credentials: "include",
+        });
+      }
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => null);
+        if (response.status === 401) {
+          clearClientAuth();
+          toast({
+            title: "Сессия истекла",
+            description: "Войдите снова, чтобы продолжить работу с агентом.",
+            variant: "destructive",
+          });
+          setLocation("/auth");
+          handledWithoutStream = true;
+          return;
+        }
+        if (response.status === 409 && errData?.editInProgress) {
+          toast({
+            title: "Предыдущая генерация ещё выполняется",
+            description: errData?.message || "Дождитесь ответа KIE перед новым запросом.",
+          });
+          handledWithoutStream = true;
+          // Track the in-flight edit until server lock clears, then refresh preview.
+          setGenerationStatus(errData?.message || "Ждём ответ предыдущего запроса…");
+          const pollStart = Date.now();
+          await new Promise<void>((resolve) => {
+            if (animPollRef.current) clearInterval(animPollRef.current);
+            animPollRef.current = setInterval(async () => {
+              try {
+                const [statusResp, projectResp] = await Promise.all([
+                  fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" }),
+                  fetch(`/api/projects/${projectId}`, { credentials: "include" }),
+                ]);
+                const status = statusResp.ok ? await statusResp.json().catch(() => null) : null;
+                const proj = projectResp.ok ? await projectResp.json() : null;
+                const idle = status && status.active === false && !status.generatingPlaceholder;
+                const timedOut = Date.now() - pollStart > 12 * 60 * 1000;
+                if (idle || timedOut) {
+                  clearInterval(animPollRef.current!);
+                  animPollRef.current = null;
+                  if (proj?.generatedCode && !isCraftGeneratingHtml(proj.generatedCode)) {
+                    applyBakedPreview(proj.generatedCode, proj);
+                  }
+                  queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+                  queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "messages"] });
+                  queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+                  resolve();
+                }
+              } catch {}
+            }, 3000);
+          });
+          return;
+        }
+        if (response.status === 409 && errData?.generating) {
+          // Generation already running server-side — poll until the site appears.
+          handledWithoutStream = true;
+          setGenerationStatus("Генерация уже идёт на сервере…");
+          const pollStart = Date.now();
+          const POLL_TIMEOUT = 45 * 60 * 1000;
+          await new Promise<void>((resolve) => {
+            if (animPollRef.current) clearInterval(animPollRef.current);
+            animPollRef.current = setInterval(async () => {
+              try {
+                const resp = await fetch(`/api/projects/${projectId}`, { credentials: "include" });
+                if (!resp.ok) return;
+                const proj = await resp.json();
+                const c: string = proj?.generatedCode || "";
+                if (!isCraftGeneratingHtml(c) || Date.now() - pollStart > POLL_TIMEOUT) {
+                  clearInterval(animPollRef.current!);
+                  animPollRef.current = null;
+                  if (c && !isCraftGeneratingHtml(c)) {
+                    applyBakedPreview(c, proj);
+                    gotFinalCode = true;
+                  }
+                  queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+                  queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "messages"] });
+                  resolve();
+                }
+              } catch {}
+            }, 3000);
+          });
+          return;
+        }
+        const errMsg = errData?.message || "Ошибка генерации";
+        throw new Error(errMsg);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) return;
+
+      const decoder = new TextDecoder();
+      let fullText = "";
+      let sseBuffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        sseBuffer += chunk;
+        const messages = sseBuffer.split("\n\n");
+        sseBuffer = messages.pop() || "";
+
+        for (const msg of messages) {
+          const dataLines = msg.split("\n").filter(l => l.startsWith("data: ")).map(l => l.slice(6));
+          if (dataLines.length === 0) continue;
+          const jsonStr = dataLines.join("\n");
+          let data: any;
+          try { data = JSON.parse(jsonStr); } catch (e) { continue; }
+          if (data.status) {
+            setGenerationStatus(data.status);
+          }
+          if (data.content) {
+            setGenerationStatus(null);
+            fullText += data.content;
+
+            const firstFileMarker = fullText.indexOf("--- FILE:");
+            const htmlBlockStart = fullText.indexOf("```html\n");
+            const targetFn = activeFile || "index.html";
+            const escapedFn = targetFn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+            if (firstFileMarker > 0 && (htmlBlockStart === -1 || firstFileMarker < htmlBlockStart)) {
+              const textBefore = fullText.substring(0, firstFileMarker).trim();
+              if (textBefore) setStreamingReply(textBefore);
+            } else if (htmlBlockStart > 0) {
+              const textBefore = fullText.substring(0, htmlBlockStart).trim();
+              if (textBefore) setStreamingReply(textBefore);
+            }
+
+            const fileCompleteRe = new RegExp(`---\\s*FILE:\\s*${escapedFn}\\s*---\\s*\\n?\\s*\`\`\`html\\s*\\n?([\\s\\S]*?)\`\`\``, 'i');
+            const filePartialRe = new RegExp(`---\\s*FILE:\\s*${escapedFn}\\s*---\\s*\\n?\\s*\`\`\`html\\s*\\n?([\\s\\S]*)`, 'i');
+            const fileCompleteMatch = fullText.match(fileCompleteRe);
+            if (fileCompleteMatch) {
+              setStreamedCode(fileCompleteMatch[1].trim());
+            } else if (firstFileMarker !== -1) {
+              const filePartialMatch = fullText.match(filePartialRe);
+              if (filePartialMatch) {
+                const partialCode = filePartialMatch[1].trim();
+                if (partialCode) setStreamedCode(partialCode);
+              }
+            } else {
+              const htmlMatchComplete = fullText.match(/```html\n?([\s\S]*?)```/);
+              if (htmlMatchComplete) {
+                setStreamedCode(htmlMatchComplete[1].trim());
+              } else if (htmlBlockStart !== -1) {
+                const codeAfterMarker = fullText.substring(htmlBlockStart + 8);
+                if (codeAfterMarker.trim()) {
+                  setStreamedCode(codeAfterMarker);
+                }
+              } else if (fullText.trimStart().startsWith("<!DOCTYPE") || fullText.trimStart().startsWith("<html")) {
+                setStreamedCode(fullText.trim());
+              }
+            }
+          }
+          if (data.done) {
+            setGenerationStatus(null);
+            if (data.chatOnly) {
+              gotFinalCode = true;
+              setStreamingReply(data.reply || fullText);
+              if (data.newBalance !== undefined) {
+                queryClient.setQueryData(["/api/auth/user"], (old: any) => old ? { ...old, credits: data.newBalance } : old);
+              }
+              if (data.creditBreakdown || data.creditsUsed) {
+                const total = data.creditBreakdown?.total ?? data.creditsUsed;
+                toast({
+                  title: `Списано ${total} ток.`,
+                  description: "чат с агентом",
+                });
+              }
+              queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "messages"] });
+              continue;
+            }
+            // Never flip the user's V1/V2 toggle after an edit. Only lock V2 for
+            // the first empty-site create kicked from the dashboard URL.
+            if (firstCreateKickRef.current) {
+              firstCreateKickRef.current = false;
+              setAgentVersion("v2");
+              try { localStorage.setItem("craft-agent-version", "v2"); } catch {}
+            }
+            const editedList: string[] = Array.isArray(data.editedFiles) ? data.editedFiles : [];
+            const targetFile = data.editedFile || (editedList.includes(activeFile) ? activeFile : editedList[0]) || activeFile || "index.html";
+            let targetCode = targetFile === "index.html" ? data.code : (data.editedCode || data.code);
+            // Server may omit multi‑MB HTML from SSE (fetchCode) to avoid OOM —
+            // reload from API instead of crashing the Node process.
+            if (data.fetchCode || data.payloadTooLarge || !targetCode) {
+              try {
+                const [projRes, filesRes] = await Promise.all([
+                  apiRequest("GET", `/api/projects/${projectId}`),
+                  apiRequest("GET", `/api/projects/${projectId}/files`),
+                ]);
+                const proj = await projRes.json();
+                const files = await filesRes.json();
+                if (Array.isArray(files)) {
+                  const match = files.find((f: any) => f?.filename === targetFile);
+                  if (match?.code) targetCode = match.code;
+                  else if (targetFile === "index.html" && proj?.generatedCode) targetCode = proj.generatedCode;
+                  setOptimisticFiles((prev) => {
+                    const next = { ...prev };
+                    for (const f of files) {
+                      if (f?.filename && typeof f.code === "string") next[f.filename] = f.code;
+                    }
+                    if (proj?.generatedCode) next["index.html"] = proj.generatedCode;
+                    return next;
+                  });
+                } else if (proj?.generatedCode) {
+                  targetCode = proj.generatedCode;
+                }
+                if (!data.code && proj?.generatedCode) data.code = proj.generatedCode;
+              } catch (fetchErr) {
+                console.warn("[editor] fetchCode reload failed:", fetchErr);
+              }
+            }
+            if (targetCode) {
+              setStreamedCode(targetCode);
+              setStreamedFile(targetFile);
+              gotFinalCode = true;
+            }
+            setOptimisticFiles(prev => {
+              const next = { ...prev };
+              if (data.code) next["index.html"] = data.code;
+              if (targetFile !== "index.html" && targetCode) next[targetFile] = targetCode;
+              if (Array.isArray(data.files)) {
+                for (const f of data.files) {
+                  if (f?.filename && typeof f.code === "string") next[f.filename] = f.code;
+                }
+              }
+              return next;
+            });
+            latestEditHtmlRef.current = null;
+            setSelectedElement(null);
+            setActiveFile(targetFile);
+            queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+            queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "images"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/generations"] });
+            if (data.newBalance !== undefined) {
+              queryClient.setQueryData(["/api/auth/user"], (old: any) => old ? { ...old, credits: data.newBalance } : old);
+            }
+            if (data.creditBreakdown || data.creditsUsed) {
+              const b = data.creditBreakdown;
+              const parts: string[] = [];
+              if (b?.generate) parts.push(`генерация ${b.generate}`);
+              if (b?.images) parts.push(`изображения ${b.imagesCount || "?"}×15=${b.images}`);
+              if (b?.videoPending) parts.push(`видео −120 при успехе`);
+              const total = b?.total ?? data.creditsUsed;
+              toast({
+                title: `Списано ${total} ток.`,
+                description: parts.length ? parts.join(" · ") : undefined,
+              });
+            }
+            // Animation is still rendering in the background — show the site with
+            // pending hero and poll until the baked scrollanim embeds itself.
+            if (data.animPending && (targetCode || "").includes('data-scroll-anim-pending="1"')) {
+              waitingForAnim = true;
+              setIsGenerating(false);
+              setAnimBaking(true);
+              setGenerationStatus("Создаём видеоанимацию... (2–10 мин)");
+              if (animPollRef.current) clearInterval(animPollRef.current);
+              const pollStart = Date.now();
+              const POLL_INTERVAL = 4000;
+              const POLL_TIMEOUT = 45 * 60 * 1000; // match Kling queue (up to ~35 min)
+              const finishAnim = (rawCode: string, proj?: any, timedOut = false) => {
+                clearInterval(animPollRef.current!);
+                animPollRef.current = null;
+                setGenerationStatus(null);
+                setAnimBaking(false);
+                setIsGenerating(false);
+                if (timedOut && (rawCode || "").includes('data-scroll-anim-pending="1"')) {
+                  toast({
+                    title: "Видео ещё рендерится",
+                    description: "Hero появится автоматически — подождите ещё немного.",
+                  });
+                }
+                if (rawCode) applyBakedPreview(rawCode, proj);
+                queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+              };
+              animPollRef.current = setInterval(async () => {
+                if (Date.now() - pollStart > POLL_TIMEOUT) {
+                  try {
+                    const resp = await fetch(`/api/projects/${projectId}`, { credentials: "include" });
+                    const proj = resp.ok ? await resp.json() : null;
+                    finishAnim(proj?.generatedCode || "", proj, true);
+                  } catch { finishAnim("", undefined, true); }
+                  return;
+                }
+                try {
+                  const [statusResp, resp] = await Promise.all([
+                    fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" }),
+                    fetch(`/api/projects/${projectId}`, { credentials: "include" }),
+                  ]);
+                  if (!resp.ok) return;
+                  const status = statusResp.ok ? await statusResp.json().catch(() => null) : null;
+                  const proj = await resp.json();
+                  const code: string = proj?.generatedCode || "";
+                  const pending = code.includes('data-scroll-anim-pending="1"');
+                  const hasHero = code.includes("data-craft-scrollanim") || code.includes('data-scroll-anim-fallback="1"');
+                  if (code && ((!pending && hasHero) || status?.animReady)) {
+                    finishAnim(code, proj);
+                    toast({ title: "✅ Сайт готов!", description: "Видеоанимация встроена." });
+                  }
+                } catch {}
+              }, POLL_INTERVAL);
+            }
+          }
+          if (data.error) {
+            errorShown = true;
+            if (data.newBalance !== undefined) {
+              queryClient.setQueryData(["/api/auth/user"], (old: any) => old ? { ...old, credits: data.newBalance } : old);
+            }
+            toast({
+              title: data.refunded ? "Ошибка · токены возвращены" : "Ошибка генерации",
+              description: data.error,
+              variant: "destructive",
+            });
+          }
+        }
+      }
+
+      setAttachedImages([]);
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "messages"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "versions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+    } catch (err: any) {
+      const msg = String(err?.message || "");
+      const isNetwork = /network|fetch|abort|failed to fetch|load failed|connection|premature/i.test(msg);
+      if (isNetwork && !gotFinalCode) {
+        try {
+          const [statusResp, projectResp] = await Promise.all([
+            fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" }),
+            fetch(`/api/projects/${projectId}`, { credentials: "include" }),
+          ]);
+          const status = statusResp.ok ? await statusResp.json() : null;
+          const latestProject = projectResp.ok ? await projectResp.json() : null;
+          const latestCode = String(latestProject?.generatedCode || "");
+          const latestUpdatedAt = latestProject?.updatedAt ? new Date(latestProject.updatedAt).getTime() : 0;
+          if (
+            latestCode &&
+            (latestCode !== baselineCode || latestUpdatedAt > baselineUpdatedAt)
+          ) {
+            setStreamedCode(latestCode);
+            gotFinalCode = true;
+            queryClient.setQueryData(["/api/projects", projectId], latestProject);
+          } else if (!status?.active) {
+            errorShown = true;
+            queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
+            toast({
+              title: "Запрос не дошёл до сервера",
+              description: "Соединение прервалось до запуска KIE. Повторите запрос — списания не будет.",
+              variant: "destructive",
+            });
+          }
+          // status.active=true: finally starts server-aware polling below.
+        } catch {
+          errorShown = true;
+          queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
+          toast({
+            title: "Нет соединения с сервером",
+            description: "Проверьте интернет и повторите запрос.",
+            variant: "destructive",
+          });
+        }
+      } else {
+        errorShown = true;
+        toast({ title: "Ошибка", description: err.message, variant: "destructive" });
+      }
+    } finally {
+      // Keep the loading screen up while the video animation is still rendering —
+      // the poll loop will flip this off once the full site is ready.
+      if (!waitingForAnim) setIsGenerating(false);
+      // Only poll after a dropped mid-stream SSE — not after 401/409 early exits.
+      if (!gotFinalCode && !waitingForAnim && !errorShown && !handledWithoutStream) {
+        setGenerationStatus("Соединение прервалось — дожидаемся ответ на сервере…");
+        setIsGenerating(true);
+        const pollStart = Date.now();
+        const POLL_TIMEOUT = 12 * 60 * 1000;
+        if (animPollRef.current) clearInterval(animPollRef.current);
+        animPollRef.current = setInterval(async () => {
+          try {
+            const [statusResp, projectResp] = await Promise.all([
+              fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" }),
+              fetch(`/api/projects/${projectId}`, { credentials: "include" }),
+            ]);
+            if (!projectResp.ok) return;
+            const status = statusResp.ok ? await statusResp.json() : null;
+            const proj = await projectResp.json();
+            const c: string = proj?.generatedCode || "";
+            const stillGenerating = isCraftGeneratingHtml(c);
+            const stillAnim = c.includes('data-scroll-anim-pending="1"');
+            const latestUpdatedAt = proj?.updatedAt ? new Date(proj.updatedAt).getTime() : 0;
+            const changedOnServer = c !== baselineCode || latestUpdatedAt > baselineUpdatedAt;
+            const messagesGrew = typeof status?.messageCount === "number" && status.messageCount > baselineMsgCount;
+            const timedOut = Date.now() - pollStart > POLL_TIMEOUT;
+            const serverIdle = status && status.active === false && !stillGenerating;
+
+            if (
+              timedOut ||
+              (serverIdle && (changedOnServer || messagesGrew || !stillGenerating)) ||
+              (!status?.active && changedOnServer && !stillGenerating && c && c.length > 80)
+            ) {
+              clearInterval(animPollRef.current!);
+              animPollRef.current = null;
+              setIsGenerating(false);
+              setGenerationStatus(null);
+              if (c && !isCraftGeneratingHtml(c)) {
+                applyBakedPreview(c, proj);
+              } else if (timedOut && (!c || isCraftGeneratingHtml(c))) {
+                toast({
+                  title: "Генерация не завершилась",
+                  description: "Попробуйте сгенерировать ещё раз.",
+                  variant: "destructive",
+                });
+              }
+              queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+              queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "messages"] });
+              queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+              if (stillAnim && c && !isCraftGeneratingHtml(c)) {
+                setAnimBaking(true);
+                setGenerationStatus("Рендерю видеоанимацию…");
+              }
+            }
+          } catch {}
+        }, 3000);
+      } else if (!gotFinalCode && !waitingForAnim && errorShown) {
+        setStreamedCode("");
+        setStreamingReply("");
+        setGenerationStatus(null);
+      }
+    }
+  }, [prompt, agentMode, projectId, project?.generatedCode, attachedImages, attachedVideos, attachedModels, attachedAudios, mockupMode, activeFile, toast, selectedElement, setLocation, applyBakedPreview, agentVersion, messages.length]);
+
+  const handleDownloadZip = async () => {
+    const indexCode = project?.generatedCode || currentCode;
+    if (!indexCode) return;
+    toast({ title: "Подготовка архива...", description: "Скачиваем изображения" });
+
+    const zip = new JSZip();
+    const imgFolder = zip.folder("images");
+    let htmlCode = indexCode;
+
+    const allImageUrls = new Map<string, string>();
+
+    const downloadImage = async (imageUrl: string): Promise<Blob | null> => {
+      try {
+        const resp = await fetch(`/api/proxy-image?url=${encodeURIComponent(imageUrl)}`);
+        if (!resp.ok) throw new Error("proxy failed");
+        return await resp.blob();
+      } catch {
+        try {
+          const resp = await fetch(imageUrl);
+          return await resp.blob();
+        } catch {
+          return null;
+        }
+      }
+    };
+
+    if (projectImages.length > 0 && imgFolder) {
+      for (const img of projectImages) {
+        const ext = img.url.match(/\.(png|jpg|jpeg|webp|gif|svg)(\?|$)/i)?.[1] || "png";
+        const fileName = `${img.name.replace(/[^a-zA-Zа-яА-Я0-9_-]/g, "_")}.${ext}`;
+        const blob = await downloadImage(img.url);
+        if (blob) {
+          imgFolder.file(fileName, blob);
+          allImageUrls.set(img.url, `images/${fileName}`);
+        }
+      }
+    }
+
+    const allCodeToScan = [htmlCode, ...projectFiles.filter(f => f.filename !== "index.html").map(f => f.code)].join("\n");
+
+    const uploadRegex = /(?:src\s*=\s*["']|href\s*=\s*["']|poster\s*=\s*["']|url\s*\(\s*["']?)(\/(?:objects|uploads)\/[^"'\s)]+)/gi;
+    let uploadMatch;
+    const uploadUrls = new Set<string>();
+    while ((uploadMatch = uploadRegex.exec(allCodeToScan)) !== null) {
+      const url = uploadMatch[1];
+      if (!allImageUrls.has(url)) uploadUrls.add(url);
+    }
+    // Also catch bare /objects/ and /uploads/ asset URLs that aren't inside a
+    // src/href/poster attribute — e.g. the ~90 scroll-animation frame URLs that
+    // live inside the data-frames='[...JSON...]' attribute. Without this they
+    // never get bundled and the exported animation breaks.
+    const bareUploadRegex = /\/(?:objects|uploads)\/[A-Za-z0-9._/-]+\.(?:png|jpg|jpeg|webp|gif|svg|mp4|webm|mov|ogg|ogv|mp3|wav|m4a|aac|glb|gltf)/gi;
+    let bareMatch;
+    while ((bareMatch = bareUploadRegex.exec(allCodeToScan)) !== null) {
+      const url = bareMatch[0];
+      if (!allImageUrls.has(url)) uploadUrls.add(url);
+    }
+    if (uploadUrls.size > 0 && imgFolder) {
+      let upIdx = 0;
+      for (const url of Array.from(uploadUrls)) {
+        const ext = url.match(/\.(png|jpg|jpeg|webp|gif|svg|mp4|webm|mov|ogg|ogv|mp3|wav|m4a|aac|glb|gltf)(\?|$)/i)?.[1] || "bin";
+        const fileName = `upload_${upIdx++}.${ext}`;
+        const blob = await downloadImage(url);
+        if (blob) {
+          imgFolder.file(fileName, blob);
+          allImageUrls.set(url, `images/${fileName}`);
+        }
+      }
+    }
+
+    const externalImgRegex = /(?:src\s*=\s*["']|url\s*\(\s*["']?)(https?:\/\/[^"'\s)]+(?:\.(?:png|jpg|jpeg|webp|gif|svg)|\/[^"'\s)]*))(?:\?[^"'\s)]*)?/gi;
+    let match;
+    const externalUrls = new Set<string>();
+    while ((match = externalImgRegex.exec(allCodeToScan)) !== null) {
+      const url = match[1];
+      if (!allImageUrls.has(url) && !url.includes("placehold.co")) {
+        externalUrls.add(url);
+      }
+    }
+
+    if (externalUrls.size > 0 && imgFolder) {
+      let idx = 0;
+      for (const url of Array.from(externalUrls)) {
+        const ext = url.match(/\.(png|jpg|jpeg|webp|gif|svg)(\?|$)/i)?.[1] || "png";
+        const fileName = `image_${idx++}.${ext}`;
+        const blob = await downloadImage(url);
+        if (blob) {
+          imgFolder.file(fileName, blob);
+          allImageUrls.set(url, `images/${fileName}`);
+        }
+      }
+    }
+
+    for (const [remoteUrl, localPath] of Array.from(allImageUrls.entries())) {
+      htmlCode = htmlCode.split(remoteUrl).join(localPath);
+    }
+
+    // Download 3D models (.glb/.gltf) referenced in any src attribute
+    const modelsFolder = zip.folder("models");
+    const allCodeForModels = [htmlCode, ...projectFiles.filter(f => f.filename !== "index.html").map(f => f.code)].join("\n");
+    const modelSrcRegex = /src\s*=\s*["']([^"']*\.(?:glb|gltf))["']/gi;
+    const foundModelUrls = new Set<string>();
+    let mModelMatch: RegExpExecArray | null;
+    while ((mModelMatch = modelSrcRegex.exec(allCodeForModels)) !== null) {
+      foundModelUrls.add(mModelMatch[1]);
+    }
+    const allModelUrls = new Map<string, string>();
+    if (foundModelUrls.size > 0 && modelsFolder) {
+      let modelIdx = 0;
+      for (const modelUrl of Array.from(foundModelUrls)) {
+        try {
+          const ext = modelUrl.endsWith(".gltf") ? "gltf" : "glb";
+          const fileName = `model_${modelIdx++}.${ext}`;
+          const resp = await fetch(modelUrl);
+          if (resp.ok) {
+            const buf = await resp.arrayBuffer();
+            modelsFolder.file(fileName, buf);
+            allModelUrls.set(modelUrl, `models/${fileName}`);
+          }
+        } catch {}
+      }
+    }
+    for (const [remoteUrl, localPath] of Array.from(allModelUrls.entries())) {
+      htmlCode = htmlCode.split(remoteUrl).join(localPath);
+    }
+
+    const dataUriRegex = /(?:src\s*=\s*["'])(data:image\/(png|jpeg|jpg|gif|webp|svg\+xml);base64,([^"']+))["']/gi;
+    let dataMatch;
+    let dataIdx = 0;
+    while ((dataMatch = dataUriRegex.exec(htmlCode)) !== null) {
+      const fullDataUri = dataMatch[1];
+      const ext = dataMatch[2].replace('+xml', '').replace('jpeg', 'jpg');
+      const b64 = dataMatch[3];
+      const fileName = `uploaded_${dataIdx++}.${ext}`;
+      try {
+        const byteChars = atob(b64);
+        const byteArr = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
+        imgFolder?.file(fileName, byteArr);
+        htmlCode = htmlCode.split(fullDataUri).join(`images/${fileName}`);
+      } catch {}
+    }
+
+    const leadExportScript = `<script>
+(function(){
+  var API='${window.location.origin}/api/leads/${projectId}';
+  function showToast(msg){
+    var t=document.createElement('div');
+    t.textContent=msg;
+    t.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#10b981;color:#fff;padding:12px 24px;border-radius:12px;font-weight:600;font-size:14px;z-index:99999;box-shadow:0 8px 32px rgba(0,0,0,0.3);transition:opacity 0.5s';
+    document.body.appendChild(t);
+    setTimeout(function(){t.style.opacity='0';setTimeout(function(){t.remove()},500)},3000);
+  }
+  document.addEventListener('submit',function(e){
+    var form=e.target;
+    if(!form||form.tagName!=='FORM') return;
+    e.preventDefault();
+    var fd=new FormData(form);
+    var data={name:'',email:'',phone:'',message:'',source:form.dataset.leadForm||'form'};
+    fd.forEach(function(v,k){
+      var kl=k.toLowerCase();
+      if(kl.indexOf('name')>-1||kl.indexOf('имя')>-1||kl.indexOf('фио')>-1) data.name=v;
+      else if(kl.indexOf('email')>-1||kl.indexOf('почт')>-1||kl.indexOf('mail')>-1) data.email=v;
+      else if(kl.indexOf('phone')>-1||kl.indexOf('тел')>-1) data.phone=v;
+      else if(kl.indexOf('message')>-1||kl.indexOf('сооб')>-1||kl.indexOf('коммент')>-1||kl.indexOf('пожелан')>-1||kl.indexOf('текст')>-1) data.message=v;
+      else if(!data.message) data.message=v;
+    });
+    if(!data.name&&!data.email&&!data.phone&&!data.message) return;
+    fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
+    .then(function(r){if(r.ok){showToast('Заявка отправлена!');form.reset();}})
+    .catch(function(){});
+  },true);
+})();
+</script>`;
+    htmlCode = htmlCode.includes('</body>')
+      ? htmlCode.replace('</body>', leadExportScript + '\n</body>')
+      : (htmlCode.includes('</html>') ? htmlCode.replace('</html>', leadExportScript + '\n</html>') : htmlCode + '\n' + leadExportScript);
+
+    zip.file("index.html", htmlCode);
+
+    for (const pf of projectFiles) {
+      if (!isEditorVisibleProjectFile(pf.filename)) continue;
+      {
+        let pfCode = pf.code;
+        Array.from(allImageUrls.entries()).forEach(([remoteUrl, localPath]) => {
+          pfCode = pfCode.split(remoteUrl).join(localPath);
+        });
+        Array.from(allModelUrls.entries()).forEach(([remoteUrl, localPath]) => {
+          pfCode = pfCode.split(remoteUrl).join(localPath);
+        });
+        pfCode = pfCode.includes('</body>')
+          ? pfCode.replace('</body>', leadExportScript + '\n</body>')
+          : (pfCode.includes('</html>') ? pfCode.replace('</html>', leadExportScript + '\n</html>') : pfCode + '\n' + leadExportScript);
+        zip.file(pf.filename, pfCode);
+      }
+    }
+
+    const blob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${project?.title || "site"}.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast({ title: "Архив готов!", description: `${allImageUrls.size + allModelUrls.size} файлов включено` });
+  };
+
+  // Detect broken / missing interactive hero so user can re-bake video into object storage
+  const codeForAnimCheck = streamedCode || project?.generatedCode || "";
+  const hasAnimFallback = codeForAnimCheck.includes('data-scroll-anim-fallback="1"');
+  const needsAnimRegen =
+    hasAnimFallback ||
+    !!project?.interactiveHero?.mediaBroken ||
+    !!project?.interactiveHero?.hollow ||
+    !!project?.interactiveHero?.fallback;
+
+  const handleRegenAnim = async () => {
+    if (!project) return;
+    setIsRegenAnim(true);
+    try {
+      const resp = await fetch(`/api/projects/${project.id}/regen-animation`, {
+        method: "POST",
+        credentials: "include",
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.message || "Ошибка запроса");
+      if (data.animPending) {
+        // Reload the project HTML (now has pending spinner) and start polling
+        const projResp = await fetch(`/api/projects/${project.id}`, { credentials: "include" });
+        const proj = await projResp.json();
+        if (proj.generatedCode) {
+          setStreamedCode(proj.generatedCode);
+          setPreviewEpoch((n) => n + 1);
+        }
+        setIsGenerating(false);
+        setAnimBaking(true);
+        setGenerationStatus("Создаём видеоанимацию... (2–10 мин)");
+        if (animPollRef.current) clearInterval(animPollRef.current);
+        const pollStart = Date.now();
+        animPollRef.current = setInterval(async () => {
+          try {
+            const r = await fetch(`/api/projects/${project.id}`, { credentials: "include" });
+            const p = await r.json();
+            const c: string = p?.generatedCode || "";
+            const isStillPending = c.includes('data-scroll-anim-pending="1"');
+            const timedOut = Date.now() - pollStart > 25 * 60 * 1000;
+            if (!isStillPending || timedOut) {
+              clearInterval(animPollRef.current!);
+              animPollRef.current = null;
+              setGenerationStatus(null);
+              setAnimBaking(false);
+              applyBakedPreview(c, p);
+              queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+            }
+          } catch {}
+        }, 4000);
+      }
+    } catch (e: any) {
+      toast({ title: "Ошибка", description: e?.message || "Не удалось запустить генерацию анимации", variant: "destructive" });
+    } finally {
+      setIsRegenAnim(false);
+    }
+  };
+
+  const handlePublish = async () => {
+    if (!project) return;
+    setIsPublishing(true);
+    setPublishError(null);
+    setPublishResult(null);
+    try {
+      let res = await fetch(`/api/projects/${project.id}/publish`, { method: "POST", credentials: "include" });
+      // One retry on 401 — brief Amvera restarts can race a still-valid cookie.
+      if (res.status === 401) {
+        await new Promise((r) => setTimeout(r, 1200));
+        res = await fetch(`/api/projects/${project.id}/publish`, { method: "POST", credentials: "include" });
+      }
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401) {
+        clearClientAuth();
+        setPublishError("Сессия истекла — войдите снова, затем повторите публикацию.");
+        setTimeout(() => setLocation("/auth"), 800);
+        return;
+      }
+      if (!res.ok) throw new Error(data.message || "Ошибка публикации");
+      setPublishResult(data.url);
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+    } catch (e: any) {
+      setPublishError(e.message);
+    } finally {
+      setIsPublishing(false);
+    }
+  };
+
+  const handleCopyUrl = (url: string) => {
+    navigator.clipboard.writeText(url);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleAddDomain = async () => {
+    if (!project || !customDomain.trim()) return;
+    setDomainAdding(true);
+    setDomainError(null);
+    setDomainResult(null);
+    setDomainVerified(null);
+    try {
+      const res = await fetch(`/api/projects/${project.id}/domain`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ domain: customDomain.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Ошибка привязки домена");
+      setDomainResult({ added: true, instructions: true });
+      setDomainVerified(data.verified || false);
+      if (data.aRecordIp) setDomainIp(data.aRecordIp);
+    } catch (e: any) {
+      setDomainError(e.message);
+    } finally {
+      setDomainAdding(false);
+    }
+  };
+
+  const handleFaviconUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !project) return;
+    setFaviconRawMime(file.type || "image/png");
+    const reader = new FileReader();
+    reader.onload = () => {
+      setFaviconRawSrc(reader.result as string);
+      setCropBox({ x: 0, y: 0, size: 200 });
+      setFaviconCropOpen(true);
+    };
+    reader.readAsDataURL(file);
+    if (faviconInputRef.current) faviconInputRef.current.value = "";
+  };
+
+  const applyFaviconCrop = async () => {
+    if (!project || !cropImgRef.current || !cropContainerRef.current) return;
+    const img = cropImgRef.current;
+    const containerRect = cropContainerRef.current.getBoundingClientRect();
+    const scaleX = img.naturalWidth / containerRect.width;
+    const scaleY = img.naturalHeight / containerRect.height;
+    const savedCropBox = { ...cropBox };
+    setFaviconCropOpen(false);
+    setFaviconUploading(true);
+    try {
+      const sx = savedCropBox.x * scaleX;
+      const sy = savedCropBox.y * scaleY;
+      const sw = savedCropBox.size * scaleX;
+      const sh = savedCropBox.size * scaleY;
+      const canvas = document.createElement("canvas");
+      canvas.width = 128;
+      canvas.height = 128;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, 128, 128);
+      const dataUrl = canvas.toDataURL("image/png", 0.9);
+      const res = await fetch(`/api/projects/${project.id}/favicon`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ dataUrl, mimeType: "image/png" }),
+      });
+      if (res.ok) {
+        await queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+        const fresh = await fetch(`/api/projects/${project.id}`, { credentials: "include" });
+        if (fresh.ok) {
+          const p = await fresh.json();
+          if (iframeRef.current && p.generatedCode) {
+            const blob = new Blob([p.generatedCode], { type: "text/html" });
+            iframeRef.current.src = URL.createObjectURL(blob);
+          }
+        }
+      }
+    } catch {}
+    setFaviconUploading(false);
+  };
+
+  const runLegalAudit = async () => {
+    if (!project) return;
+    setAuditOpen(true);
+    setAuditRunning(true);
+    setAuditChecks(null);
+    setAuditError(null);
+    try {
+      const res = await fetch(`/api/projects/${project.id}/legal-audit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Ошибка аудита");
+      setAuditChecks(data.checks);
+      setAuditHasIssues(data.hasIssues);
+    } catch (e: any) {
+      setAuditError(e.message || "Не удалось выполнить аудит");
+    } finally {
+      setAuditRunning(false);
+    }
+  };
+
+  const applyLegalFixes = () => {
+    if (!auditChecks) return;
+    const missing = auditChecks.filter(c => c.status !== "ok");
+    const fixLines = missing.map(c => {
+      if (c.id === "cookie_consent") return "— Добавь фиксированный баннер согласия с куки внизу страницы с кнопкой «Принять» (при клике скрывается через localStorage)";
+      if (c.id === "privacy_policy") return "— Добавь в футер ссылку «Политика конфиденциальности» и создай отдельный модальный блок или раздел на странице с полным текстом политики (реквизиты оператора, цели обработки, срок хранения, права субъектов ПД)";
+      if (c.id === "form_consent") return "— В каждую форму сбора данных добавь чекбокс с текстом «Я соглашаюсь с <a href=\"#privacy\">политикой обработки персональных данных</a>» (обязательный для submit)";
+      if (c.id === "public_offer") return "— Добавь в футер ссылку «Публичная оферта» и создай раздел/модал с текстом оферты: предмет, цена, оплата, доставка, возврат, ответственность, срок действия";
+      if (c.id === "payment_terms") return "— Добавь явный раздел с условиями оплаты, доставки и возврата (или включи эти условия в оферту)";
+      if (c.id === "legal_contacts") {
+        const details = auditOrgDetails.trim();
+        return details
+          ? `— В футер добавь реквизиты организации. Используй ТОЧНО следующие данные: ${details}`
+          : "— В футер добавь реквизиты: название организации / ИП, ИНН, ОГРН/ОГРНИП, юридический адрес, телефон, email";
+      }
+      return "";
+    }).filter(Boolean);
+    const fixPrompt = `Выполни юридический аудит-фикс сайта. Добавь следующие обязательные элементы:\n\n${fixLines.join("\n")}\n\nВсе добавления должны органично вписаться в дизайн сайта. Куки-баннер — стильный, с кнопкой «Принять». Политика и оферта — в модальных окнах по клику на ссылки в футере. Реквизиты в футере — в отдельном блоке. Не нарушай существующий дизайн.`;
+    setAuditOpen(false);
+    handleGenerate(fixPrompt, true);
+  };
+
+  const openYandexModal = () => {
+    const code = currentCode || "";
+    const metrikaMatch = code.match(/ym\((\d+),\s*['"]init['"]/);
+    setYandexMetrika(metrikaMatch ? metrikaMatch[1] : "");
+    const wmMatch = code.match(/<meta[^>]+name=["']yandex-verification["'][^>]+content=["']([^"']+)["'][^>]*\/?>/i)
+      || code.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']yandex-verification["'][^>]*\/?>/i);
+    setYandexWebmaster(wmMatch ? wmMatch[1] : "");
+    setYandexOpen(true);
+  };
+
+  const saveYandex = async () => {
+    if (!project) return;
+    setYandexSaving(true);
+    try {
+      const res = await fetch(`/api/projects/${project.id}/yandex`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ metrika: yandexMetrika, webmaster: yandexWebmaster }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.code && iframeRef.current) {
+          const blob = new Blob([data.code], { type: "text/html" });
+          iframeRef.current.src = URL.createObjectURL(blob);
+        }
+        await queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+        setYandexOpen(false);
+        toast({ title: "Сохранено!", description: "Яндекс.Метрика и метатег вебмастера обновлены" });
+      } else {
+        const err = await res.json();
+        toast({ title: "Ошибка", description: err.message || "Не удалось сохранить", variant: "destructive" });
+      }
+    } catch {
+      toast({ title: "Ошибка сети", variant: "destructive" });
+    }
+    setYandexSaving(false);
+  };
+
+  const onCropMouseDown = (e: React.MouseEvent, mode: "move" | "resize") => {
+    e.preventDefault();
+    setCropDrag({ mode, startX: e.clientX, startY: e.clientY, origBox: { ...cropBox } });
+  };
+
+  const onCropMouseMove = (e: React.MouseEvent) => {
+    if (!cropDrag || !cropContainerRef.current) return;
+    const containerRect = cropContainerRef.current.getBoundingClientRect();
+    const dx = e.clientX - cropDrag.startX;
+    const dy = e.clientY - cropDrag.startY;
+    if (cropDrag.mode === "move") {
+      const nx = Math.max(0, Math.min(containerRect.width - cropDrag.origBox.size, cropDrag.origBox.x + dx));
+      const ny = Math.max(0, Math.min(containerRect.height - cropDrag.origBox.size, cropDrag.origBox.y + dy));
+      setCropBox(b => ({ ...b, x: nx, y: ny }));
+    } else {
+      const maxSize = Math.min(
+        containerRect.width - cropDrag.origBox.x,
+        containerRect.height - cropDrag.origBox.y
+      );
+      const newSize = Math.max(40, Math.min(maxSize, cropDrag.origBox.size + dx));
+      setCropBox(b => ({ ...b, size: newSize }));
+    }
+  };
+
+  const handleChangeDomain = () => {
+    setDomainResult(null);
+    setCustomDomain("");
+    setDomainVerified(null);
+    setDomainDnsReady(false);
+    setDomainStatusMessage("");
+    setDomainError(null);
+  };
+
+  const handleCheckDomain = async () => {
+    if (!project || !customDomain.trim()) return;
+    setDomainChecking(true);
+    try {
+      const res = await fetch(`/api/projects/${project.id}/domain/status?domain=${encodeURIComponent(customDomain.trim())}`, { credentials: "include" });
+      const data = await res.json();
+      setDomainVerified(data.verified || false);
+      setDomainDnsReady(data.dnsReady || false);
+      setDomainStatusMessage(data.message || "");
+      if (data.aRecordIp) setDomainIp(data.aRecordIp);
+    } catch {
+      setDomainVerified(false);
+      setDomainDnsReady(false);
+      setDomainStatusMessage("");
+    }
+    finally { setDomainChecking(false); }
+  };
+
+  const attachImageFile = useCallback((file: File) => {
+    const uploadId = `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const isImage = file.type.startsWith("image/");
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const b64 = dataUrl.split(",")[1];
+      setAttachedImages(prev => [...prev, {
+        id: uploadId,
+        base64: b64,
+        mimeType: file.type || "application/octet-stream",
+        preview: isImage ? dataUrl : null,
+        fileName: file.name,
+        uploading: true,
+      }]);
+      const formData = new FormData();
+      formData.append("file", file);
+      (async () => {
+        try {
+          const resp = await fetch("/api/upload-file", { method: "POST", credentials: "include", body: formData });
+          const data = await resp.json();
+          if (resp.ok && data.url) {
+            setAttachedImages(prev => prev.map(im => im.id === uploadId ? { ...im, url: data.url, uploading: false } : im));
+            if (project?.id && isImage) {
+              const baseName = (file.name || "фото").replace(/\.[^.]+$/, "").slice(0, 40) || "фото";
+              const libName = `${baseName}_${uploadId.slice(-6)}`;
+              fetch(`/api/projects/${project.id}/images`, {
+                method: "POST",
+                credentials: "include",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: libName, url: data.url, prompt: "Загружено в чат" }),
+              }).then(() => {
+                queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "images"] });
+                queryClient.invalidateQueries({ queryKey: ["/api/generations"] });
+              }).catch(() => {});
+            }
+          } else {
+            setAttachedImages(prev => prev.map(im => im.id === uploadId ? { ...im, uploading: false } : im));
+            toast({ title: "Не удалось загрузить фото", description: data?.message, variant: "destructive" });
+          }
+        } catch {
+          setAttachedImages(prev => prev.map(im => im.id === uploadId ? { ...im, uploading: false } : im));
+          toast({ title: "Не удалось загрузить фото", variant: "destructive" });
+        }
+      })();
+    };
+    reader.readAsDataURL(file);
+  }, [project?.id, projectId, toast]);
+
+  const attachAudioFile = useCallback((file: File) => {
+    const uploadId = `audio-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setAttachedAudios(prev => [...prev, { id: uploadId, url: "", fileName: file.name, uploading: true }]);
+    const formData = new FormData();
+    formData.append("file", file);
+    (async () => {
+      try {
+        const resp = await fetch("/api/upload-file", { method: "POST", credentials: "include", body: formData });
+        const data = await resp.json();
+        if (resp.ok && data.url) {
+          setAttachedAudios(prev => prev.map(a => a.id === uploadId ? { ...a, url: data.url, uploading: false } : a));
+        } else {
+          setAttachedAudios(prev => prev.filter(a => a.id !== uploadId));
+          toast({ title: "Ошибка загрузки аудио", description: data?.message, variant: "destructive" });
+        }
+      } catch {
+        setAttachedAudios(prev => prev.filter(a => a.id !== uploadId));
+        toast({ title: "Ошибка загрузки аудио", variant: "destructive" });
+      }
+    })();
+  }, [toast]);
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    let imageCount = 0;
+    let videoCount = 0;
+    let audioCount = 0;
+
+    let modelCount = 0;
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const fname = file.name.toLowerCase();
+      if (fname.endsWith(".glb") || fname.endsWith(".gltf")) {
+        modelCount++;
+        if (file.size > 50 * 1024 * 1024) {
+          toast({ title: "Файл слишком большой", description: "Максимальный размер 3D модели — 50 МБ", variant: "destructive" });
+          continue;
+        }
+        const uploadId = `model-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
+        setAttachedModels(prev => [...prev, { id: uploadId, url: "", fileName: file.name, uploading: true }]);
+        const formData = new FormData();
+        formData.append("file", file);
+        (async () => {
+          try {
+            const resp = await fetch("/api/upload-file", { method: "POST", credentials: "include", body: formData });
+            const data = await resp.json();
+            if (resp.ok && data.url) {
+              setAttachedModels(prev => prev.map(m => m.id === uploadId ? { ...m, url: data.url, uploading: false } : m));
+              if (project?.id) {
+                const autoName = file.name.replace(/\.(glb|gltf)$/i, "").slice(0, 50) || `model_${Date.now()}`;
+                fetch(`/api/projects/${project.id}/images`, {
+                  method: "POST",
+                  credentials: "include",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ name: autoName, url: data.url, prompt: "3D модель" }),
+                }).then(() => {
+                  queryClient.invalidateQueries({ queryKey: [`/api/projects/${project.id}/images`] });
+                }).catch(() => {});
+              }
+            } else {
+              setAttachedModels(prev => prev.filter(m => m.id !== uploadId));
+              toast({ title: "Ошибка загрузки 3D модели", description: data?.message, variant: "destructive" });
+            }
+          } catch {
+            setAttachedModels(prev => prev.filter(m => m.id !== uploadId));
+            toast({ title: "Ошибка загрузки 3D модели", variant: "destructive" });
+          }
+        })();
+        continue;
+      }
+      if (file.type.startsWith("video/")) {
+        videoCount++;
+        if (file.size > 100 * 1024 * 1024) {
+          toast({ title: "Файл слишком большой", description: "Максимальный размер видео — 100 МБ", variant: "destructive" });
+          continue;
+        }
+        const uploadId = `video-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`;
+        setAttachedVideos(prev => [...prev, { id: uploadId, url: "", fileName: file.name, uploading: true }]);
+        const formData = new FormData();
+        formData.append("file", file);
+        (async () => {
+          try {
+            const resp = await fetch("/api/upload-file", {
+              method: "POST",
+              credentials: "include",
+              body: formData,
+            });
+            const data = await resp.json();
+            if (resp.ok && data.url) {
+              setAttachedVideos(prev => prev.map(v => v.id === uploadId ? { ...v, url: data.url, uploading: false } : v));
+            } else {
+              setAttachedVideos(prev => prev.filter(v => v.id !== uploadId));
+              toast({ title: "Ошибка загрузки видео", description: data?.message, variant: "destructive" });
+            }
+          } catch {
+            setAttachedVideos(prev => prev.filter(v => v.id !== uploadId));
+            toast({ title: "Ошибка загрузки видео", variant: "destructive" });
+          }
+        })();
+      } else if (file.type.startsWith("audio/")) {
+        audioCount++;
+        if (file.size > 30 * 1024 * 1024) {
+          toast({ title: "Файл слишком большой", description: "Максимальный размер аудио — 30 МБ", variant: "destructive" });
+          continue;
+        }
+        attachAudioFile(file);
+      } else {
+        imageCount++;
+        attachImageFile(file);
+      }
+    }
+    if (e.target) e.target.value = "";
+    const total = imageCount + videoCount + modelCount + audioCount;
+    if (total > 0) {
+      toast({ title: `${total > 1 ? total + " файлов" : "Файл"} прикреплён`, description: "Можно отправить вместе с промтом" });
+    }
+  };
+
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    let count = 0;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf("image") !== -1) {
+        const file = items[i].getAsFile();
+        if (!file) continue;
+        count++;
+        attachImageFile(file);
+      }
+    }
+    if (count > 0) {
+      toast({ title: "Изображение прикреплено", description: "Можно отправить вместе с промтом" });
+    }
+  }, [toast, attachImageFile]);
+
+  const handleRefImageUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    if (e.target) e.target.value = "";
+    const remaining = 14 - imgRefs.length;
+    const toUpload = files.slice(0, remaining);
+    if (!toUpload.length) return;
+
+    for (const file of toUpload) {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const dataUrl = reader.result as string;
+        setImgRefs(prev => [...prev, { preview: dataUrl, url: "", uploading: true }]);
+        const b64 = dataUrl.split(",")[1];
+        try {
+          const resp = await fetch("/api/upload-image", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({ base64: b64, mimeType: file.type, name: file.name }),
+          });
+          const data = await resp.json();
+          if (resp.ok && data.url) {
+            setImgRefs(prev => prev.map(r => r.preview === dataUrl && r.uploading ? { ...r, url: data.url, uploading: false } : r));
+          } else {
+            setImgRefs(prev => prev.filter(r => !(r.preview === dataUrl && r.uploading)));
+            toast({ title: "Ошибка загрузки референса", variant: "destructive" });
+          }
+        } catch {
+          setImgRefs(prev => prev.filter(r => !(r.preview === dataUrl && r.uploading)));
+          toast({ title: "Ошибка загрузки", variant: "destructive" });
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  }, [toast, imgRefs.length]);
+
+  const handleGenerateImage = useCallback(async () => {
+    if (!imgPrompt.trim()) return;
+    setImgGenerating(true);
+    setImgStatus("creating");
+    setImgResultUrls([]);
+    setImgError("");
+    queryClient.setQueryData(["/api/auth/user"], (old: any) => old ? { ...old, credits: Math.max(0, old.credits - 15) } : old);
+
+    try {
+      const systemImgPrefix = "Макет для сайта, стильный и премиальный. ";
+      const finalImgPrompt = imgPrompt.trim() ? systemImgPrefix + imgPrompt.trim() : systemImgPrefix;
+      const bodyData: any = { prompt: finalImgPrompt, aspectRatio: imgSize };
+      const refUrls = imgRefs.filter(r => r.url).map(r => r.url);
+      if (refUrls.length) bodyData.referenceImageUrls = refUrls;
+      const resp = await fetch("/api/images/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bodyData),
+        credentials: "include",
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.message);
+      if (data.newBalance !== undefined) {
+        queryClient.setQueryData(["/api/auth/user"], (old: any) => old ? { ...old, credits: data.newBalance } : old);
+      }
+
+      const taskId = data.taskId;
+      setImgStatus("waiting");
+
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusResp = await fetch(`/api/images/status/${taskId}?projectId=${projectId}&prompt=${encodeURIComponent(imgPrompt)}`, { credentials: "include" });
+          const statusData = await statusResp.json();
+
+          if (statusData.state === "success") {
+            clearInterval(pollInterval);
+            setImgResultUrls(statusData.urls || []);
+            setImgStatus("success");
+            setImgGenerating(false);
+            queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "images"] });
+            queryClient.invalidateQueries({ queryKey: ["/api/generations"] });
+          } else if (statusData.state === "fail") {
+            clearInterval(pollInterval);
+            setImgError(statusData.error || "Ошибка генерации");
+            setImgStatus("fail");
+            setImgGenerating(false);
+            if (statusData.newBalance !== undefined) {
+              queryClient.setQueryData(["/api/auth/user"], (old: any) => old ? { ...old, credits: statusData.newBalance } : old);
+            } else {
+              queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
+            }
+            if (statusData.refunded) {
+              toast({ title: "Токены возвращены", description: "Сбой KIE API при генерации изображения" });
+            }
+          }
+        } catch {
+          clearInterval(pollInterval);
+          setImgError("Ошибка соединения");
+          setImgStatus("fail");
+          setImgGenerating(false);
+        }
+      }, 3000);
+
+      setTimeout(() => clearInterval(pollInterval), 180000);
+    } catch (err: any) {
+      setImgError(err.message);
+      setImgStatus("fail");
+      setImgGenerating(false);
+      queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
+    }
+  }, [imgPrompt, imgSize, imgRefs, projectId, toast]);
+
+  const handleAddImageToChat = useCallback(async (url: string) => {
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error("Не удалось загрузить изображение");
+      const blob = await resp.blob();
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        const b64 = dataUrl.split(",")[1];
+        setAttachedImages(prev => [...prev, {
+          id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          base64: b64,
+          mimeType: blob.type || "image/jpeg",
+          preview: dataUrl,
+          fileName: (imgPrompt.trim().split(/\s+/).slice(0, 3).join("_") || "generated") + ".jpg",
+          url,
+        }]);
+        toast({ title: "Изображение добавлено в чат", description: "Отправьте промт, чтобы использовать его на сайте" });
+        setImgGenOpen(false);
+        setImgStatus("idle");
+        setImgResultUrls([]);
+        setImgPrompt("");
+      };
+      reader.readAsDataURL(blob);
+    } catch (err: any) {
+      toast({ title: "Ошибка", description: err.message, variant: "destructive" });
+    }
+  }, [imgPrompt, toast]);
+
+  const handle3DImageUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast({ title: "Нужно изображение", description: "Загрузите фото объекта для создания 3D модели", variant: "destructive" });
+      return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      toast({ title: "Файл слишком большой", description: "Максимум 20 МБ", variant: "destructive" });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      setGen3dImagePreview(reader.result as string);
+    };
+    reader.readAsDataURL(file);
+    const formData = new FormData();
+    formData.append("file", file);
+    (async () => {
+      try {
+        const resp = await fetch("/api/upload-file", { method: "POST", credentials: "include", body: formData });
+        const data = await resp.json();
+        if (resp.ok && data.url) {
+          setGen3dImageUrl(data.url);
+        } else {
+          toast({ title: "Ошибка загрузки", description: data?.message, variant: "destructive" });
+          setGen3dImagePreview("");
+        }
+      } catch {
+        toast({ title: "Ошибка загрузки", variant: "destructive" });
+        setGen3dImagePreview("");
+      }
+    })();
+    if (e.target) e.target.value = "";
+  }, [toast]);
+
+  const handleGenerate3D = useCallback(async () => {
+    if (!gen3dImageUrl) return;
+    setGen3dGenerating(true);
+    setGen3dStatus("creating");
+    setGen3dResultUrl("");
+    setGen3dError("");
+    gen3dRetryRef.current = 0;
+    queryClient.setQueryData(["/api/auth/user"], (old: any) => old ? { ...old, credits: Math.max(0, old.credits - 100) } : old);
+
+    try {
+      const resp = await fetch("/api/3d/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageUrl: gen3dImageUrl, enablePbr: gen3dPbr, generateType: gen3dType }),
+        credentials: "include",
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.message);
+      if (data.newBalance !== undefined) {
+        queryClient.setQueryData(["/api/auth/user"], (old: any) => old ? { ...old, credits: data.newBalance } : old);
+      }
+
+      const taskId = data.taskId;
+      const statusUrl = data.statusUrl || "";
+      setGen3dStatusUrl(statusUrl);
+      setGen3dStatus("waiting");
+
+      const pollInterval = setInterval(async () => {
+        try {
+          const sResp = await fetch(`/api/3d/status/${taskId}?statusUrl=${encodeURIComponent(statusUrl)}`, { credentials: "include" });
+          const sData = await sResp.json();
+          if (sData.state === "success") {
+            clearInterval(pollInterval);
+            const glbUrl = sData.outputs?.find((u: string) => u.endsWith(".glb")) || sData.outputs?.[0] || "";
+            setGen3dResultUrl(glbUrl);
+            setGen3dStatus("success");
+            setGen3dGenerating(false);
+          } else if (sData.state === "fail") {
+            clearInterval(pollInterval);
+            setGen3dError(sData.error || "Ошибка генерации");
+            setGen3dStatus("fail");
+            setGen3dGenerating(false);
+          }
+        } catch (pollErr: any) {
+          gen3dRetryRef.current = (gen3dRetryRef.current || 0) + 1;
+          if (gen3dRetryRef.current >= 3) {
+            clearInterval(pollInterval);
+            setGen3dError(pollErr?.message || "Ошибка соединения");
+            setGen3dStatus("fail");
+            setGen3dGenerating(false);
+          }
+        }
+      }, 4000);
+
+      setTimeout(() => clearInterval(pollInterval), 300000);
+    } catch (err: any) {
+      setGen3dError(err.message || "Ошибка");
+      setGen3dStatus("fail");
+      setGen3dGenerating(false);
+    }
+  }, [gen3dImageUrl, gen3dPbr, gen3dType]);
+
+  const handleInsert3D = useCallback(async (glbUrl: string) => {
+    if (!glbUrl || !project) return;
+    try {
+      const resp = await fetch("/api/3d/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ url: glbUrl, projectId }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.message);
+
+      setAttachedModels(prev => [...prev, { id: `gen3d-${Date.now()}`, url: data.url, fileName: "model.glb", uploading: false }]);
+      toast({ title: "3D модель добавлена", description: "Отправьте промт чтобы встроить модель на сайт" });
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "images"] });
+      setGen3dOpen(false);
+    } catch (err: any) {
+      toast({ title: "Ошибка", description: err.message || "Не удалось загрузить 3D модель", variant: "destructive" });
+    }
+  }, [project, toast]);
+
+  const handleDeleteImage = useCallback(async (imageId: number) => {
+    try {
+      await fetch(`/api/projects/${projectId}/images/${imageId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "images"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/generations"] });
+      toast({ title: "Изображение удалено" });
+    } catch {
+      toast({ title: "Ошибка удаления", variant: "destructive" });
+    }
+  }, [projectId, toast]);
+
+  const handleRestoreVersion = useCallback(async (versionId: number) => {
+    try {
+      const resp = await fetch(`/api/projects/${projectId}/versions/${versionId}/restore`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => null);
+        throw new Error(err?.message || "Ошибка восстановления");
+      }
+      const updated = await resp.json();
+      const code = updated.generatedCode || "";
+
+      // Clear any optimistic/preview state so subsequent edits use the restored code.
+      latestEditHtmlRef.current = null;
+      setEditMode(false);
+      setSelectorMode(false);
+      setSelectedElement(null);
+      setActiveFile("index.html");
+      setStreamedFile("index.html");
+      setStreamedCode(code);
+
+      const nextOptimistic: Record<string, string> = { "index.html": code };
+      if (Array.isArray(updated.files)) {
+        for (const f of updated.files) {
+          if (f?.filename && typeof f.code === "string") nextOptimistic[f.filename] = f.code;
+        }
+      }
+      setOptimisticFiles(nextOptimistic);
+
+      // Force React Query cache to the restored project immediately (don't wait for refetch).
+      queryClient.setQueryData(["/api/projects", projectId], (old: any) =>
+        old ? { ...old, ...updated, generatedCode: code } : { ...updated, generatedCode: code },
+      );
+      if (Array.isArray(updated.files)) {
+        queryClient.setQueryData(
+          ["/api/projects", projectId, "files"],
+          updated.files.map((f: any) => ({
+            id: f.id,
+            projectId,
+            filename: f.filename,
+            code: f.code,
+          })),
+        );
+      }
+
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "versions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+
+      toast({
+        title: "Версия восстановлена",
+        description: "Сайт откатан. Можно снова вносить правки в эту версию.",
+      });
+      if (isMobile) {
+        setMobileView("preview");
+        setSidebarOpen(false);
+      }
+    } catch (err: any) {
+      toast({ title: "Ошибка", description: err.message, variant: "destructive" });
+    }
+  }, [projectId, toast, isMobile]);
+
+  /** Map an exact assistant message → its checkpoint; vN is legacy fallback only. */
+  const findVersionForChatBadge = useCallback((messageId: number, vNum: number) => {
+    const byMessage = versions.find((v) =>
+      (v.label || "").includes(`[msg:${messageId}]`),
+    );
+    if (byMessage) return { version: byMessage, kind: "result" as const };
+
+    const byLabel = versions.find((v) => {
+      const m = (v.label || "").match(/^v(\d+)\b/);
+      return m && parseInt(m[1], 10) === vNum;
+    });
+    if (byLabel) return { version: byLabel, kind: "result" as const };
+
+    // Legacy: "До:" snapshot before edit N+1 ≈ result of generation N (approx).
+    // Prefer the oldest-first "До:" list so v1 maps to first checkpoint.
+    const preEditAsc = versions
+      .filter((v) => (v.label || "").startsWith("До: "))
+      .slice()
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    // v1 = first site (no prior "До:"); v2 ≈ first "До:" (code before 2nd edit = result of v1)...
+    // Chat badge vN should restore the RESULT of that turn. Legacy "До:" for edit k is
+    // the code BEFORE edit k = result after turn (k-1). So badge vN → preEditAsc[n] is wrong.
+    // Better: badge vN → preEditAsc[n] when n is the NEXT edit's "До" = current result of vN.
+    // Actually: after gen1, no "До". After gen2, "До: gen2prompt" = code from gen1 = result v1.
+    // So badge vN → preEditAsc[n] (0-indexed: v1 → preEditAsc[0] which is "До" of 2nd edit).
+    // For the LATEST badge (current), there is often no "До" yet — treat as current.
+    if (preEditAsc[vNum - 1]) return { version: preEditAsc[vNum - 1], kind: "legacy" as const };
+
+    const modelCount = messages.filter((m) => m.role === "model" || m.role === "assistant").length;
+    if (vNum === modelCount && (streamedCode || project?.generatedCode)) {
+      return { version: null, kind: "current" as const };
+    }
+    return { version: null, kind: "missing" as const };
+  }, [versions, messages, streamedCode, project?.generatedCode]);
+
+  const handleRestoreChatBadge = useCallback(async (messageId: number, vNum: number) => {
+    const found = findVersionForChatBadge(messageId, vNum);
+    if (found.kind === "current") {
+      toast({ title: "Уже текущая", description: `Версия v${vNum} сейчас открыта.` });
+      return;
+    }
+    if (!found.version) {
+      toast({
+        title: "Чекпоинт не найден",
+        description: "Для этой версии нет снимка. Новые правки сохраняют v1, v2… автоматически.",
+      });
+      return;
+    }
+    await handleRestoreVersion(found.version.id);
+  }, [findVersionForChatBadge, handleRestoreVersion, toast]);
+
+  const injectProjectId = useCallback((code: string) => {
+    if (!code) return code;
+    const appOrigin = typeof window !== "undefined" ? window.location.origin : "";
+    const leadScript = `<script data-nz-leads>
+window.__PROJECT_ID__=${projectId};
+(function(){
+  var API='${appOrigin}/api/leads/${projectId}';
+  window.addEventListener('message',function(ev){
+    if(!ev.data||typeof ev.data!=='object')return;
+    if(ev.data.type==='nz-wheel'){try{window.scrollBy(ev.data.dx||0,ev.data.dy||0);}catch(e){}}
+    if(ev.data.type==='nz-get-scroll'){
+      try{
+        var y=window.scrollY||document.documentElement.scrollTop||document.body.scrollTop||0;
+        window.parent.postMessage({type:'nz-scroll-pos',y:y},'*');
+      }catch(e){try{window.parent.postMessage({type:'nz-scroll-pos',y:0},'*');}catch(_e){}}
+    }
+    if(ev.data.type==='nz-set-scroll'&&typeof ev.data.y==='number'){
+      try{
+        var ty=ev.data.y;
+        var go=function(){try{window.scrollTo(0,ty);}catch(e){}};
+        go();
+        if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',go);
+        window.addEventListener('load',go);
+        setTimeout(go,40);
+        setTimeout(go,160);
+      }catch(e){}
+    }
+    if(ev.data.type==='nz-scroll-anchor'&&ev.data.anchor){
+      try{var el=document.querySelector(ev.data.anchor);if(el)el.scrollIntoView({behavior:'smooth'});}catch(e){}
+    }
+  });
+  document.addEventListener('click',function(e){
+    var a=e.target.closest('a');
+    if(!a) return;
+    var href=a.getAttribute('href');
+    if(!href||href==='#'||href===''){e.preventDefault();return;}
+    if(href.startsWith('#')){e.preventDefault();var el=document.querySelector(href);if(el)el.scrollIntoView({behavior:'smooth'});return;}
+    var pm=href.match(/^([a-zA-Z0-9_-]+\\.html)(#[a-zA-Z0-9_-]+)?$/);
+    if(pm){
+      e.preventDefault();
+      window.parent.postMessage({type:'nz-navigate-file',filename:pm[1],anchor:pm[2]||''},'*');
+      return;
+    }
+    e.preventDefault();
+  },true);
+  function showToast(msg){
+    var t=document.createElement('div');
+    t.textContent=msg;
+    t.style.cssText='position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#10b981;color:#fff;padding:12px 24px;border-radius:12px;font-weight:600;font-size:14px;z-index:99999;box-shadow:0 8px 32px rgba(0,0,0,0.3);transition:opacity 0.5s';
+    document.body.appendChild(t);
+    setTimeout(function(){t.style.opacity='0';setTimeout(function(){t.remove()},500)},3000);
+  }
+  document.addEventListener('submit',function(e){
+    var form=e.target;
+    if(!form||form.tagName!=='FORM') return;
+    e.preventDefault();
+    var fd=new FormData(form);
+    var data={name:'',email:'',phone:'',message:'',source:form.dataset.leadForm||'form'};
+    fd.forEach(function(v,k){
+      var kl=k.toLowerCase();
+      if(kl.indexOf('name')>-1||kl.indexOf('имя')>-1||kl.indexOf('фио')>-1) data.name=v;
+      else if(kl.indexOf('email')>-1||kl.indexOf('почт')>-1||kl.indexOf('mail')>-1) data.email=v;
+      else if(kl.indexOf('phone')>-1||kl.indexOf('тел')>-1) data.phone=v;
+      else if(kl.indexOf('message')>-1||kl.indexOf('сооб')>-1||kl.indexOf('коммент')>-1||kl.indexOf('пожелан')>-1||kl.indexOf('текст')>-1) data.message=v;
+      else if(!data.message) data.message=v;
+    });
+    if(!data.name&&!data.email&&!data.phone&&!data.message) return;
+    fetch(API,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
+    .then(function(r){if(r.ok){showToast('Заявка отправлена!');form.reset();}})
+    .catch(function(){});
+  },true);
+})();
+</script>`;
+    // Preview-only: heal overflow:hidden→clip so position:sticky scroll-anims work.
+    // Also re-run after preloader kill — removeProperty('overflow') clears overflow-x/y
+    // longhands and used to re-break sticky, showing a tall empty black runway under the hero.
+    const stickyFixScript = `<script data-nz-stickyfix>
+(function(){
+  function heal(el){
+    if(!el||el.nodeType!==1)return;
+    try{
+      var cs=getComputedStyle(el);
+      if(cs.overflowX==='hidden')el.style.setProperty('overflow-x','clip','important');
+      if(cs.overflowY==='hidden')el.style.setProperty('overflow-y','clip','important');
+    }catch(e){}
+  }
+  function fixSticky(){
+    var s=document.querySelectorAll('[data-craft-scrollanim]');
+    if(!s.length)return;
+    for(var i=0;i<s.length;i++){
+      var el=s[i];
+      while(el&&el.nodeType===1){
+        heal(el);
+        if(el===document.documentElement)break;
+        el=el.parentElement;
+      }
+    }
+    heal(document.documentElement);
+    heal(document.body);
+  }
+  window.__nzFixSticky=fixSticky;
+  function boot(){
+    fixSticky();
+    [0,50,200,600,1500,3200].forEach(function(ms){setTimeout(fixSticky,ms);});
+  }
+  if(document.readyState!=='loading')boot();
+  else document.addEventListener('DOMContentLoaded',boot);
+  window.addEventListener('load',fixSticky);
+})();
+</script>`;
+    const restoreY = pendingScrollYRef.current;
+    const restoreScrollScript = (restoreY != null && restoreY > 0)
+      ? `<script data-nz-restore-scroll>(function(){var y=${Math.round(restoreY)};function go(){try{window.scrollTo(0,y);}catch(e){}}go();if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',go);window.addEventListener('load',go);setTimeout(go,40);setTimeout(go,200);})();</script>`
+      : "";
+    const preloaderKillScript = `<script data-nz-preloader-kill>
+(function(){
+  var SELS=['#preloader','.preloader','#loader','.loader','#loading','.loading',
+    '#page-loader','.page-loader','#site-loader','.site-loader',
+    '#splash','.splash','#splash-screen','.splash-screen',
+    '#preload','.preload','#intro','.intro-overlay',
+    '#loadScreen','.load-screen','.loading-screen',
+    '#loadingOverlay','.loadingOverlay','#pageLoader','.pageLoader',
+    '[data-preloader]','[data-loader]','.preloading','.page-loading'];
+  function unlockOverflow(el){
+    if(!el||!el.style)return;
+    try{
+      var ox=(el.style.overflowX||'').toLowerCase();
+      var oy=(el.style.overflowY||'').toLowerCase();
+      var o=(el.style.overflow||'').toLowerCase();
+      // Keep sticky heal (clip). Only clear preloader scroll-locks (hidden).
+      if(ox==='clip'||oy==='clip'||o==='clip')return;
+      if(o==='hidden'||ox==='hidden'||oy==='hidden'){
+        el.style.removeProperty('overflow');
+        el.style.removeProperty('overflow-x');
+        el.style.removeProperty('overflow-y');
+      }
+    }catch(e){}
+  }
+  function kill(){
+    for(var i=0;i<SELS.length;i++){
+      try{
+        var els=document.querySelectorAll(SELS[i]);
+        for(var j=0;j<els.length;j++){
+          var el=els[j];
+          el.style.setProperty('opacity','0','important');
+          el.style.setProperty('visibility','hidden','important');
+          el.style.setProperty('pointer-events','none','important');
+          (function(e){setTimeout(function(){e.style.setProperty('display','none','important');},400);})(el);
+        }
+      }catch(e){}
+    }
+    try{document.body.classList.remove('loading','preloading','is-loading','page-loading','js-loading');}catch(e){}
+    try{document.documentElement.classList.remove('loading','preloading','is-loading','page-loading','js-loading');}catch(e){}
+    unlockOverflow(document.body);
+    unlockOverflow(document.documentElement);
+    try{if(typeof window.__nzFixSticky==='function')window.__nzFixSticky();}catch(e){}
+  }
+  function go(){
+    try{window.dispatchEvent(new Event('load'));}catch(e){}
+    setTimeout(kill,8000);
+    setTimeout(kill,12000);
+  }
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',go);
+  else go();
+})();
+<\/script>`;
+    const previewInject = leadScript + stickyFixScript + preloaderKillScript + restoreScrollScript;
+    if (/<\/head>/i.test(code)) return code.replace(/<\/head>/i, previewInject + '</head>');
+    if (/<\/body>/i.test(code)) return code.replace(/<\/body>/i, previewInject + '</body>');
+    if (/<\/html>/i.test(code)) return code.replace(/<\/html>/i, previewInject + '</html>');
+    return code + previewInject;
+  }, [projectId]);
+
+  // Stable preview HTML — never depends on edit/selector mode (avoids iframe remount + scroll jump to hero).
+  const getPreviewCode = useCallback((code: string) => {
+    if (!code) return code;
+    return injectProjectId(code);
+  }, [injectProjectId]);
+
+  const clearInPlacePreviewTools = useCallback((doc: Document) => {
+    try {
+      const w = doc.defaultView as (Window & { __nzPreviewToolsAbort?: AbortController }) | null;
+      w?.__nzPreviewToolsAbort?.abort();
+      if (w) w.__nzPreviewToolsAbort = undefined;
+    } catch {}
+    doc.querySelectorAll("[data-nz-editor],[data-nz-selector],.__nz-tooltip,.__nz-sel-label").forEach((el) => el.remove());
+    doc.querySelectorAll("[contenteditable]").forEach((el) => el.removeAttribute("contenteditable"));
+    doc.querySelectorAll(".__nz-sel-hover,.__nz-sel-active").forEach((el) => {
+      el.classList.remove("__nz-sel-hover", "__nz-sel-active");
+    });
+    doc.querySelectorAll("[data-nz-href]").forEach((el) => {
+      const href = el.getAttribute("data-nz-href");
+      if (href != null) el.setAttribute("href", href);
+      el.removeAttribute("data-nz-href");
+    });
+    doc.querySelectorAll("[data-nz-orig-type]").forEach((el) => {
+      const t = el.getAttribute("data-nz-orig-type");
+      if (t) el.setAttribute("type", t);
+      else el.removeAttribute("type");
+      el.removeAttribute("data-nz-orig-type");
+    });
+  }, []);
+
+  const applyInPlacePreviewMode = useCallback((mode: "view" | "edit" | "selector") => {
+    const iframe = iframeRef.current;
+    const win = iframe?.contentWindow;
+    const doc = iframe?.contentDocument;
+    if (!doc?.body || !win) return;
+
+    // Hard-lock scroll so enabling tools never jumps to hero / top.
+    const y = win.scrollY || doc.documentElement.scrollTop || doc.body.scrollTop || 0;
+    const lockScroll = () => {
+      try { win.scrollTo(0, y); } catch {}
+    };
+    const prevBehavior = doc.documentElement.style.scrollBehavior;
+    doc.documentElement.style.scrollBehavior = "auto";
+    doc.documentElement.style.overflowAnchor = "none";
+
+    clearInPlacePreviewTools(doc);
+    lockScroll();
+
+    if (mode === "view") {
+      doc.documentElement.style.scrollBehavior = prevBehavior;
+      lockScroll();
+      return;
+    }
+
+    if (mode === "edit") {
+      const style = doc.createElement("style");
+      style.setAttribute("data-nz-editor", "1");
+      style.textContent = `[contenteditable]:hover{outline:2px dashed rgba(59,130,246,0.5);outline-offset:2px;cursor:text}
+[contenteditable]:focus{outline:2px solid rgba(59,130,246,0.8);outline-offset:2px}
+img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"]:not(input):hover{outline:2px dashed rgba(168,85,247,0.6);outline-offset:2px;cursor:pointer}
+.__nz-tooltip{position:fixed;background:#1e293b;color:#fff;padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;pointer-events:none;z-index:99999;white-space:nowrap}`;
+      doc.head.appendChild(style);
+
+      const script = doc.createElement("script");
+      script.setAttribute("data-nz-editor", "1");
+      script.textContent = `(function(){
+  var lockedY=${Math.round(y)};
+  try{if(window.__nzPreviewToolsAbort)window.__nzPreviewToolsAbort.abort();}catch(e){}
+  var __nzAc=new AbortController();window.__nzPreviewToolsAbort=__nzAc;var __nzSig=__nzAc.signal;
+  function keepScroll(){try{window.scrollTo(0,lockedY);}catch(e){}}
+  keepScroll();
+  function getCleanHtml(){
+    var clone=document.documentElement.cloneNode(true);
+    var eds=clone.querySelectorAll('[data-nz-editor],[data-nz-leads],[data-nz-stickyfix],[data-nz-preloader-kill],[data-nz-selector]');
+    for(var i=0;i<eds.length;i++) eds[i].parentNode.removeChild(eds[i]);
+    var tips=clone.querySelectorAll('.__nz-tooltip');
+    for(var i=0;i<tips.length;i++) tips[i].parentNode.removeChild(tips[i]);
+    var ces=clone.querySelectorAll('[contenteditable]');
+    for(var i=0;i<ces.length;i++) ces[i].removeAttribute('contenteditable');
+    var html=clone.outerHTML;
+    return '<!DOCTYPE html>\\n'+html;
+  }
+  function getPath(el){
+    var path=[];var node=el;
+    while(node&&node!==document.body){
+      var idx=0;var sib=node;
+      while(sib.previousElementSibling){sib=sib.previousElementSibling;idx++}
+      path.unshift(idx);node=node.parentElement;
+    }
+    return path.join(',');
+  }
+  var tooltip=null;
+  function showTip(el,text){
+    if(!tooltip){tooltip=document.createElement('div');tooltip.className='__nz-tooltip';document.body.appendChild(tooltip)}
+    tooltip.textContent=text;var r=el.getBoundingClientRect();
+    tooltip.style.left=r.left+'px';tooltip.style.top=(r.top-28)+'px';tooltip.style.display='block';
+  }
+  function hideTip(){if(tooltip)tooltip.style.display='none'}
+  function makeEditable(el){
+      el.setAttribute('contenteditable','true');
+      var savedBg='';var savedClip='';var savedFill='';
+      el.addEventListener('mouseenter',function(){showTip(el,'Клик для редактирования')},{signal:__nzSig});
+      el.addEventListener('mouseleave',hideTip,{signal:__nzSig});
+      el.addEventListener('focus',function(){
+        keepScroll();
+        var cs=window.getComputedStyle(el);
+        if(cs.webkitBackgroundClip==='text'||cs.backgroundClip==='text'){
+          savedBg=el.style.background||'';savedClip=el.style.webkitBackgroundClip||el.style.backgroundClip||'';savedFill=el.style.webkitTextFillColor||'';
+          el.style.webkitBackgroundClip='unset';el.style.backgroundClip='unset';
+          el.style.webkitTextFillColor=cs.color||'#fff';el.style.background='transparent';
+        }
+      },{signal:__nzSig});
+      el.addEventListener('blur',function(){
+        if(savedClip){el.style.background=savedBg;el.style.webkitBackgroundClip=savedClip;el.style.backgroundClip=savedClip;el.style.webkitTextFillColor=savedFill;savedClip=''}
+        window.parent.postMessage({type:'nz-text-edit',html:getCleanHtml()},'*');
+      },{signal:__nzSig});
+  }
+  document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,span,a,li,td,th,button,label,figcaption,blockquote,strong,em,b,i,u,small').forEach(function(el){
+    var txt=(el.textContent||'').trim();
+    if(!txt)return;
+    if(el.closest('[contenteditable="true"]'))return;
+    makeEditable(el);
+  });
+  document.querySelectorAll('div').forEach(function(el){
+    var txt=(el.textContent||'').trim();
+    if(!txt)return;
+    if(el.closest('[contenteditable="true"]'))return;
+    if(el.querySelector('h1,h2,h3,h4,h5,h6,p,ul,ol,table,section,article,aside,header,footer,nav,form'))return;
+    if(el.children.length>2)return;
+    makeEditable(el);
+  });
+  keepScroll();
+  document.querySelectorAll('img').forEach(function(img){
+    img.style.cursor='pointer';
+    img.addEventListener('mouseenter',function(){showTip(img,'Клик для замены')},{signal:__nzSig});
+    img.addEventListener('mouseleave',hideTip,{signal:__nzSig});
+    img.addEventListener('click',function(e){
+      e.preventDefault();e.stopPropagation();hideTip();
+      window.parent.postMessage({type:'nz-img-click',path:getPath(img),src:img.src},'*');
+    },{signal:__nzSig});
+  });
+  var phSelectors='.image-placeholder,[data-image-hint],[class*="placeholder"],[class*="img-placeholder"]';
+  document.querySelectorAll(phSelectors).forEach(function(ph){
+    if(ph.tagName==='IMG') return;
+    ph.style.cursor='pointer';ph.style.position=ph.style.position||'relative';
+    ph.addEventListener('mouseenter',function(){showTip(ph,'Клик для добавления изображения')},{signal:__nzSig});
+    ph.addEventListener('mouseleave',hideTip,{signal:__nzSig});
+    ph.addEventListener('click',function(e){
+      e.preventDefault();e.stopPropagation();hideTip();
+      window.parent.postMessage({type:'nz-placeholder-click',path:getPath(ph),hint:ph.getAttribute('data-image-hint')||ph.textContent.trim().substring(0,100)||''},'*');
+    },{signal:__nzSig});
+    var kids=ph.querySelectorAll('*');
+    for(var k=0;k<kids.length;k++){
+      kids[k].style.pointerEvents='none';
+    }
+  });
+  window.addEventListener('message',function(e){
+    if(e.data&&e.data.type==='nz-replace-image'){
+      var path=e.data.path.split(',').map(Number);var node=document.body;
+      for(var i=0;i<path.length;i++){if(node.children[path[i]])node=node.children[path[i]];else break}
+      if(node.tagName==='IMG'){node.src=e.data.url;node.style.objectFit='cover'}
+      else{
+        var img=document.createElement('img');img.src=e.data.url;
+        img.alt=node.getAttribute('data-image-hint')||'';
+        var cs=window.getComputedStyle(node);
+        img.style.width=cs.width||'100%';
+        img.style.height=cs.height||'400px';
+        img.style.objectFit='cover';
+        img.style.borderRadius=cs.borderRadius||'16px';
+        img.style.display='block';
+        node.parentNode.replaceChild(img,node);
+      }
+      window.parent.postMessage({type:'nz-text-edit',html:getCleanHtml()},'*');
+    }
+  },{signal:__nzSig});
+  keepScroll();
+  requestAnimationFrame(keepScroll);
+  setTimeout(keepScroll,0);
+  setTimeout(keepScroll,50);
+})();`;
+      doc.body.appendChild(script);
+      lockScroll();
+      requestAnimationFrame(lockScroll);
+      setTimeout(lockScroll, 0);
+      setTimeout(lockScroll, 50);
+      doc.documentElement.style.scrollBehavior = prevBehavior;
+      return;
+    }
+
+    // selector mode
+    const style = doc.createElement("style");
+    style.setAttribute("data-nz-selector", "1");
+    style.textContent = `.__nz-sel-hover{outline:2px dashed rgba(59,130,246,0.7)!important;outline-offset:2px!important;cursor:crosshair!important}
+.__nz-sel-active{outline:3px solid rgba(59,130,246,1)!important;outline-offset:2px!important;background:rgba(59,130,246,0.05)!important}
+.__nz-sel-label{position:fixed;background:linear-gradient(135deg,#3b82f6,#6366f1);color:#fff;padding:4px 12px;border-radius:8px;font-size:11px;font-weight:700;pointer-events:none;z-index:99999;white-space:nowrap;box-shadow:0 4px 12px rgba(59,130,246,0.3)}
+*{cursor:crosshair!important}`;
+    doc.head.appendChild(style);
+
+    const script = doc.createElement("script");
+    script.setAttribute("data-nz-selector", "1");
+    script.textContent = `(function(){
+  var lockedY=${Math.round(y)};
+  try{if(window.__nzPreviewToolsAbort)window.__nzPreviewToolsAbort.abort();}catch(e){}
+  var __nzAc=new AbortController();window.__nzPreviewToolsAbort=__nzAc;var __nzSig=__nzAc.signal;
+  function keepScroll(){try{window.scrollTo(0,lockedY);}catch(e){}}
+  keepScroll();
+  var hovered=null,selected=null,label=null;
+  var allLinks=document.querySelectorAll('a[href]');
+  for(var i=0;i<allLinks.length;i++){allLinks[i].setAttribute('data-nz-href',allLinks[i].getAttribute('href'));allLinks[i].removeAttribute('href')}
+  var allBtns=document.querySelectorAll('button[type="submit"],input[type="submit"]');
+  for(var i=0;i<allBtns.length;i++){if(!allBtns[i].hasAttribute('data-nz-orig-type'))allBtns[i].setAttribute('data-nz-orig-type',allBtns[i].getAttribute('type')||'');allBtns[i].setAttribute('type','button')}
+  var allForms=document.querySelectorAll('form');
+  for(var i=0;i<allForms.length;i++){allForms[i].addEventListener('submit',function(ev){ev.preventDefault();ev.stopPropagation()},{capture:true,signal:__nzSig})}
+  function blockEvent(e){e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();return false}
+  ['mousedown','mouseup','touchstart','touchend','dblclick','contextmenu','auxclick','submit'].forEach(function(evt){document.addEventListener(evt,blockEvent,{capture:true,signal:__nzSig})});
+  function getPath(el){var p=[];var n=el;while(n&&n!==document.body){var idx=0;var s=n;while(s.previousElementSibling){s=s.previousElementSibling;idx++}p.unshift(idx);n=n.parentElement}return p.join(',')}
+  function getLbl(el){var t=el.tagName.toLowerCase();var c=el.className&&typeof el.className==='string'?'.'+el.className.trim().split(/\\s+/).slice(0,2).join('.'):'';return '<'+t+c+'>'}
+  function showLabel(el){
+    if(!label){label=document.createElement('div');label.className='__nz-sel-label';document.body.appendChild(label)}
+    label.textContent=getLbl(el);var r=el.getBoundingClientRect();
+    label.style.left=Math.max(0,r.left)+'px';label.style.top=Math.max(0,r.top-32)+'px';label.style.display='block';
+  }
+  function hideLabel(){if(label)label.style.display='none'}
+  document.addEventListener('mouseover',function(e){
+    var t=e.target;if(t===document.body||t===document.documentElement||t.hasAttribute('data-nz-selector'))return;
+    if(hovered&&hovered!==selected)hovered.classList.remove('__nz-sel-hover');
+    hovered=t;if(t!==selected)t.classList.add('__nz-sel-hover');
+    showLabel(t);
+  },{capture:true,signal:__nzSig});
+  document.addEventListener('mouseout',function(e){
+    if(hovered&&hovered!==selected)hovered.classList.remove('__nz-sel-hover');hideLabel();
+  },{capture:true,signal:__nzSig});
+  document.addEventListener('click',function(e){
+    e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();
+    var t=e.target;if(t===document.body||t===document.documentElement||t.hasAttribute('data-nz-selector'))return;
+    if(selected)selected.classList.remove('__nz-sel-active');
+    selected=t;t.classList.remove('__nz-sel-hover');
+    var clean=t.cloneNode(true);
+    if(clean.classList)clean.classList.remove('__nz-sel-hover','__nz-sel-active');
+    var snippet=clean.outerHTML;var snippetTruncated=snippet.length>1600;if(snippetTruncated)snippet=snippet.substring(0,1600);
+    var textContent=t.textContent||'';if(textContent.length>240)textContent=textContent.substring(0,240);
+    t.classList.add('__nz-sel-active');
+    window.parent.postMessage({type:'nz-element-selected',tag:t.tagName.toLowerCase(),text:textContent.trim(),classes:typeof t.className==='string'?t.className.replace(/__nz-sel-[a-z]+/g,'').trim():'',path:getPath(t),outerSnippet:snippet,snippetTruncated:snippetTruncated},'*');
+  },{capture:true,signal:__nzSig});
+  function getCleanHtmlSel(){
+    var clone=document.documentElement.cloneNode(true);
+    var sels=clone.querySelectorAll('[data-nz-selector],[data-nz-leads],[data-nz-stickyfix],[data-nz-preloader-kill]');
+    for(var i=0;i<sels.length;i++) sels[i].parentNode.removeChild(sels[i]);
+    var cls=clone.querySelectorAll('.__nz-sel-hover,.__nz-sel-active,.__nz-sel-label');
+    for(var i=0;i<cls.length;i++){cls[i].classList.remove('__nz-sel-hover','__nz-sel-active','__nz-sel-label')}
+    var restoredLinks=clone.querySelectorAll('[data-nz-href]');
+    for(var i=0;i<restoredLinks.length;i++){restoredLinks[i].setAttribute('href',restoredLinks[i].getAttribute('data-nz-href'));restoredLinks[i].removeAttribute('data-nz-href')}
+    return '<!DOCTYPE html>\\n'+clone.outerHTML;
+  }
+  window.addEventListener('message',function(e){
+    if(e.data&&e.data.type==='nz-delete-element'){
+      var path=e.data.path.split(',').map(Number);var node=document.body;
+      for(var i=0;i<path.length;i++){if(node.children[path[i]])node=node.children[path[i]];else return}
+      if(node&&node!==document.body&&node!==document.documentElement){
+        node.parentNode.removeChild(node);
+        if(selected===node){selected=null;hideLabel()}
+        window.parent.postMessage({type:'nz-element-deleted',html:getCleanHtmlSel()},'*');
+      }
+    }
+  },{signal:__nzSig});
+  keepScroll();
+  requestAnimationFrame(keepScroll);
+  setTimeout(keepScroll,0);
+  setTimeout(keepScroll,50);
+})();`;
+    doc.body.appendChild(script);
+    lockScroll();
+    requestAnimationFrame(lockScroll);
+    setTimeout(lockScroll, 0);
+    setTimeout(lockScroll, 50);
+    doc.documentElement.style.scrollBehavior = prevBehavior;
+  }, [clearInPlacePreviewTools]);
+
+  // Keep legacy name used by generation blob updates — view-only, no mode-dependent remount.
+  const getEditableCode = getPreviewCode;
+
+  const requestIframeScrollY = useCallback((): Promise<number> => {
+    return new Promise((resolve) => {
+      const win = iframeRef.current?.contentWindow;
+      if (!win) {
+        resolve(0);
+        return;
+      }
+      let done = false;
+      const finish = (y: number) => {
+        if (done) return;
+        done = true;
+        window.removeEventListener("message", onMsg);
+        resolve(Number.isFinite(y) ? y : 0);
+      };
+      const onMsg = (e: MessageEvent) => {
+        if (e.source !== win) return;
+        if (e.data?.type === "nz-scroll-pos") finish(Number(e.data.y) || 0);
+      };
+      window.addEventListener("message", onMsg);
+      try {
+        win.postMessage({ type: "nz-get-scroll" }, "*");
+      } catch {
+        finish(0);
+        return;
+      }
+      setTimeout(() => finish(0), 180);
+    });
+  }, []);
+
+  const restoreIframeScroll = useCallback(() => {
+    const y = pendingScrollYRef.current;
+    if (y == null || y <= 0) return;
+    const win = iframeRef.current?.contentWindow;
+    if (!win) return;
+    try {
+      win.postMessage({ type: "nz-set-scroll", y }, "*");
+    } catch {}
+    // Keep Y briefly for remount races, then clear so later srcDoc updates don't jump back.
+    setTimeout(() => {
+      if (pendingScrollYRef.current === y) pendingScrollYRef.current = null;
+    }, 500);
+  }, []);
+
+  useEffect(() => {
+    const persistHtml = (finalHtml: string, opts?: { invalidate?: boolean; updateState?: boolean }) => {
+      const invalidate = opts?.invalidate ?? true;
+      const updateState = opts?.updateState ?? true;
+      latestEditHtmlRef.current = finalHtml;
+      if (updateState) {
+        if (activeFile === "index.html") setStreamedCode(finalHtml);
+      }
+      if (activeFile === "index.html") {
+        fetch(`/api/projects/${projectId}/code`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ generatedCode: finalHtml }),
+          credentials: "include",
+        }).then(() => {
+          if (invalidate) queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+        }).catch(() => {});
+      } else {
+        fetch(`/api/projects/${projectId}/files/${activeFile}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: finalHtml }),
+          credentials: "include",
+        }).then(() => {
+          if (invalidate) queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+        }).catch(() => {});
+      }
+    };
+
+    const handler = (e: MessageEvent) => {
+      if (!e.data || typeof e.data !== 'object') return;
+      if (iframeRef.current && e.source && e.source !== iframeRef.current.contentWindow) return;
+      if (e.data.type === 'nz-text-edit') {
+        const finalHtml = e.data.html;
+        // While visual editing: save quietly — never rewrite srcDoc (that remounts the iframe).
+        const liveEditing = editModeRef.current || selectorModeRef.current;
+        persistHtml(finalHtml, { invalidate: !liveEditing, updateState: !liveEditing });
+      }
+      if (e.data.type === 'nz-navigate-file') {
+        if (isGenerating) return;
+        const filename = String(e.data.filename || "");
+        const anchor = String(e.data.anchor || "");
+        const known = new Set([
+          "index.html",
+          ...projectFiles.filter(f => f.filename.toLowerCase().endsWith(".html")).map(f => f.filename),
+          ...Object.keys(optimisticFiles),
+        ]);
+        if (!known.has(filename)) {
+          toast({ title: "Страница не найдена", description: filename, variant: "destructive" });
+          return;
+        }
+        setActiveFile(filename);
+        setSelectedElement(null);
+        setSelectorMode(false);
+        setStreamedCode("");
+        latestEditHtmlRef.current = null;
+      }
+      if (e.data.type === 'nz-img-click' || e.data.type === 'nz-placeholder-click') {
+        pendingImageTarget.current = e.data.path;
+        setImagePickerTab("library");
+        setImagePickerOpen(true);
+      }
+      if (e.data.type === 'nz-element-selected') {
+        setSelectedElement({
+          tag: e.data.tag,
+          text: e.data.text,
+          classes: e.data.classes,
+          path: e.data.path,
+          outerSnippet: e.data.outerSnippet,
+          snippetTruncated: !!e.data.snippetTruncated,
+        });
+      }
+      if (e.data.type === 'nz-element-deleted') {
+        const finalHtml = e.data.html;
+        setSelectedElement(null);
+        const liveEditing = editModeRef.current || selectorModeRef.current;
+        persistHtml(finalHtml, { invalidate: !liveEditing, updateState: !liveEditing });
+        toast({ title: "Элемент удалён", description: "Изменения сохранены" });
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [projectId, activeFile, isGenerating, toast]);
+
+  const flushPendingEditHtml = useCallback(() => {
+    const html = latestEditHtmlRef.current;
+    if (!html) return;
+    if (activeFile === "index.html") {
+      setStreamedCode(html);
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+    } else {
+      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+    }
+  }, [activeFile, projectId]);
+
+  const togglePreviewMode = useCallback((mode: "edit" | "selector") => {
+    if (mode === "edit") {
+      if (editMode) flushPendingEditHtml();
+      const next = !editMode;
+      // Apply tools first (sync) so React re-render cannot remount before injection.
+      if (next) setSelectorMode(false);
+      applyInPlacePreviewMode(next ? "edit" : "view");
+      setEditMode(next);
+    } else {
+      if (selectorMode) flushPendingEditHtml();
+      const next = !selectorMode;
+      if (next) {
+        setEditMode(false);
+        setSelectedElement(null);
+      }
+      applyInPlacePreviewMode(next ? "selector" : "view");
+      setSelectorMode(next);
+    }
+  }, [editMode, selectorMode, flushPendingEditHtml, applyInPlacePreviewMode]);
+
+  const handlePreviewLoad = useCallback(() => {
+    // Re-apply mode after any real document load (file switch / generation), without scroll restore hacks.
+    if (editModeRef.current) applyInPlacePreviewMode("edit");
+    else if (selectorModeRef.current) applyInPlacePreviewMode("selector");
+    else applyInPlacePreviewMode("view");
+  }, [applyInPlacePreviewMode]);
+
+  // Freeze iframe HTML identity — never rebuild from edit/selector mode.
+  const previewSrcDoc = useMemo(() => {
+    // While generating OR baking anim, prefer the latest streamed/polled HTML once
+    // the server has replaced the craft-generating placeholder.
+    if (isGenerating || animBaking) {
+      const live = streamedCode || project?.generatedCode || "";
+      if (live && !isCraftGeneratingHtml(live)) return getPreviewCode(live) || "";
+      return getPreviewCode(project?.generatedCode || "") || "";
+    }
+    return getPreviewCode(currentCode) || "";
+  }, [isGenerating, animBaking, project?.generatedCode, streamedCode, currentCode, getPreviewCode]);
+
+  const deviceWidths = { desktop: "100%", tablet: "768px", mobile: isMobile ? "100%" : "375px" };
+
+  const applyImageToIframe = useCallback((url: string) => {
+    if (!pendingImageTarget.current) return;
+    iframeRef.current?.contentWindow?.postMessage({
+      type: 'nz-replace-image',
+      path: pendingImageTarget.current,
+      url,
+    }, '*');
+    setImagePickerOpen(false);
+  }, []);
+
+  const handleReplaceFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      applyImageToIframe(reader.result as string);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  }, [applyImageToIframe]);
+
+  if (projectLoading) return <div className="h-[100dvh] flex items-center justify-center bg-[#F6F7FB] dark:bg-[#0F172A]"><Loader2 className="w-10 h-10 animate-spin text-primary" /></div>;
+
+  if (projectError || (!project && !projectLoading)) return (
+    <div className="h-[100dvh] flex flex-col items-center justify-center gap-4 bg-[#F6F7FB] dark:bg-[#0F172A] text-center px-6">
+      <p className="text-slate-500 dark:text-slate-400 text-sm max-w-xs">Не удалось загрузить проект. Проверьте соединение и попробуйте ещё раз.</p>
+      <button
+        onClick={() => refetchProject()}
+        className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white text-sm font-semibold transition-colors"
+        data-testid="button-retry-project-load"
+      >
+        Повторить попытку
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="h-[100dvh] bg-[#F6F7FB] dark:bg-[#0F172A] flex flex-col p-1.5 sm:p-3 gap-1.5 sm:gap-3 overflow-hidden pb-[env(safe-area-inset-bottom)]">
+      <header className="h-14 sm:h-16 flex items-center gap-1.5 sm:gap-3 bg-white dark:bg-slate-900 rounded-xl sm:rounded-2xl px-2 sm:px-5 border border-slate-100 dark:border-slate-800 shadow-sm shrink-0">
+        <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+          <Button variant="ghost" size="icon" className="rounded-xl h-9 w-9 shrink-0 text-slate-400 hover:text-slate-700 hover:bg-slate-100" onClick={() => setLocation("/dashboard")} data-testid="button-back">
+            <ArrowLeft className="w-4 h-4" />
+          </Button>
+          <div className="flex items-center gap-2 cursor-pointer min-w-0" onClick={() => setLocation("/")}>
+            <svg viewBox="0 0 32 32" stroke="currentColor" strokeWidth="2" fill="none" className="w-7 h-7 sm:w-8 sm:h-8 shrink-0">
+              <defs>
+                <linearGradient id="db-logo-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%"><animate attributeName="stop-color" values="#FF4242;#A5FF42;#42A5FF;#42E6FF;#B742FF;#FF4242" dur="5s" repeatCount="indefinite"/></stop>
+                  <stop offset="100%"><animate attributeName="stop-color" values="#B742FF;#FF4242;#A5FF42;#42A5FF;#42E6FF;#B742FF" dur="5s" repeatCount="indefinite"/></stop>
+                </linearGradient>
+              </defs>
+              <rect x="4" y="4" width="24" height="18" rx="4" stroke="url(#db-logo-grad)"/>
+              <circle cx="10" cy="10" r="1.5" fill="url(#db-logo-grad)" stroke="none"/>
+              <circle cx="22" cy="10" r="1.5" fill="url(#db-logo-grad)" stroke="none"/>
+              <path d="M12 16l-2 2 2 2 M20 16l2 2-2 2" stroke="url(#db-logo-grad)" strokeLinecap="round" strokeLinejoin="round"/>
+              <line x1="15" y1="20" x2="17" y2="20" stroke="url(#db-logo-grad)" strokeLinecap="round"/>
+              <path d="M8 26 h16 M10 28 h12" stroke="url(#db-logo-grad)" strokeLinecap="round"/>
+            </svg>
+            <div className="hidden md:flex flex-col min-w-0">
+              <span style={{ fontWeight: 700, fontSize: '1.1rem', letterSpacing: '-0.03em', color: '#1D1D1F', lineHeight: 1 }}>Craft AI</span>
+              <h1 className="text-xs font-bold tracking-tight text-slate-400 mt-0.5 truncate max-w-[160px]" data-testid="text-project-title">{project?.title}</h1>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex-1 min-w-0 flex items-center gap-1 sm:gap-2 overflow-x-auto py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden [&>*]:shrink-0">
+          {/* Device switcher — hide on very small screens where preview is already mobile */}
+          <div className={`flex items-center bg-slate-100 dark:bg-slate-800 rounded-full p-1 gap-0.5 ${isMobile ? "hidden" : ""}`}>
+            {[
+              { d: "desktop" as const, i: Monitor, tip: "Десктоп" },
+              { d: "tablet" as const, i: Tablet, tip: "Планшет" },
+              { d: "mobile" as const, i: Smartphone, tip: "Мобильный" },
+            ].map(({ d, i: Icon, tip }) => (
+              <button
+                key={d}
+                onClick={() => setPreviewDevice(d)}
+                data-testid={`button-device-${d}`}
+                title={tip}
+                className={`flex items-center justify-center w-8 h-8 rounded-full transition-all duration-200 ${previewDevice === d ? "bg-white dark:bg-slate-700 shadow-md text-slate-800 dark:text-white scale-105" : "text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"}`}
+              >
+                <Icon className="w-4 h-4" />
+              </button>
+            ))}
+          </div>
+
+          <div className={`h-6 w-px bg-slate-200 dark:bg-slate-700 ${isMobile ? "hidden" : ""}`} />
+
+          {/* Code toggle */}
+          <button
+            onClick={() => {
+              setShowCode(!showCode);
+              if (!showCode) {
+                setEditMode(false);
+                setSelectorMode(false);
+                applyInPlacePreviewMode("view");
+              }
+            }}
+            data-testid="button-toggle-code"
+            title={showCode ? "Просмотр сайта" : "Код"}
+            className={`flex items-center gap-2 h-9 sm:h-10 px-2.5 sm:px-4 rounded-full text-sm font-medium transition-all duration-200 ${showCode
+              ? "bg-slate-800 text-white shadow-md"
+              : "bg-white text-slate-600 border border-slate-200 shadow-sm hover:shadow-md hover:border-slate-300 hover:text-slate-800"}`}
+          >
+            {showCode ? <Eye className="w-4 h-4" /> : <Code2 className="w-4 h-4" />}
+            <span className="hidden lg:inline">{showCode ? "Превью" : "Код"}</span>
+          </button>
+
+          {!showCode && currentCode && (
+            <>
+              <button
+                onClick={() => { void togglePreviewMode("edit"); }}
+                data-testid="button-toggle-edit"
+                title="Визуальный редактор"
+                className={`hidden sm:flex items-center gap-2 h-9 sm:h-10 px-2.5 sm:px-4 rounded-full text-sm font-medium transition-all duration-200 ${editMode
+                  ? "bg-blue-500 text-white shadow-md shadow-blue-200"
+                  : "bg-white text-slate-600 border border-slate-200 shadow-sm hover:shadow-md hover:border-slate-300 hover:text-slate-800"}`}
+              >
+                <MousePointer2 className="w-4 h-4" />
+                <span className="hidden lg:inline">Редактор</span>
+              </button>
+              <button
+                onClick={() => { void togglePreviewMode("selector"); }}
+                data-testid="button-toggle-selector"
+                title="Выбрать элемент"
+                className={`hidden sm:flex items-center gap-2 h-9 sm:h-10 px-2.5 sm:px-4 rounded-full text-sm font-medium transition-all duration-200 ${selectorMode
+                  ? "bg-orange-500 text-white shadow-md shadow-orange-200"
+                  : "bg-white text-slate-600 border border-slate-200 shadow-sm hover:shadow-md hover:border-slate-300 hover:text-slate-800"}`}
+              >
+                <Crosshair className="w-4 h-4" />
+                <span className="hidden lg:inline">Выбрать</span>
+              </button>
+              <button
+                onClick={() => setShowTemplates(true)}
+                data-testid="button-templates"
+                title="Шаблоны"
+                className="hidden sm:flex items-center gap-2 h-9 sm:h-10 px-2.5 sm:px-4 rounded-full text-sm font-medium bg-white text-slate-600 border border-slate-200 shadow-sm hover:shadow-md hover:border-slate-300 hover:text-violet-600 transition-all duration-200"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span className="hidden lg:inline">Шаблоны</span>
+              </button>
+              <button
+                onClick={() => setShowGenerations(true)}
+                data-testid="button-generations"
+                title="Генерации"
+                className="relative flex items-center gap-2 h-9 sm:h-10 px-2.5 sm:px-4 rounded-full text-sm font-medium bg-white text-slate-600 border border-slate-200 shadow-sm hover:shadow-md hover:border-slate-300 hover:text-cyan-600 transition-all duration-200"
+              >
+                <ImagePlus className="w-4 h-4" />
+                <span className="hidden lg:inline">Медиа</span>
+                {projectImages.length > 0 && (
+                  <span className="absolute -top-1.5 -right-1 bg-primary text-white text-[9px] font-bold px-1.5 min-w-[18px] h-[18px] rounded-full flex items-center justify-center">{projectImages.length}</span>
+                )}
+              </button>
+              {ENABLE_3D_GENERATION && (
+              <button
+                onClick={() => { setGen3dOpen(true); setGen3dStatus("idle"); setGen3dResultUrl(""); setGen3dError(""); setGen3dImagePreview(""); setGen3dImageUrl(""); }}
+                data-testid="button-3d-library"
+                title="Создать 3D модель"
+                className="hidden md:flex items-center gap-2 h-9 sm:h-10 px-2.5 sm:px-4 rounded-full text-sm font-medium bg-white text-slate-600 border border-slate-200 shadow-sm hover:shadow-md hover:border-slate-300 hover:text-violet-600 transition-all duration-200"
+              >
+                <Box className="w-4 h-4" />
+                3D
+              </button>
+              )}
+              <button
+                onClick={() => { setVideoAnimOpen(true); setVideoAnimStep("upload"); setVideoAnimFrames([]); setVideoAnimError(""); setVideoAnimProgress(""); }}
+                data-testid="button-video-anim"
+                title="Scroll-анимация из видео"
+                className="hidden md:flex items-center gap-2 h-9 sm:h-10 px-2.5 sm:px-4 rounded-full text-sm font-medium bg-white text-slate-600 border border-slate-200 shadow-sm hover:shadow-md hover:border-slate-300 hover:text-rose-500 transition-all duration-200"
+              >
+                <Video className="w-4 h-4" />
+                <span className="hidden lg:inline">Анимация</span>
+              </button>
+            </>
+          )}
+
+          <div className="h-6 w-px bg-slate-200 dark:bg-slate-700 hidden sm:block" />
+
+          <input ref={faviconInputRef} type="file" accept="image/png,image/jpeg,image/svg+xml,image/x-icon,image/webp" className="hidden" onChange={handleFaviconUpload} data-testid="input-favicon-upload" />
+          <button
+            onClick={() => faviconInputRef.current?.click()}
+            disabled={faviconUploading || !currentCode}
+            title="Фавикон"
+            data-testid="button-favicon-upload"
+            className="hidden sm:flex items-center justify-center w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-white text-slate-500 border border-slate-200 shadow-sm hover:shadow-md hover:text-slate-700 hover:border-slate-300 transition-all duration-200 disabled:opacity-40"
+          >
+            {faviconUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : (
+              project?.generatedCode?.includes('rel="icon"') || project?.generatedCode?.includes("rel='icon'")
+                ? <Globe className="w-4 h-4 text-primary" />
+                : <Globe className="w-4 h-4" />
+            )}
+          </button>
+
+          {/* Agent V1/V2 toggle */}
+          <div className="hidden sm:flex items-center gap-0.5 p-0.5 rounded-full bg-slate-100 border border-slate-200 shadow-sm" title="Версия агента">
+            <button
+              onClick={() => {
+                setAgentVersion("v1");
+                try { localStorage.setItem("craft-agent-version", "v1"); } catch {}
+              }}
+              data-testid="button-agent-v1"
+              className="flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold transition-all"
+              style={{ background: agentVersion === "v1" ? "#fff" : "transparent", color: agentVersion === "v1" ? "#1d1d1f" : "#94a3b8", boxShadow: agentVersion === "v1" ? "0 1px 3px rgba(0,0,0,0.12)" : "none" }}
+            >V1</button>
+            <button
+              onClick={() => {
+                setAgentVersion("v2");
+                try { localStorage.setItem("craft-agent-version", "v2"); } catch {}
+              }}
+              data-testid="button-agent-v2"
+              className="flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold transition-all"
+              style={{ background: agentVersion === "v2" ? "linear-gradient(135deg,#4f46e5,#7c3aed)" : "transparent", color: agentVersion === "v2" ? "#fff" : "#94a3b8", boxShadow: agentVersion === "v2" ? "0 1px 4px rgba(99,102,241,0.5)" : "none" }}
+            >V2</button>
+          </div>
+
+          {/* Legal Audit button */}
+          <button
+            onClick={runLegalAudit}
+            disabled={!currentCode || auditRunning}
+            title="Юридический аудит сайта"
+            data-testid="button-legal-audit"
+            className="hidden sm:flex items-center justify-center w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-white text-slate-500 border border-slate-200 shadow-sm hover:shadow-md hover:text-emerald-600 hover:border-emerald-200 transition-all duration-200 disabled:opacity-40"
+          >
+            {auditRunning
+              ? <Loader2 className="w-4 h-4 animate-spin" />
+              : auditChecks && !auditHasIssues
+                ? <ShieldCheck className="w-4 h-4 text-emerald-500" />
+                : auditChecks && auditHasIssues
+                  ? <ShieldAlert className="w-4 h-4 text-amber-500" />
+                  : <ShieldCheck className="w-4 h-4" />}
+          </button>
+
+          <button
+            onClick={openYandexModal}
+            disabled={!currentCode}
+            title="Яндекс.Метрика и Вебмастер"
+            data-testid="button-yandex-settings"
+            className="hidden sm:flex items-center justify-center w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-white text-slate-500 border border-slate-200 shadow-sm hover:shadow-md hover:text-red-500 hover:border-red-200 transition-all duration-200 disabled:opacity-40"
+          >
+            {(currentCode?.includes("mc.yandex.ru/metrika") || currentCode?.includes('name="yandex-verification"'))
+              ? <BarChart2 className="w-4 h-4 text-red-500" />
+              : <BarChart2 className="w-4 h-4" />}
+          </button>
+
+          <button
+            onClick={() => setImgGenOpen(true)}
+            data-testid="button-open-image-gen"
+            title="AI Фото"
+            className="flex items-center justify-center w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-white text-slate-500 border border-slate-200 shadow-sm hover:shadow-md hover:text-violet-600 hover:border-violet-200 transition-all duration-200"
+          >
+            <Camera className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Retry animation — fallback, hollow engine, or missing object-storage media */}
+        {needsAnimRegen && !isGenerating && (
+          <button
+            title={
+              project?.interactiveHero?.mediaBroken
+                ? "Видеоанимация потеряна в хранилище — нажмите, чтобы создать заново"
+                : "Видеоанимация не создана — нажмите, чтобы запустить снова"
+            }
+            data-testid="button-regen-anim"
+            onClick={handleRegenAnim}
+            disabled={isRegenAnim}
+            className="shrink-0 flex items-center gap-2 h-10 px-4 rounded-full text-sm font-semibold bg-gradient-to-r from-violet-500 to-purple-600 text-white shadow-md shadow-violet-200 hover:shadow-lg hover:shadow-violet-300 hover:from-violet-600 hover:to-purple-700 transition-all duration-200 disabled:opacity-60"
+          >
+            {isRegenAnim ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Video className="w-4 h-4" />
+            )}
+            <span className="hidden sm:inline">
+              {project?.interactiveHero?.mediaBroken || project?.interactiveHero?.hollow
+                ? "Восстановить видео"
+                : "Создать видео"}
+            </span>
+          </button>
+        )}
+
+        {/* Publish button — always visible, outside scrollable toolbar */}
+        <button
+          title="Опубликовать"
+          data-testid="button-publish"
+          onClick={() => {
+              if (project?.publishStatus === "banned") {
+                toast({
+                  title: "Сайт заблокирован",
+                  description: "Публикация недоступна: нарушение правил хостинга. Обратитесь в поддержку.",
+                  variant: "destructive",
+                });
+                return;
+              }
+              setPublishResult(null);
+              setPublishError(null);
+              setDomainError(null);
+              setDomainVerified(null);
+              if (project?.customDomain) {
+                setCustomDomain(project.customDomain);
+                setDomainResult({ added: true, instructions: true });
+                setDomainVerified(null);
+                setTimeout(async () => {
+                  try {
+                    const res = await fetch(`/api/projects/${project.id}/domain/status?domain=${encodeURIComponent(project.customDomain!)}`, { credentials: "include" });
+                    const data = await res.json();
+                    setDomainVerified(data.verified || false);
+                    setDomainDnsReady(data.dnsReady || false);
+                    setDomainStatusMessage(data.message || "");
+                    if (data.aRecordIp) setDomainIp(data.aRecordIp);
+                  } catch { setDomainVerified(false); }
+                }, 100);
+              } else {
+                setDomainResult(null);
+              }
+              setShowPublishModal(true);
+              if (!project?.publishedUrl) {
+                setTimeout(() => handlePublish(), 50);
+              }
+            }}
+            className={`shrink-0 flex items-center gap-1.5 sm:gap-2 h-9 sm:h-10 px-3 sm:px-5 rounded-full text-sm font-semibold transition-all duration-200 ${
+              project?.publishStatus === "banned"
+                ? "bg-gradient-to-r from-red-600 to-rose-600 text-white shadow-md shadow-red-200 cursor-not-allowed"
+                : project?.publishStatus === "published"
+                ? "bg-gradient-to-r from-emerald-500 to-green-500 text-white shadow-md shadow-emerald-200 hover:shadow-lg hover:shadow-emerald-300"
+                : project?.publishStatus === "suspended"
+                ? "bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-md shadow-orange-200 hover:shadow-lg hover:shadow-orange-300"
+                : "bg-gradient-to-r from-blue-500 to-indigo-500 text-white shadow-md shadow-blue-200 hover:shadow-lg hover:shadow-blue-300 hover:from-blue-600 hover:to-indigo-600"
+            }`}
+          >
+            {project?.publishStatus === "published" ? (
+              <CheckCircle2 className="w-4 h-4" />
+            ) : (
+              <ExternalLink className="w-4 h-4" />
+            )}
+            <span className="hidden sm:inline">{
+              project?.publishStatus === "banned" ? "Заблокирован"
+                : project?.publishStatus === "published" ? "Опубликован"
+                : project?.publishStatus === "suspended" ? "Приостановлен"
+                : "Опубликовать"
+            }</span>
+          </button>
+      </header>
+
+      <div className="flex-1 flex gap-1.5 sm:gap-3 overflow-hidden relative min-h-0">
+        <SkeuoPanel className={`transition-all duration-300 ease-in-out min-w-0 ${
+          sidebarOpen
+            ? (isMobile
+              ? "absolute inset-0 z-20 w-full rounded-xl"
+              : "w-full sm:w-[440px] sm:min-w-[440px]")
+            : "w-0 opacity-0 -translate-x-full pointer-events-none absolute sm:relative"
+        }`}>
+          <div className="px-4 sm:px-5 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
+                <Sparkles className="w-3.5 h-3.5 text-primary" />
+              </div>
+              <div className="min-w-0">
+                <h2 className="text-sm font-semibold text-slate-800 truncate">AI Конструктор</h2>
+                <p className="text-[11px] text-slate-400 truncate">{project?.title}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              {versions.length > 0 && (
+                <button
+                  onClick={() => setShowVersions((v) => !v)}
+                  className={`h-8 px-2 rounded-lg flex items-center gap-1 text-[11px] font-semibold transition-colors ${
+                    showVersions
+                      ? "bg-primary/10 text-primary"
+                      : "text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+                  }`}
+                  data-testid="button-toggle-versions"
+                  title="История версий сайта"
+                >
+                  <History className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Версии</span>
+                </button>
+              )}
+              {isMobile && (
+                <button
+                  onClick={() => { setMobileView("preview"); setSidebarOpen(false); }}
+                  className="h-8 w-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                  data-testid="button-mobile-close-chat"
+                  title="К превью"
+                >
+                  <Eye className="w-4 h-4" />
+                </button>
+              )}
+              <span className="text-[10px] font-medium text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full hidden sm:inline">Craft Agent</span>
+            </div>
+          </div>
+          {showVersions && versions.length > 0 && (
+            <div className="border-b border-slate-100 bg-slate-50/50 max-h-[240px] overflow-y-auto">
+              <div className="px-4 py-3">
+                <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mb-2">Чекпоинты — нажмите «Откат»</p>
+                <div className="space-y-1">
+                  {versions.map((v) => (
+                    <div key={v.id} className="flex items-center justify-between gap-2 rounded-xl px-3 py-2 hover:bg-slate-100 transition-colors" data-testid={`version-item-${v.id}`}>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[12px] font-semibold text-slate-700 dark:text-slate-300 truncate">{v.label}</p>
+                        <p className="text-[10px] text-slate-400 dark:text-slate-500 flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          {new Date(v.createdAt).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+                        </p>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2.5 rounded-lg text-slate-500 hover:text-slate-700 hover:bg-slate-200 shrink-0"
+                        onClick={() => handleRestoreVersion(v.id)}
+                        data-testid={`button-restore-version-${v.id}`}
+                      >
+                        <RotateCcw className="w-3 h-3 mr-1" />
+                        <span className="text-[11px] font-medium">Откат</span>
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+          <ScrollArea className="flex-1">
+            <div className="py-5 space-y-4 px-4 min-w-0">
+              {(() => {
+                const currentCodeStr = streamedCode || project?.generatedCode || "";
+                let activeModelIdx = -1;
+                // Prefer the exact message marker; fall back to legacy vN labels.
+                if (currentCodeStr && versions.length > 0) {
+                  let matchedVNum = -1;
+                  let matchedMessageId = -1;
+                  for (const v of versions) {
+                    const m = (v.label || "").match(/^v(\d+)\b/);
+                    if (m && v.code === currentCodeStr) {
+                      matchedVNum = parseInt(m[1], 10);
+                      const messageMatch = (v.label || "").match(/\[msg:(\d+)\]/);
+                      if (messageMatch) matchedMessageId = parseInt(messageMatch[1], 10);
+                      break;
+                    }
+                  }
+                  if (matchedMessageId > 0) {
+                    activeModelIdx = messages.findIndex((message) => message.id === matchedMessageId);
+                  } else if (matchedVNum > 0) {
+                    let modelOrdinal = 0;
+                    for (let i = 0; i < messages.length; i++) {
+                      if (messages[i].role === "model" || messages[i].role === "assistant") {
+                        modelOrdinal++;
+                        if (modelOrdinal === matchedVNum) {
+                          activeModelIdx = i;
+                          break;
+                        }
+                      }
+                    }
+                  }
+                }
+                if (activeModelIdx === -1) {
+                  for (let i = messages.length - 1; i >= 0; i--) {
+                    if (messages[i].role === "model" || messages[i].role === "assistant") { activeModelIdx = i; break; }
+                  }
+                }
+                (window as any).__activeModelIdx = activeModelIdx;
+                return null;
+              })()}
+              {messages.map((msg, idx) => {
+                const isModel = msg.role === "model";
+                const isLatestModel = isModel && idx === (window as any).__activeModelIdx;
+                const hasSiteCheckpoint = isModel && msg.content.includes("— Списано");
+                return (
+                    <div key={msg.id} className={`rounded-2xl p-3.5 text-sm min-w-0 ${msg.role === "user" ? "bg-slate-800 text-white ml-auto max-w-[85%]" : "bg-slate-50 dark:bg-slate-800 border border-slate-100 dark:border-slate-700 mr-auto"}`} style={{ overflowWrap: "break-word", wordBreak: "break-word" }}>
+                      {msg.role === "user" ? (() => {
+                        let contentStr = msg.content;
+                        let imgPreviews: Array<{preview: string, fileName: string}> = [];
+                        let vidPreviews: Array<{fileName: string}> = [];
+                        let mdlPreviews: Array<{fileName: string}> = [];
+                        let audPreviews: Array<{fileName: string}> = [];
+                        if (contentStr.includes("\n__VIDEOS__")) {
+                          const [before, after] = contentStr.split("\n__VIDEOS__");
+                          contentStr = before;
+                          try { vidPreviews = JSON.parse(after); } catch {}
+                        }
+                        if (contentStr.includes("\n__IMAGES__")) {
+                          const [before, after] = contentStr.split("\n__IMAGES__");
+                          contentStr = before;
+                          try { imgPreviews = JSON.parse(after); } catch {}
+                        }
+                        if (contentStr.includes("\n__MODELS__")) {
+                          const [before, after] = contentStr.split("\n__MODELS__");
+                          contentStr = before;
+                          try { mdlPreviews = JSON.parse(after); } catch {}
+                        }
+                        if (contentStr.includes("\n__AUDIOS__")) {
+                          const [before, after] = contentStr.split("\n__AUDIOS__");
+                          contentStr = before;
+                          try { audPreviews = JSON.parse(after); } catch {}
+                        }
+                        return (
+                          <div style={{ overflowWrap: "break-word", wordBreak: "break-word" }}>
+                            {contentStr}
+                            {(imgPreviews.length > 0 || vidPreviews.length > 0 || mdlPreviews.length > 0 || audPreviews.length > 0) && (
+                              <div className="flex flex-wrap gap-2 mt-2">
+                                {imgPreviews.map((img, i) => (
+                                  <div key={`img-${i}`} className="flex items-center gap-2 bg-white/15 rounded-lg px-2 py-1.5">
+                                    <img src={img.preview} className="w-8 h-8 object-cover rounded" />
+                                    <span className="text-[11px] opacity-80 max-w-[100px] truncate">{img.fileName}</span>
+                                  </div>
+                                ))}
+                                {vidPreviews.map((vid, i) => (
+                                  <div key={`vid-${i}`} className="flex items-center gap-2 bg-white/15 rounded-lg px-2 py-1.5">
+                                    <Video className="w-4 h-4 opacity-80" />
+                                    <span className="text-[11px] opacity-80 max-w-[100px] truncate">{vid.fileName}</span>
+                                  </div>
+                                ))}
+                                {mdlPreviews.map((mdl, i) => (
+                                  <div key={`mdl-${i}`} className="flex items-center gap-2 bg-white/15 rounded-lg px-2 py-1.5">
+                                    <Box className="w-4 h-4 opacity-80" />
+                                    <span className="text-[11px] opacity-80 max-w-[100px] truncate">{mdl.fileName}</span>
+                                  </div>
+                                ))}
+                                {audPreviews.map((aud, i) => (
+                                  <div key={`aud-${i}`} className="flex items-center gap-2 bg-white/15 rounded-lg px-2 py-1.5">
+                                    <Music className="w-4 h-4 opacity-80" />
+                                    <span className="text-[11px] opacity-80 max-w-[100px] truncate">{aud.fileName}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })() : (
+                        <div className="space-y-2 min-w-0" style={{ overflowWrap: "break-word", wordBreak: "break-word" }}>
+                          <div className="flex items-center gap-2 mb-1 flex-wrap">
+                            {hasSiteCheckpoint && (
+                              <button
+                                onClick={() => {
+                                  const vNum = messages.filter((m, i) => m.role === "model" && m.content.includes("— Списано") && i <= idx).length;
+                                  void handleRestoreChatBadge(msg.id, vNum);
+                                }}
+                                className="hover:opacity-70 transition-opacity"
+                                title="Восстановить сайт на эту версию"
+                                data-testid={`button-restore-chat-v${messages.filter((m, i) => m.role === "model" && m.content.includes("— Списано") && i <= idx).length}`}
+                              >
+                                <Badge variant="secondary" className="bg-primary/10 text-primary border-none text-[10px] h-5 px-1.5 flex items-center gap-1 cursor-pointer">
+                                  <History className="w-3 h-3" />
+                                  <span>v{messages.filter((m, i) => m.role === "model" && m.content.includes("— Списано") && i <= idx).length}</span>
+                                </Badge>
+                              </button>
+                            )}
+                            <span className="text-primary font-black text-[11px]">Craft Agent</span>
+                            {isLatestModel && hasSiteCheckpoint && (
+                              <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 border-0 text-[10px] px-1.5 py-0 rounded-full">текущий</Badge>
+                            )}
+                          </div>
+                          <div className="text-slate-700 dark:text-slate-300 text-[13px] leading-relaxed select-text whitespace-pre-wrap" style={{ overflowWrap: "break-word", wordBreak: "break-word" }}>
+                            {msg.content.startsWith("<!") || msg.content.startsWith("<html") ? "Сайт обновлён" : msg.content}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                );
+              })}
+              {isGenerating && (
+                <div className="flex justify-start">
+                  <div className="bg-slate-50 dark:bg-slate-800 border border-slate-100 dark:border-slate-700 rounded-2xl p-3.5 text-sm max-w-[90%]">
+                    <div className="flex items-center gap-2 mb-1">
+                      <Sparkles className="w-3.5 h-3.5 text-primary shrink-0" />
+                      <span className="text-primary font-black text-[11px]">Craft Agent</span>
+                      <Loader2 className="w-3 h-3 animate-spin text-primary" />
+                    </div>
+                    {streamingReply ? (
+                      <p className="text-slate-700 dark:text-slate-300 text-[13px] leading-relaxed whitespace-pre-wrap">{streamingReply}</p>
+                    ) : (
+                      <p className="text-slate-500 text-[13px] font-medium animate-pulse">{generationStatus || "Генерируем шедевр..."}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+          </ScrollArea>
+
+
+          <div className="p-3 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+            {selectedElement && (
+              <div className="mb-3 flex items-center gap-2 bg-orange-50 dark:bg-orange-500/10 border border-orange-200 dark:border-orange-500/30 rounded-xl px-3 py-2.5">
+                <Crosshair className="w-4 h-4 text-orange-500 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <span className="text-xs font-bold text-orange-600 dark:text-orange-400">Выбран элемент: </span>
+                  <code className="text-xs bg-orange-100 dark:bg-orange-500/20 text-orange-700 dark:text-orange-300 px-1.5 py-0.5 rounded font-mono">&lt;{selectedElement.tag}{selectedElement.classes ? `.${selectedElement.classes.split(' ')[0]}` : ''}&gt;</code>
+                  {selectedElement.text && (
+                    <span className="text-xs text-orange-500/70 ml-1.5 truncate block mt-0.5">«{selectedElement.text.substring(0, 60)}{selectedElement.text.length > 60 ? '...' : ''}»</span>
+                  )}
+                </div>
+                <button
+                  onClick={() => {
+                    if (!selectedElement?.path) return;
+                    iframeRef.current?.contentWindow?.postMessage({ type: 'nz-delete-element', path: selectedElement.path }, '*');
+                  }}
+                  className="text-red-400 hover:text-red-600 transition-colors shrink-0"
+                  title="Удалить элемент"
+                  data-testid="button-delete-element"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+                <button onClick={() => setSelectedElement(null)} className="text-orange-400 hover:text-orange-600 transition-colors shrink-0" data-testid="button-clear-selection">
+                  <XCircle className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+            {(attachedImages.length > 0 || attachedVideos.length > 0 || attachedAudios.length > 0) && (
+              <div className="mb-3 space-y-2">
+                <div className="flex flex-wrap gap-2">
+                  {attachedImages.map((img, idx) => (
+                    <div key={`img-${idx}`} className="relative group inline-flex items-center gap-2 bg-white dark:bg-slate-800 rounded-lg px-3 py-2 shadow-sm border border-slate-200/50 dark:border-slate-700/50">
+                      <div className="relative w-12 h-12">
+                        {img.preview ? (
+                          <img src={img.preview} className="w-12 h-12 object-cover rounded-md" />
+                        ) : (
+                          <div className="w-12 h-12 rounded-md bg-slate-100 dark:bg-slate-700 flex items-center justify-center">
+                            <FileText className="w-5 h-5 text-slate-400" />
+                          </div>
+                        )}
+                        {img.uploading && (
+                          <div className="absolute inset-0 rounded-md bg-black/40 flex items-center justify-center">
+                            <Loader2 className="w-5 h-5 text-white animate-spin" />
+                          </div>
+                        )}
+                      </div>
+                      <span className="text-xs text-slate-500 dark:text-slate-400 max-w-[80px] truncate">{img.fileName}</span>
+                      <button className="ml-1 text-slate-400 hover:text-destructive transition-colors" onClick={() => setAttachedImages(prev => prev.filter((_, i) => i !== idx))}>
+                        <XCircle className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                  {attachedAudios.map((aud, idx) => (
+                    <div key={`aud-${idx}`} className="relative group inline-flex items-center gap-2 bg-white dark:bg-slate-800 rounded-lg px-3 py-2 shadow-sm border border-slate-200/50 dark:border-slate-700/50">
+                      <div className="w-12 h-12 rounded-md bg-gradient-to-br from-emerald-500/20 to-teal-500/20 dark:from-emerald-500/30 dark:to-teal-500/30 flex items-center justify-center">
+                        {aud.uploading ? (
+                          <Loader2 className="w-5 h-5 text-emerald-500 animate-spin" />
+                        ) : (
+                          <Music className="w-5 h-5 text-emerald-500" />
+                        )}
+                      </div>
+                      <span className="text-xs text-slate-500 dark:text-slate-400 max-w-[80px] truncate">{aud.fileName}</span>
+                      {aud.uploading && <span className="text-[10px] text-emerald-400">загрузка...</span>}
+                      <button className="ml-1 text-slate-400 hover:text-destructive transition-colors" onClick={() => setAttachedAudios(prev => prev.filter((_, i) => i !== idx))}>
+                        <XCircle className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                  {attachedVideos.map((vid, idx) => (
+                    <div key={`vid-${idx}`} className="relative group inline-flex items-center gap-2 bg-white dark:bg-slate-800 rounded-lg px-3 py-2 shadow-sm border border-slate-200/50 dark:border-slate-700/50">
+                      <div className="w-12 h-12 rounded-md bg-gradient-to-br from-blue-500/20 to-purple-500/20 dark:from-blue-500/30 dark:to-purple-500/30 flex items-center justify-center">
+                        {vid.uploading ? (
+                          <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />
+                        ) : (
+                          <Video className="w-5 h-5 text-blue-500" />
+                        )}
+                      </div>
+                      <span className="text-xs text-slate-500 dark:text-slate-400 max-w-[80px] truncate">{vid.fileName}</span>
+                      {vid.uploading && <span className="text-[10px] text-blue-400">загрузка...</span>}
+                      <button className="ml-1 text-slate-400 hover:text-destructive transition-colors" onClick={() => setAttachedVideos(prev => prev.filter((_, i) => i !== idx))}>
+                        <XCircle className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                {attachedImages.some(img => img.mimeType.startsWith("image/")) && (
+                  <button
+                    onClick={() => setMockupMode(!mockupMode)}
+                    className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${mockupMode ? 'bg-gradient-to-r from-primary to-blue-400 text-white shadow-md shadow-primary/20' : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}`}
+                    data-testid="button-mockup-mode"
+                    title="Включите, чтобы ИИ вдохновился вашими референсами (дизайн и/или фото товара) и создал профессиональный сайт"
+                  >
+                    <Layout className="w-3.5 h-3.5" />
+                    {mockupMode ? 'Профессионал (вкл)' : 'Профессионал'}
+                  </button>
+                )}
+              </div>
+            )}
+            {project?.generatedCode && (
+              <div className="flex items-center gap-1 mb-2" data-testid="agent-mode-switcher">
+                {([
+                  ["auto", "Авто", "Агент сам поймёт: обсудить или изменить сайт (−30 ток.)"],
+                  ["edit", "Изменить", "Внести правки в код сайта (−30 ток.)"],
+                  ["chat", "Обсудить", "Советы и вопросы без изменения кода (−30 ток.)"],
+                ] as const).map(([mode, label, title]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setAgentMode(mode)}
+                    disabled={isGenerating}
+                    title={title}
+                    data-testid={`button-agent-mode-${mode}`}
+                    className={`px-2.5 py-1 rounded-full text-[11px] font-semibold transition-all ${
+                      agentMode === mode
+                        ? "bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-900 shadow-sm"
+                        : "bg-slate-100 text-slate-500 hover:text-slate-700 dark:bg-slate-800 dark:text-slate-400"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="relative flex items-end">
+              <input ref={fileInputRef} type="file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.glb,.gltf" multiple onChange={handleImageUpload} className="hidden" />
+              <div className="flex-1 relative bg-slate-50 dark:bg-slate-800/50 rounded-2xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+                {attachedModels.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 px-3 pt-3">
+                    {attachedModels.map(model => (
+                      <div key={model.id} className="flex items-center gap-1.5 bg-white dark:bg-purple-900/30 border border-slate-200 dark:border-purple-700 rounded-full px-2.5 py-1 text-xs text-slate-600 dark:text-purple-300">
+                        {model.uploading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Box className="w-3 h-3" />}
+                        <span className="max-w-[120px] truncate">{model.fileName}</span>
+                        {!model.uploading && (
+                          <button onClick={() => setAttachedModels(prev => prev.filter(m => m.id !== model.id))} className="hover:text-red-500 transition-colors ml-0.5">
+                            <X className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <Textarea 
+                  placeholder={
+                    selectedElement
+                      ? "Что сделать с выбранным элементом..."
+                      : agentMode === "chat"
+                        ? "Спросите о дизайне, UX, структуре или идеях..."
+                        : agentMode === "edit"
+                          ? "Опишите, что изменить или добавить..."
+                          : "Попросите изменить сайт или задайте вопрос агенту..."
+                  }
+                  value={prompt}
+                  onChange={e => setPrompt(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), handleGenerate())}
+                  onPaste={handlePaste}
+                  className="min-h-[72px] max-h-[400px] resize-y rounded-2xl border-none bg-transparent text-sm pl-4 pr-20 py-3.5 focus-visible:ring-0 focus-visible:ring-offset-0 overflow-y-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] text-slate-700 placeholder:text-slate-400"
+                  disabled={isGenerating}
+                  data-testid="input-prompt"
+                />
+                <div className="absolute right-2 bottom-2 flex items-center gap-1">
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isGenerating}
+                    className="h-7 w-7 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-600 hover:bg-white transition-all duration-150 disabled:opacity-40"
+                    data-testid="button-upload-image"
+                  >
+                    <Paperclip className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => handleGenerate()}
+                    disabled={isGenerating || attachedImages.some(i => i.uploading) || attachedVideos.some(v => v.uploading) || attachedModels.some(m => m.uploading) || attachedAudios.some(a => a.uploading) || (!prompt.trim() && attachedImages.length === 0 && attachedVideos.filter(v => !v.uploading).length === 0 && attachedModels.filter(m => !m.uploading).length === 0 && attachedAudios.filter(a => !a.uploading).length === 0)}
+                    className="h-7 w-7 rounded-full flex items-center justify-center bg-primary text-white hover:bg-primary/90 transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm shadow-primary/30"
+                    data-testid="button-send"
+                  >
+                    <Send className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </SkeuoPanel>
+
+        <button 
+          onClick={() => setSidebarOpen(!sidebarOpen)}
+          className={`hidden sm:flex absolute left-0 top-1/2 -translate-y-1/2 z-10 w-6 h-12 bg-white dark:bg-slate-900 shadow-sm border border-slate-100 dark:border-slate-800 rounded-r-xl items-center justify-center hover:bg-slate-50 text-slate-400 hover:text-slate-700 transition-all duration-500 ${sidebarOpen ? 'translate-x-[440px]' : 'translate-x-0'}`}
+          data-testid="button-toggle-sidebar"
+        >
+          {sidebarOpen ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+        </button>
+
+        <SkeuoPanel className={`flex-1 relative bg-[#F6F7FB] dark:bg-slate-950 flex flex-col overflow-hidden min-w-0 ${isMobile && mobileView === "chat" ? "invisible" : ""}`}>
+            <div className="flex items-center gap-1 px-3 pt-3 pb-2 overflow-x-auto shrink-0 border-b border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900">
+              {allFiles.map(f => (
+                <div key={f.filename} className={`flex items-center gap-0.5 rounded-lg text-xs font-medium transition-all whitespace-nowrap ${activeFile === f.filename ? "bg-slate-100 dark:bg-slate-700 text-slate-800 dark:text-slate-200" : "text-slate-400 dark:text-slate-500 hover:text-slate-700 hover:bg-slate-50"}`}>
+                  <button
+                    onClick={() => {
+                      if (isGenerating) return;
+                      setActiveFile(f.filename);
+                      latestEditHtmlRef.current = null;
+                      setSelectedElement(null);
+                      setSelectorMode(false);
+                      setStreamedCode("");
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5"
+                    disabled={isGenerating && activeFile !== f.filename}
+                    data-testid={`tab-file-${f.filename}`}
+                  >
+                    <FileText className="w-3 h-3" />
+                    {f.filename}
+                  </button>
+                  {f.filename !== "index.html" && (
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        if (!confirm(`Удалить страницу ${f.filename}?`)) return;
+                        const fileId = projectFiles.find(pf => pf.filename === f.filename)?.id;
+                        if (!fileId) return;
+                        await fetch(`/api/projects/${projectId}/files/${fileId}`, { method: "DELETE", credentials: "include" });
+                        if (activeFile === f.filename) setActiveFile("index.html");
+                        queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+                      }}
+                      className={`pr-2 pl-0.5 py-1.5 opacity-60 hover:opacity-100 transition-opacity`}
+                      title={`Удалить ${f.filename}`}
+                      data-testid={`button-delete-file-${f.filename}`}
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              ))}
+              <button
+                onClick={() => setAddPageOpen(true)}
+                className="flex items-center justify-center w-7 h-7 rounded-lg text-slate-400 hover:text-primary hover:bg-white dark:hover:bg-slate-700 transition-all shrink-0"
+                title="Добавить страницу"
+                data-testid="button-add-page"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+            </div>
+          <div className="flex-1 p-3 overflow-hidden">
+            {showCode ? (
+              <div className="w-full h-full flex flex-col bg-slate-900 rounded-2xl overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-2 border-b border-slate-700/60 shrink-0">
+                  <span className="text-xs font-mono text-slate-400">{activeFile}</span>
+                  <button
+                    onClick={async () => {
+                      setCodeSaving(true);
+                      try {
+                        if (activeFile === "index.html") {
+                          const resp = await fetch(`/api/projects/${projectId}/code`, {
+                            method: "PUT",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ generatedCode: editableCode }),
+                            credentials: "include",
+                          });
+                          if (!resp.ok) throw new Error("save failed");
+                          setStreamedCode(editableCode);
+                          setStreamedFile("index.html");
+                          setOptimisticFiles(prev => ({ ...prev, "index.html": editableCode }));
+                          queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+                        } else {
+                          const resp = await fetch(`/api/projects/${projectId}/files/${encodeURIComponent(activeFile)}`, {
+                            method: "PUT",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ code: editableCode }),
+                            credentials: "include",
+                          });
+                          if (!resp.ok) throw new Error("save failed");
+                          setOptimisticFiles(prev => ({ ...prev, [activeFile]: editableCode }));
+                          queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+                        }
+                        toast({ title: "Сохранено", description: "Изменения применены к сайту" });
+                      } catch {
+                        toast({ title: "Ошибка", description: "Не удалось сохранить", variant: "destructive" });
+                      } finally {
+                        setCodeSaving(false);
+                      }
+                    }}
+                    disabled={codeSaving || !editableCode}
+                    className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all disabled:opacity-40"
+                    style={{ background: 'rgba(99,102,241,0.15)', color: '#818cf8', border: '1px solid rgba(99,102,241,0.3)', cursor: 'pointer' }}
+                  >
+                    {codeSaving ? <><svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeOpacity="0.3"/><path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round"/></svg> Сохранение...</> : <>✓ Применить</>}
+                  </button>
+                </div>
+                <textarea
+                  className="flex-1 w-full resize-none bg-transparent text-xs font-mono text-emerald-400 p-5 focus:outline-none overflow-auto"
+                  style={{ lineHeight: 1.6, tabSize: 2 }}
+                  value={editableCode}
+                  onChange={e => setEditableCode(e.target.value)}
+                  spellCheck={false}
+                  onKeyDown={e => {
+                    if (e.key === 'Tab') {
+                      e.preventDefault();
+                      const t = e.currentTarget;
+                      const start = t.selectionStart;
+                      const end = t.selectionEnd;
+                      const val = t.value;
+                      setEditableCode(val.substring(0, start) + '  ' + val.substring(end));
+                      requestAnimationFrame(() => { t.selectionStart = t.selectionEnd = start + 2; });
+                    }
+                  }}
+                />
+              </div>
+            ) : currentCode || isGenerating || animBaking ? (
+              <div className="w-full h-full flex items-center justify-center overflow-hidden relative">
+                 <div className="bg-white rounded-2xl shadow-sm transition-all duration-500 overflow-hidden border border-slate-200" style={{ width: deviceWidths[previewDevice], height: '100%' }} onWheel={(e) => { const iw = iframeRef.current?.contentWindow; if (!iw) return; e.preventDefault(); e.stopPropagation(); iw.scrollBy(e.deltaX, e.deltaY); }}>
+                    <iframe key={`${activeFile}-${previewEpoch}`} ref={iframeRef} srcDoc={previewSrcDoc} className="w-full h-full border-none" sandbox="allow-scripts allow-same-origin allow-forms" onLoad={handlePreviewLoad} />
+                 </div>
+                 {isGenerating && !animBaking && (
+                   <div className="absolute inset-0 flex flex-col items-center justify-center rounded-2xl" style={{ background: 'rgba(11,15,25,0.92)', backdropFilter: 'blur(4px)' }}>
+                     <svg width="160" height="160" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+                       <defs>
+                         <radialGradient id="glowGrad" cx="50%" cy="50%" r="50%">
+                           <stop offset="0%" stopColor="#6366f1" stopOpacity="0.3"/>
+                           <stop offset="100%" stopColor="#6366f1" stopOpacity="0"/>
+                         </radialGradient>
+                       </defs>
+                       <circle cx="80" cy="80" r="70" fill="url(#glowGrad)"/>
+                       <circle cx="80" cy="80" r="54" fill="none" stroke="#6366f1" strokeWidth="1" strokeOpacity="0.3"/>
+                       <circle cx="80" cy="80" r="54" fill="none" stroke="#6366f1" strokeWidth="2" strokeDasharray="30 310" strokeLinecap="round">
+                         <animateTransform attributeName="transform" type="rotate" from="0 80 80" to="360 80 80" dur="1.4s" repeatCount="indefinite"/>
+                       </circle>
+                       <circle cx="80" cy="80" r="40" fill="none" stroke="#818cf8" strokeWidth="1.5" strokeDasharray="15 220" strokeLinecap="round">
+                         <animateTransform attributeName="transform" type="rotate" from="360 80 80" to="0 80 80" dur="2s" repeatCount="indefinite"/>
+                       </circle>
+                       <g>
+                         <animateTransform attributeName="transform" type="translate" values="0,0;0,-5;0,0" dur="3s" repeatCount="indefinite" calcMode="spline" keySplines="0.4 0 0.6 1;0.4 0 0.6 1"/>
+                         <rect x="58" y="56" width="44" height="36" rx="8" fill="#1e1b4b" stroke="#6366f1" strokeWidth="1.5"/>
+                         <rect x="64" y="63" width="10" height="8" rx="2" fill="#6366f1" opacity="0.7"/>
+                         <rect x="78" y="63" width="10" height="8" rx="2" fill="#818cf8" opacity="0.7"/>
+                         <rect x="64" y="75" width="24" height="3" rx="1.5" fill="#4f46e5" opacity="0.5"/>
+                         <rect x="64" y="80" width="16" height="3" rx="1.5" fill="#4f46e5" opacity="0.35"/>
+                         <rect x="73" y="44" width="14" height="14" rx="3" fill="#1e1b4b" stroke="#6366f1" strokeWidth="1.5"/>
+                         <circle cx="80" cy="51" r="3" fill="#6366f1">
+                           <animate attributeName="opacity" values="1;0.3;1" dur="1.8s" repeatCount="indefinite"/>
+                         </circle>
+                         <line x1="78" y1="56" x2="78" y2="56" stroke="#6366f1" strokeWidth="1.5"/>
+                         <line x1="82" y1="56" x2="82" y2="56" stroke="#6366f1" strokeWidth="1.5"/>
+                         <rect x="68" y="92" width="24" height="8" rx="4" fill="#1e1b4b" stroke="#6366f1" strokeWidth="1.5"/>
+                         <circle cx="74" cy="96" r="2" fill="#6366f1" opacity="0.8"/>
+                         <circle cx="80" cy="96" r="2" fill="#818cf8" opacity="0.6"/>
+                         <circle cx="86" cy="96" r="2" fill="#4f46e5" opacity="0.6"/>
+                       </g>
+                     </svg>
+                     <p className="mt-4 text-sm font-semibold tracking-wide" style={{ color: '#818cf8' }}>{generationStatus || "Генерируем сайт..."}</p>
+                     <div className="flex gap-1.5 mt-3">
+                       {[0,1,2].map(i => (
+                         <div key={i} className="w-1.5 h-1.5 rounded-full bg-indigo-400" style={{ animation: `bounce 1.2s ${i * 0.2}s infinite ease-in-out` }}/>
+                       ))}
+                     </div>
+                     <style dangerouslySetInnerHTML={{ __html: `@keyframes bounce{0%,80%,100%{transform:scale(0.6);opacity:0.4}40%{transform:scale(1.1);opacity:1}}` }}/>
+                   </div>
+                 )}
+                 {animBaking && !isGenerating && (
+                   <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 px-3 py-1.5 rounded-full text-[12px] font-medium shadow-sm"
+                     style={{ background: "rgba(15,23,42,0.88)", color: "#c7d2fe", border: "1px solid rgba(99,102,241,0.35)" }}>
+                     {generationStatus || "Встраиваю видеоанимацию…"}
+                   </div>
+                 )}
+              </div>
+            ) : messages.length > 0 ? (
+              <div className="w-full h-full flex flex-col items-center justify-center bg-[#0b0f19] rounded-2xl overflow-hidden gap-5 p-8">
+                <div className="w-16 h-16 rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center">
+                  <svg className="w-8 h-8 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+                  </svg>
+                </div>
+                <div className="text-center max-w-xs">
+                  <p className="text-slate-200 font-semibold text-base mb-1">Генерация была прервана</p>
+                  <p className="text-slate-500 text-sm leading-relaxed">Соединение прервалось до того, как сайт был сохранён. Нажмите кнопку ниже, чтобы повторить.</p>
+                </div>
+                <button
+                  onClick={() => {
+                    const lastUserMsg = [...messages].reverse().find(m => m.role === "user");
+                    if (lastUserMsg) {
+                      setAgentVersion("v2");
+                      const ic = interactiveCreateRef.current;
+                      handleGenerate(
+                        lastUserMsg.content,
+                        true,
+                        undefined,
+                        undefined,
+                        undefined,
+                        undefined,
+                        undefined,
+                        undefined,
+                        ic.interactive || undefined,
+                        ic.interactive ? ic.style : undefined,
+                        ic.productUrl || undefined,
+                      );
+                    }
+                  }}
+                  disabled={isGenerating}
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 disabled:opacity-50 text-white text-sm font-semibold transition-colors"
+                  data-testid="button-retry-generation"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                  </svg>
+                  Сгенерировать снова
+                </button>
+              </div>
+            ) : (
+              <div className="w-full h-full flex items-center justify-center bg-[#0b0f19] rounded-2xl overflow-hidden">
+                <style dangerouslySetInnerHTML={{ __html: `
+                  .nz-robot-float{animation:nzFloat 4s infinite ease-in-out;transform-origin:center}
+                  @keyframes nzFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
+                  .nz-pupil{animation:nzScan 3s infinite ease-in-out}
+                  @keyframes nzScan{0%,100%{transform:translateX(-2px)}50%{transform:translateX(3px)}}
+                  .nz-eye-blink{animation:nzBlink 4s infinite;transform-origin:center}
+                  @keyframes nzBlink{0%,46%,48%,100%{transform:scaleY(1)}47%{transform:scaleY(.1)}}
+                  .nz-hand-left{animation:nzTapL .5s infinite linear}
+                  .nz-hand-right{animation:nzTapR .6s infinite linear}
+                  @keyframes nzTapL{0%,50%,100%{transform:translateY(0)}25%{transform:translateY(5px) rotate(-5deg)}}
+                  @keyframes nzTapR{0%,40%,100%{transform:translateY(0)}20%{transform:translateY(6px) rotate(5deg)}70%{transform:translateY(3px) rotate(2deg)}}
+                  .nz-kp1{animation:nzKP .4s infinite alternate}
+                  .nz-kp2{animation:nzKP .7s infinite alternate-reverse}
+                  .nz-kp3{animation:nzKP .5s infinite alternate}
+                  @keyframes nzKP{0%{opacity:0}100%{opacity:.8}}
+                  .nz-antenna-glow{animation:nzPulseG 2s infinite ease-in-out}
+                  @keyframes nzPulseG{0%,100%{fill:#38bdf8;filter:drop-shadow(0 0 2px #38bdf8)}50%{fill:#bae6fd;filter:drop-shadow(0 0 10px #38bdf8)}}
+                  .nz-data-stream{animation:nzStream .5s linear infinite}
+                  @keyframes nzStream{to{stroke-dashoffset:-12}}
+                  .nz-code-group{animation:nzCodeFade 6s infinite}
+                  @keyframes nzCodeFade{0%,85%{opacity:1}90%,98%{opacity:0}100%{opacity:1}}
+                  .nz-m1{animation:nzT1 6s infinite linear}
+                  @keyframes nzT1{0%{width:0}15%,90%{width:220px}95%,100%{width:0}}
+                  .nz-m2{animation:nzT2 6s infinite linear}
+                  @keyframes nzT2{0%,15%{width:0}35%,90%{width:200px}95%,100%{width:0}}
+                  .nz-m3{animation:nzT3 6s infinite linear}
+                  @keyframes nzT3{0%,35%{width:0}50%,90%{width:230px}95%,100%{width:0}}
+                  .nz-m4{animation:nzT4 6s infinite linear}
+                  @keyframes nzT4{0%,50%{width:0}60%,90%{width:170px}95%,100%{width:0}}
+                  .nz-m5{animation:nzT5 6s infinite linear}
+                  @keyframes nzT5{0%,60%{width:0}70%,90%{width:50px}95%,100%{width:0}}
+                  .nz-cursor{width:10px;height:20px;fill:#e2e8f0}
+                  .nz-c1{animation:nzC1 6s infinite linear}
+                  @keyframes nzC1{0%{transform:translate(310px,215px);opacity:1}15%{transform:translate(520px,215px);opacity:1}15.01%,100%{opacity:0}}
+                  .nz-c2{animation:nzC2 6s infinite linear}
+                  @keyframes nzC2{0%,14.99%{opacity:0}15%{transform:translate(310px,250px);opacity:1}35%{transform:translate(500px,250px);opacity:1}35.01%,100%{opacity:0}}
+                  .nz-c3{animation:nzC3 6s infinite linear}
+                  @keyframes nzC3{0%,34.99%{opacity:0}35%{transform:translate(350px,285px);opacity:1}50%{transform:translate(570px,285px);opacity:1}50.01%,100%{opacity:0}}
+                  .nz-c4{animation:nzC4 6s infinite linear}
+                  @keyframes nzC4{0%,49.99%{opacity:0}50%{transform:translate(350px,320px);opacity:1}60%{transform:translate(510px,320px);opacity:1}60.01%,100%{opacity:0}}
+                  .nz-c5{animation:nzC5 6s infinite linear}
+                  @keyframes nzC5{0%,59.99%{opacity:0}60%{transform:translate(310px,355px);opacity:1}70%{transform:translate(350px,355px);opacity:1}72%{transform:translate(350px,355px);opacity:0}74%{opacity:1}76%{opacity:0}78%{opacity:1}80%{opacity:0}82%{opacity:1}85%,100%{opacity:0}}
+                  .nz-dot1{animation:nzD1 1.5s infinite}
+                  .nz-dot2{animation:nzD2 1.5s infinite}
+                  .nz-dot3{animation:nzD3 1.5s infinite}
+                  @keyframes nzD1{0%,100%{opacity:0}20%,80%{opacity:1}}
+                  @keyframes nzD2{0%,100%{opacity:0}40%,80%{opacity:1}}
+                  @keyframes nzD3{0%,100%{opacity:0}60%,80%{opacity:1}}
+                  .nz-progress-bar{animation:nzProg 6s infinite ease-out}
+                  @keyframes nzProg{0%{width:0}80%,100%{width:300px}}
+                ` }} />
+                <svg viewBox="0 0 800 600" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" style={{ maxWidth: 600 }}>
+                  <defs>
+                    <filter id="nz-glow-bg" x="-20%" y="-20%" width="140%" height="140%">
+                      <feGaussianBlur stdDeviation="25" result="blur" />
+                      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                    </filter>
+                    <filter id="nz-terminal-shadow" x="-10%" y="-10%" width="120%" height="120%">
+                      <feDropShadow dx="0" dy="15" stdDeviation="15" floodColor="#000" floodOpacity="0.5" />
+                    </filter>
+                    <pattern id="nz-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+                      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" strokeWidth="0.5" opacity="0.5"/>
+                    </pattern>
+                    <mask id="nz-m1"><rect x="310" y="210" width="0" height="30" fill="white" className="nz-m1" /></mask>
+                    <mask id="nz-m2"><rect x="310" y="245" width="0" height="30" fill="white" className="nz-m2" /></mask>
+                    <mask id="nz-m3"><rect x="350" y="280" width="0" height="30" fill="white" className="nz-m3" /></mask>
+                    <mask id="nz-m4"><rect x="350" y="315" width="0" height="30" fill="white" className="nz-m4" /></mask>
+                    <mask id="nz-m5"><rect x="310" y="350" width="0" height="30" fill="white" className="nz-m5" /></mask>
+                  </defs>
+                  <rect width="800" height="600" fill="url(#nz-grid)" />
+                  <rect x="250" y="140" width="480" height="320" rx="15" fill="#38bdf8" opacity="0.1" filter="url(#nz-glow-bg)" />
+                  <g filter="url(#nz-terminal-shadow)">
+                    <rect x="250" y="140" width="480" height="320" rx="12" fill="#111827" stroke="#1f2937" strokeWidth="2" />
+                    <rect x="250" y="140" width="480" height="40" fill="#1f2937" />
+                    <path d="M 250 160 L 250 180 L 730 180 L 730 160 Z" fill="#1f2937" />
+                    <circle cx="275" cy="160" r="6" fill="#f43f5e" />
+                    <circle cx="295" cy="160" r="6" fill="#fbbf24" />
+                    <circle cx="315" cy="160" r="6" fill="#10b981" />
+                    <text x="490" y="165" fill="#9ca3af" fontSize="14" fontFamily="monospace" textAnchor="middle">ai_agent.ts</text>
+                    <g fontFamily="monospace" fontSize="14" fill="#4b5563" textAnchor="end">
+                      <text x="285" y="230">1</text>
+                      <text x="285" y="265">2</text>
+                      <text x="285" y="300">3</text>
+                      <text x="285" y="335">4</text>
+                      <text x="285" y="370">5</text>
+                    </g>
+                    <line x1="300" y1="180" x2="300" y2="460" stroke="#1f2937" strokeWidth="1" />
+                    <g className="nz-code-group">
+                      <g mask="url(#nz-m1)">
+                        <rect x="310" y="215" width="20" height="20" rx="4" fill="#34d399" />
+                        <rect x="340" y="215" width="100" height="20" rx="4" fill="#34d399" opacity="0.8"/>
+                        <rect x="450" y="215" width="60" height="20" rx="4" fill="#34d399" opacity="0.6"/>
+                      </g>
+                      <g mask="url(#nz-m2)">
+                        <rect x="310" y="250" width="70" height="20" rx="4" fill="#cba6f7" />
+                        <rect x="390" y="250" width="80" height="20" rx="4" fill="#60a5fa" />
+                        <rect x="480" y="250" width="20" height="20" rx="4" fill="#fbbf24" />
+                      </g>
+                      <g mask="url(#nz-m3)">
+                        <rect x="350" y="285" width="40" height="20" rx="4" fill="#cba6f7" />
+                        <rect x="400" y="285" width="40" height="20" rx="4" fill="#e2e8f0" />
+                        <rect x="450" y="290" width="10" height="10" fill="#f472b6" />
+                        <rect x="470" y="285" width="90" height="20" rx="4" fill="#34d399" />
+                      </g>
+                      <g mask="url(#nz-m4)">
+                        <rect x="350" y="320" width="50" height="20" rx="4" fill="#cba6f7" />
+                        <rect x="410" y="320" width="50" height="20" rx="4" fill="#60a5fa" />
+                        <rect x="470" y="320" width="40" height="20" rx="4" fill="#e2e8f0" />
+                      </g>
+                      <g mask="url(#nz-m5)">
+                        <rect x="310" y="355" width="20" height="20" rx="4" fill="#fbbf24" />
+                      </g>
+                    </g>
+                    <rect className="nz-cursor nz-c1" />
+                    <rect className="nz-cursor nz-c2" />
+                    <rect className="nz-cursor nz-c3" />
+                    <rect className="nz-cursor nz-c4" />
+                    <rect className="nz-cursor nz-c5" />
+                  </g>
+                  <path d="M 200 340 L 250 340" fill="none" stroke="#38bdf8" strokeWidth="2" strokeDasharray="6, 6" opacity="0.6" className="nz-data-stream" />
+                  <g className="nz-robot-float">
+                    <line x1="120" y1="200" x2="120" y2="150" stroke="#475569" strokeWidth="4" strokeLinecap="round"/>
+                    <circle cx="120" cy="150" r="8" fill="#38bdf8" className="nz-antenna-glow"/>
+                    <rect x="70" y="200" width="100" height="90" rx="20" fill="#64748b" />
+                    <rect x="80" y="215" width="80" height="50" rx="10" fill="#030712" />
+                    <g className="nz-eye-blink">
+                      <circle cx="100" cy="240" r="7" fill="#0ea5e9" />
+                      <circle cx="100" cy="240" r="3" fill="#e0f2fe" className="nz-pupil" style={{ transformOrigin: '100px 240px' }}/>
+                      <circle cx="140" cy="240" r="7" fill="#0ea5e9" />
+                      <circle cx="140" cy="240" r="3" fill="#e0f2fe" className="nz-pupil" style={{ transformOrigin: '140px 240px' }}/>
+                    </g>
+                    <g opacity="0.8">
+                      <polygon points="40,340 200,340 220,360 20,360" fill="#0f172a" stroke="#38bdf8" strokeWidth="1.5" />
+                      <line x1="60" y1="345" x2="200" y2="345" stroke="#38bdf8" strokeWidth="1" opacity="0.3" />
+                      <line x1="50" y1="350" x2="210" y2="350" stroke="#38bdf8" strokeWidth="1" opacity="0.3" />
+                      <line x1="40" y1="355" x2="220" y2="355" stroke="#38bdf8" strokeWidth="1" opacity="0.3" />
+                      <rect x="80" y="347" width="12" height="4" fill="#38bdf8" className="nz-kp1" />
+                      <rect x="130" y="352" width="15" height="4" fill="#38bdf8" className="nz-kp2" />
+                      <rect x="100" y="342" width="10" height="4" fill="#38bdf8" className="nz-kp3" />
+                    </g>
+                    <g className="nz-hand-left" style={{ transformOrigin: '90px 320px' }}>
+                      <rect x="80" y="315" width="25" height="12" rx="6" fill="#94a3b8" />
+                    </g>
+                    <g className="nz-hand-right" style={{ transformOrigin: '140px 320px' }}>
+                      <rect x="135" y="315" width="25" height="12" rx="6" fill="#94a3b8" />
+                    </g>
+                  </g>
+                  <text x="400" y="520" fill="#cbd5e1" fontSize="18" fontWeight="500" letterSpacing="1" textAnchor="middle">
+                    {generationStatus || "ИИ-агент пишет код"}
+                    <tspan className="nz-dot1">.</tspan>
+                    <tspan className="nz-dot2">.</tspan>
+                    <tspan className="nz-dot3">.</tspan>
+                  </text>
+                  <rect x="250" y="540" width="300" height="4" rx="2" fill="#1e293b" />
+                  <rect x="250" y="540" width="0" height="4" rx="2" fill="#38bdf8" className="nz-progress-bar" />
+                </svg>
+              </div>
+            )}
+          </div>
+        </SkeuoPanel>
+      </div>
+
+      {isMobile && (
+        <nav
+          className="shrink-0 flex items-center bg-white dark:bg-slate-900 rounded-xl border border-slate-100 dark:border-slate-800 shadow-sm overflow-hidden"
+          data-testid="mobile-editor-tabs"
+        >
+          <button
+            onClick={() => { setMobileView("chat"); setSidebarOpen(true); }}
+            className={`flex-1 flex items-center justify-center gap-2 h-12 text-sm font-semibold transition-colors ${
+              mobileView === "chat"
+                ? "bg-slate-800 text-white"
+                : "text-slate-500 hover:text-slate-800 hover:bg-slate-50"
+            }`}
+            data-testid="button-mobile-tab-chat"
+          >
+            <MessageSquare className="w-4 h-4" />
+            Чат
+            {isGenerating && mobileView !== "chat" && (
+              <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+            )}
+          </button>
+          <button
+            onClick={() => { setMobileView("preview"); setSidebarOpen(false); }}
+            className={`flex-1 flex items-center justify-center gap-2 h-12 text-sm font-semibold transition-colors ${
+              mobileView === "preview"
+                ? "bg-slate-800 text-white"
+                : "text-slate-500 hover:text-slate-800 hover:bg-slate-50"
+            }`}
+            data-testid="button-mobile-tab-preview"
+          >
+            <Eye className="w-4 h-4" />
+            Превью
+          </button>
+        </nav>
+      )}
+
+      <Dialog open={imgGenOpen} onOpenChange={setImgGenOpen}>
+        <DialogContent className="sm:max-w-lg p-0 bg-white dark:bg-slate-900 border-0 shadow-[0_25px_60px_-12px_rgba(0,0,0,0.25)] rounded-3xl max-h-[85vh] overflow-hidden" aria-describedby="img-gen-description">
+          <div className="relative overflow-y-auto max-h-[85vh]">
+            <div className="px-7 pt-7 pb-4">
+              <DialogHeader>
+                <DialogTitle className="text-xl font-black tracking-tight text-slate-900 dark:text-white flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/30">
+                    <Camera className="w-5 h-5 text-white" />
+                  </div>
+                  Nano Banana 2
+                </DialogTitle>
+                <DialogDescription id="img-gen-description" className="text-slate-400 dark:text-slate-500 text-[13px] mt-1.5 ml-[52px] leading-relaxed">
+                  Создавайте невероятные изображения в разрешении 1K, добавляйте референсы для похожего результата
+                </DialogDescription>
+              </DialogHeader>
+            </div>
+
+            <div className="px-7 pb-7 space-y-4">
+              <div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 block">Формат</label>
+                  <Select value={imgSize} onValueChange={setImgSize} disabled={imgGenerating}>
+                    <SelectTrigger className="rounded-xl bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white h-10 text-sm" data-testid="select-image-size">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 rounded-xl">
+                      <SelectItem value="16:9">16:9 Широкий</SelectItem>
+                      <SelectItem value="1:1">1:1 Квадрат</SelectItem>
+                      <SelectItem value="4:3">4:3 Стандарт</SelectItem>
+                      <SelectItem value="3:2">3:2 Фото</SelectItem>
+                      <SelectItem value="9:16">9:16 Вертикальный</SelectItem>
+                      <SelectItem value="3:4">3:4 Портрет</SelectItem>
+                      <SelectItem value="21:9">21:9 Ультраширокий</SelectItem>
+                      <SelectItem value="auto">Авто</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 block">Описание</label>
+                <Textarea
+                  placeholder="Spa центр Mango, нежные тона сайта, стильный шрифт"
+                  value={imgPrompt}
+                  onChange={e => setImgPrompt(e.target.value)}
+                  className="min-h-[80px] rounded-xl bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white placeholder:text-slate-300 dark:placeholder:text-slate-600 focus:border-blue-400 focus-visible:ring-0 focus-visible:ring-offset-0 resize-none text-sm"
+                  disabled={imgGenerating}
+                  data-testid="input-image-prompt"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 block">Референсы ({imgRefs.length}/14)</label>
+                <input ref={imgRefInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleRefImageUpload} />
+                <div className="flex flex-wrap gap-2">
+                  {imgRefs.map((ref, i) => (
+                    <div key={i} className="relative">
+                      <img src={ref.preview} className="w-16 h-16 object-cover rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm" data-testid={`img-reference-preview-${i}`} />
+                      {ref.uploading && (
+                        <div className="absolute inset-0 bg-black/40 rounded-lg flex items-center justify-center">
+                          <Loader2 className="w-4 h-4 text-white animate-spin" />
+                        </div>
+                      )}
+                      <button
+                        onClick={() => setImgRefs(prev => prev.filter((_, j) => j !== i))}
+                        className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-red-500 text-white rounded-full flex items-center justify-center shadow-md transition-colors"
+                        data-testid={`button-remove-reference-${i}`}
+                      >
+                        <X className="w-2.5 h-2.5" />
+                      </button>
+                    </div>
+                  ))}
+                  {imgRefs.length < 14 && (
+                    <button
+                      onClick={() => imgRefInputRef.current?.click()}
+                      disabled={imgGenerating}
+                      className="w-16 h-16 rounded-lg border-2 border-dashed border-slate-200 dark:border-slate-700 text-slate-400 dark:text-slate-500 flex flex-col items-center justify-center gap-0.5 transition-all text-sm disabled:opacity-40"
+                      data-testid="button-add-reference"
+                    >
+                      <ImageIcon className="w-4 h-4" />
+                      <span className="text-[9px]">Фото</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <Button
+                className="w-full rounded-xl font-bold h-11 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 text-white shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40 transition-all border-0 text-sm"
+                onClick={handleGenerateImage}
+                disabled={imgGenerating || !imgPrompt.trim()}
+                data-testid="button-generate-image"
+              >
+                {imgGenerating ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> {imgStatus === "creating" ? "Создаём задачу..." : "Генерируем изображение..."}</>
+                ) : (
+                  <><Sparkles className="w-4 h-4 mr-2" /> Сгенерировать · 15 токенов</>
+                )}
+              </Button>
+
+              {imgStatus === "waiting" && (
+                <div className="flex items-center gap-3 p-3.5 bg-blue-50 dark:bg-blue-500/10 rounded-xl border border-blue-200 dark:border-blue-500/20">
+                  <div className="w-9 h-9 rounded-xl bg-blue-100 dark:bg-blue-500/20 flex items-center justify-center shrink-0">
+                    <Loader2 className="w-4 h-4 animate-spin text-blue-600 dark:text-blue-400" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-blue-700 dark:text-blue-300">Генерация...</p>
+                    <p className="text-xs text-blue-500/70 dark:text-blue-400/50">Обычно 15–60 сек</p>
+                  </div>
+                </div>
+              )}
+
+              {imgStatus === "fail" && (
+                <div className="flex items-center gap-3 p-3.5 bg-red-50 dark:bg-red-500/10 rounded-xl border border-red-200 dark:border-red-500/20">
+                  <div className="w-9 h-9 rounded-xl bg-red-100 dark:bg-red-500/20 flex items-center justify-center shrink-0">
+                    <XCircle className="w-4 h-4 text-red-500 dark:text-red-400" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-red-600 dark:text-red-300">Ошибка генерации</p>
+                    <p className="text-xs text-red-500/70 dark:text-red-400/60">{imgError}</p>
+                  </div>
+                </div>
+              )}
+
+              {imgStatus === "success" && imgResultUrls.length > 0 && (
+                <div className="space-y-3">
+                  {imgResultUrls.map((url, i) => (
+                    <div key={i} className="space-y-2.5">
+                      <div className="relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700 shadow-sm">
+                        <img src={url} alt={imgPrompt} className="w-full" data-testid={`img-result-${i}`} />
+                        <div className="absolute top-2.5 left-2.5 bg-blue-500 text-white text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1 shadow-lg shadow-blue-500/30">
+                          <CheckCircle2 className="w-3 h-3" />
+                          1K
+                        </div>
+                      </div>
+                      <Button
+                        className="w-full rounded-xl font-bold h-10 bg-emerald-500 hover:bg-emerald-400 text-white shadow-md shadow-emerald-500/20 border-0 text-sm"
+                        onClick={() => handleAddImageToChat(url)}
+                        data-testid={`button-add-image-to-chat-${i}`}
+                      >
+                        <Send className="w-4 h-4 mr-2" />
+                        Добавить в чат
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={gen3dOpen} onOpenChange={(v) => { if (!gen3dGenerating) setGen3dOpen(v); }}>
+        <DialogContent className="sm:max-w-lg p-0 bg-white dark:bg-slate-900 border-0 shadow-[0_25px_60px_-12px_rgba(0,0,0,0.25)] rounded-3xl max-h-[85vh] overflow-hidden" aria-describedby="gen3d-description">
+          <div className="relative overflow-y-auto max-h-[85vh]">
+            <div className="px-7 pt-7 pb-4">
+              <DialogHeader>
+                <DialogTitle className="text-xl font-black tracking-tight text-slate-900 dark:text-white flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center shadow-lg shadow-violet-500/30">
+                    <Box className="w-5 h-5 text-white" />
+                  </div>
+                  Hunyuan3D V3
+                </DialogTitle>
+                <DialogDescription id="gen3d-description" className="text-slate-400 dark:text-slate-500 text-[13px] mt-1.5 ml-[52px] leading-relaxed">
+                  Создайте 3D модель из фотографии — загрузите изображение объекта
+                </DialogDescription>
+              </DialogHeader>
+            </div>
+
+            <div className="px-7 pb-7 space-y-4">
+              <div>
+                <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 block">Изображение объекта</label>
+                <input ref={gen3dInputRef} type="file" accept="image/*" className="hidden" onChange={handle3DImageUpload} />
+                {gen3dImagePreview ? (
+                  <div className="relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700 shadow-sm">
+                    <img src={gen3dImagePreview} className="w-full max-h-[200px] object-contain bg-slate-50 dark:bg-slate-800" data-testid="img-3d-preview" />
+                    {!gen3dImageUrl && (
+                      <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                        <Loader2 className="w-6 h-6 text-white animate-spin" />
+                      </div>
+                    )}
+                    {!gen3dGenerating && (
+                      <button
+                        onClick={() => { setGen3dImagePreview(""); setGen3dImageUrl(""); }}
+                        className="absolute top-2 right-2 w-7 h-7 bg-black/60 text-white rounded-full flex items-center justify-center hover:bg-black/80 transition-colors"
+                        data-testid="button-remove-3d-image"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => gen3dInputRef.current?.click()}
+                    disabled={gen3dGenerating}
+                    className="w-full h-32 rounded-2xl border-2 border-dashed border-slate-200 dark:border-slate-700 text-slate-400 dark:text-slate-500 flex flex-col items-center justify-center gap-2 transition-all hover:border-violet-400 hover:text-violet-500 disabled:opacity-40"
+                    data-testid="button-upload-3d-image"
+                  >
+                    <ImageIcon className="w-8 h-8" />
+                    <span className="text-sm font-bold">Загрузить фото объекта</span>
+                    <span className="text-[11px] opacity-60">PNG, JPG, WebP до 20 МБ</span>
+                  </button>
+                )}
+              </div>
+
+              {projectImages.length > 0 && !gen3dImagePreview && (
+                <div>
+                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 block">Или выберите из библиотеки</label>
+                  <div className="flex flex-wrap gap-2">
+                    {projectImages.map((img: any) => (
+                      <button
+                        key={img.id}
+                        onClick={() => { setGen3dImagePreview(img.url); setGen3dImageUrl(img.url); }}
+                        disabled={gen3dGenerating}
+                        className="w-16 h-16 rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden hover:ring-2 hover:ring-violet-400 transition-all disabled:opacity-40"
+                        data-testid={`button-3d-library-img-${img.id}`}
+                      >
+                        <img src={img.url} className="w-full h-full object-cover" />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 block">Тип генерации</label>
+                  <Select value={gen3dType} onValueChange={setGen3dType} disabled={gen3dGenerating}>
+                    <SelectTrigger className="rounded-xl bg-slate-50 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white h-10 text-sm" data-testid="select-3d-type">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 rounded-xl">
+                      <SelectItem value="Normal">Текстурированная</SelectItem>
+                      <SelectItem value="LowPoly">Low Poly</SelectItem>
+                      <SelectItem value="Geometry">Геометрия (белая)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex items-end pb-1">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={gen3dPbr}
+                      onChange={e => setGen3dPbr(e.target.checked)}
+                      disabled={gen3dGenerating}
+                      className="rounded border-slate-300 dark:border-slate-600 text-violet-600 focus:ring-violet-500 w-4 h-4"
+                      data-testid="checkbox-pbr"
+                    />
+                    <span className="text-sm font-bold text-slate-700 dark:text-slate-300">PBR материалы</span>
+                  </label>
+                </div>
+              </div>
+
+              <Button
+                className="w-full rounded-xl font-bold h-11 bg-gradient-to-r from-violet-600 to-purple-500 hover:from-violet-500 hover:to-purple-400 text-white shadow-lg shadow-violet-500/25 hover:shadow-violet-500/40 transition-all border-0 text-sm"
+                onClick={handleGenerate3D}
+                disabled={gen3dGenerating || !gen3dImageUrl}
+                data-testid="button-generate-3d"
+              >
+                {gen3dGenerating ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> {gen3dStatus === "creating" ? "Создаём задачу..." : "Генерируем 3D модель..."}</>
+                ) : (
+                  <><Box className="w-4 h-4 mr-2" /> Создать 3D модель · 100 токенов</>
+                )}
+              </Button>
+
+              {gen3dStatus === "waiting" && (
+                <div className="flex items-center gap-3 p-3.5 bg-violet-50 dark:bg-violet-500/10 rounded-xl border border-violet-200 dark:border-violet-500/20">
+                  <div className="w-9 h-9 rounded-xl bg-violet-100 dark:bg-violet-500/20 flex items-center justify-center shrink-0">
+                    <Loader2 className="w-4 h-4 animate-spin text-violet-600 dark:text-violet-400" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-violet-700 dark:text-violet-300">Генерация 3D модели...</p>
+                    <p className="text-xs text-violet-500/70 dark:text-violet-400/50">Обычно 30–120 сек</p>
+                  </div>
+                </div>
+              )}
+
+              {gen3dStatus === "fail" && (
+                <div className="flex items-center gap-3 p-3.5 bg-red-50 dark:bg-red-500/10 rounded-xl border border-red-200 dark:border-red-500/20">
+                  <div className="w-9 h-9 rounded-xl bg-red-100 dark:bg-red-500/20 flex items-center justify-center shrink-0">
+                    <XCircle className="w-4 h-4 text-red-500 dark:text-red-400" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-bold text-red-600 dark:text-red-300">Ошибка генерации</p>
+                    <p className="text-xs text-red-500/70 dark:text-red-400/60">{gen3dError}</p>
+                  </div>
+                </div>
+              )}
+
+              {gen3dStatus === "success" && gen3dResultUrl && (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3 p-3.5 bg-emerald-50 dark:bg-emerald-500/10 rounded-xl border border-emerald-200 dark:border-emerald-500/20">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-100 dark:bg-emerald-500/20 flex items-center justify-center shrink-0">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold text-emerald-700 dark:text-emerald-300">3D модель готова!</p>
+                      <p className="text-xs text-emerald-500/70 dark:text-emerald-400/50 truncate max-w-[280px]">{gen3dResultUrl.split("/").pop()}</p>
+                    </div>
+                  </div>
+                  <Button
+                    className="w-full rounded-xl font-bold h-10 bg-emerald-500 hover:bg-emerald-400 text-white shadow-md shadow-emerald-500/20 border-0 text-sm"
+                    onClick={() => handleInsert3D(gen3dResultUrl)}
+                    data-testid="button-insert-3d"
+                  >
+                    <Box className="w-4 h-4 mr-2" />
+                    Прикрепить к чату и встроить на сайт
+                  </Button>
+                  <a
+                    href={gen3dResultUrl}
+                    download="model.glb"
+                    className="block w-full text-center rounded-xl font-bold h-10 leading-10 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-sm transition-colors"
+                    data-testid="link-download-3d"
+                  >
+                    <Download className="w-4 h-4 mr-2 inline" />
+                    Скачать .glb файл
+                  </a>
+                </div>
+              )}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Video-to-Scroll-Animation dialog ─────────────────────────────────── */}
+      <Dialog open={videoAnimOpen} onOpenChange={(v) => { if (!videoAnimInserting && videoAnimStep !== "processing") setVideoAnimOpen(v); }}>
+        <DialogContent className="sm:max-w-lg p-0 bg-white dark:bg-slate-900 border-0 shadow-[0_25px_60px_-12px_rgba(0,0,0,0.25)] rounded-3xl max-h-[85vh] overflow-hidden" aria-describedby="videoanim-desc">
+          <div className="px-6 pt-6 pb-5 border-b border-slate-100 dark:border-slate-800">
+            <DialogHeader>
+              <DialogTitle className="text-lg font-black text-slate-900 dark:text-white flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-rose-500 to-orange-500 flex items-center justify-center shadow-lg shadow-rose-500/25">
+                  <Video className="w-5 h-5 text-white" />
+                </div>
+                Scroll-анимация из видео
+              </DialogTitle>
+              <DialogDescription id="videoanim-desc" className="text-slate-400 text-sm mt-1.5 ml-[52px]">
+                Загрузите готовое видео — мы нарежем кадры и вставим scroll-анимацию в нужный блок
+              </DialogDescription>
+            </DialogHeader>
+          </div>
+
+          <div className="px-6 py-5 space-y-4">
+            {/* Step: upload */}
+            {videoAnimStep === "upload" && (
+              <>
+                <input
+                  ref={videoAnimInputRef}
+                  type="file"
+                  accept="video/mp4,video/webm,video/quicktime,video/ogg,.mp4,.webm,.mov,.ogg"
+                  className="hidden"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    setVideoAnimError("");
+                    setVideoAnimStep("processing");
+                    setVideoAnimProgress("Загружаю видео и нарезаю кадры...");
+                    try {
+                      const fd = new FormData();
+                      fd.append("video", file);
+                      const resp = await fetch(`/api/projects/${projectId}/video-frames`, { method: "POST", body: fd });
+                      const data = await resp.json();
+                      if (!resp.ok) throw new Error(data.message || "Ошибка сервера");
+                      setVideoAnimFrames(data.frames || []);
+                      // Load sections list
+                      setVideoAnimProgress("Определяю блоки сайта...");
+                      const secResp = await fetch(`/api/projects/${projectId}/sections`);
+                      const secData = await secResp.json();
+                      setVideoAnimSections(secData.sections || ["Секция 1"]);
+                      setVideoAnimHasExisting(!!secData.hasExistingAnim);
+                      setVideoAnimReplaceExisting(!!secData.hasExistingAnim);
+                      setVideoAnimSectionIdx(0);
+                      setVideoAnimStep("select");
+                    } catch (err: any) {
+                      setVideoAnimError(err.message || "Ошибка");
+                      setVideoAnimStep("upload");
+                    }
+                    e.target.value = "";
+                  }}
+                />
+                <div
+                  className="border-2 border-dashed border-slate-200 dark:border-slate-700 rounded-2xl p-10 flex flex-col items-center gap-3 cursor-pointer hover:border-rose-400 hover:bg-rose-50/50 dark:hover:bg-rose-900/10 transition-all"
+                  onClick={() => videoAnimInputRef.current?.click()}
+                >
+                  <div className="w-14 h-14 rounded-2xl bg-rose-50 dark:bg-rose-900/20 flex items-center justify-center">
+                    <Video className="w-7 h-7 text-rose-400" />
+                  </div>
+                  <div className="text-center">
+                    <p className="font-bold text-slate-700 dark:text-slate-200 text-sm">Нажмите чтобы выбрать видео</p>
+                    <p className="text-xs text-slate-400 mt-1">MP4, WebM, MOV · любая длина · до 200 МБ</p>
+                  </div>
+                </div>
+                {videoAnimError && (
+                  <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl px-4 py-3">{videoAnimError}</div>
+                )}
+              </>
+            )}
+
+            {/* Step: processing */}
+            {videoAnimStep === "processing" && (
+              <div className="flex flex-col items-center gap-5 py-8">
+                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-rose-500 to-orange-500 flex items-center justify-center shadow-lg shadow-rose-500/30 animate-pulse">
+                  <Video className="w-8 h-8 text-white" />
+                </div>
+                <div className="text-center space-y-1">
+                  <p className="font-bold text-slate-700 dark:text-slate-200">{videoAnimProgress}</p>
+                  <p className="text-xs text-slate-400">Это займёт несколько секунд...</p>
+                </div>
+                <Loader2 className="w-6 h-6 text-rose-400 animate-spin" />
+              </div>
+            )}
+
+            {/* Step: select block */}
+            {videoAnimStep === "select" && (
+              <div className="space-y-4">
+                <div className="bg-emerald-50 dark:bg-emerald-900/20 rounded-xl px-4 py-3 flex items-center gap-3">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-500 shrink-0" />
+                  <div>
+                    <p className="text-sm font-bold text-emerald-700 dark:text-emerald-300">Готово — {videoAnimFrames.length} кадров нарезано</p>
+                    <p className="text-xs text-emerald-600/70 dark:text-emerald-400/70">
+                      {videoAnimHasExisting ? "Замените текущую анимацию или вставьте новую" : "Выберите, после какого блока вставить анимацию"}
+                    </p>
+                  </div>
+                </div>
+
+                {videoAnimHasExisting && (
+                  <div className="flex rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden text-sm font-medium">
+                    <button
+                      onClick={() => setVideoAnimReplaceExisting(true)}
+                      className={`flex-1 py-2.5 px-3 transition-all ${videoAnimReplaceExisting ? "bg-rose-500 text-white" : "bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-750"}`}
+                    >
+                      Заменить Hero
+                    </button>
+                    <button
+                      onClick={() => setVideoAnimReplaceExisting(false)}
+                      className={`flex-1 py-2.5 px-3 transition-all border-l border-slate-200 dark:border-slate-700 ${!videoAnimReplaceExisting ? "bg-rose-500 text-white" : "bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-750"}`}
+                    >
+                      Вставить после блока
+                    </button>
+                  </div>
+                )}
+
+                {(!videoAnimHasExisting || !videoAnimReplaceExisting) && (
+                  <div>
+                    <p className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Вставить после блока:</p>
+                    <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                      {videoAnimSections.map((label, i) => (
+                        <button
+                          key={i}
+                          onClick={() => setVideoAnimSectionIdx(i)}
+                          className={`w-full text-left px-4 py-2.5 rounded-xl text-sm font-medium transition-all border ${
+                            videoAnimSectionIdx === i
+                              ? "bg-rose-50 dark:bg-rose-900/30 border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-300"
+                              : "bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-300"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {videoAnimHasExisting && videoAnimReplaceExisting && (
+                  <div className="bg-amber-50 dark:bg-amber-900/20 rounded-xl px-4 py-3 text-xs text-amber-700 dark:text-amber-300">
+                    Hero-блок станет анимацией. Заголовок и подзаголовок из Hero сохранятся как текст поверх видео. Предыдущая версия — в истории.
+                  </div>
+                )}
+
+                <Button
+                  className="w-full h-11 bg-gradient-to-r from-rose-500 to-orange-500 hover:from-rose-600 hover:to-orange-600 text-white font-bold rounded-xl shadow-lg shadow-rose-500/25"
+                  disabled={videoAnimInserting}
+                  onClick={async () => {
+                    setVideoAnimInserting(true);
+                    try {
+                      const body: Record<string, any> = { frames: videoAnimFrames, texts: [] };
+                      if (videoAnimReplaceExisting && videoAnimHasExisting) {
+                        body.replaceExisting = true;
+                      } else {
+                        body.insertAfterSection = videoAnimSectionIdx;
+                      }
+                      const resp = await fetch(`/api/projects/${projectId}/inject-scroll-anim`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(body),
+                      });
+                      const data = await resp.json();
+                      if (!resp.ok) throw new Error(data.message || "Ошибка вставки");
+                      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+                      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "versions"] });
+                      setVideoAnimStep("done");
+                    } catch (err: any) {
+                      setVideoAnimError(err.message || "Ошибка");
+                    } finally {
+                      setVideoAnimInserting(false);
+                    }
+                  }}
+                >
+                  {videoAnimInserting ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Вставляю...</> : <><CheckCircle2 className="w-4 h-4 mr-2" />{videoAnimReplaceExisting && videoAnimHasExisting ? "Заменить анимацию" : "Вставить анимацию"}</>}
+                </Button>
+                {videoAnimError && <div className="text-sm text-red-500 bg-red-50 dark:bg-red-900/20 rounded-xl px-4 py-3">{videoAnimError}</div>}
+              </div>
+            )}
+
+            {/* Step: done */}
+            {videoAnimStep === "done" && (
+              <div className="flex flex-col items-center gap-5 py-8">
+                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-400 to-green-500 flex items-center justify-center shadow-lg shadow-emerald-500/30">
+                  <CheckCircle2 className="w-8 h-8 text-white" />
+                </div>
+                <div className="text-center space-y-1">
+                  <p className="font-bold text-slate-700 dark:text-slate-200">Анимация вставлена!</p>
+                  <p className="text-xs text-slate-400">Прокрутите сайт чтобы увидеть эффект</p>
+                </div>
+                <Button className="w-full h-11 bg-slate-900 dark:bg-white text-white dark:text-slate-900 font-bold rounded-xl" onClick={() => setVideoAnimOpen(false)}>
+                  Закрыть
+                </Button>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={imagePickerOpen} onOpenChange={setImagePickerOpen}>
+        <DialogContent className="sm:max-w-lg p-0 bg-[#0c0c0f] border border-white/[0.08] shadow-[0_24px_80px_rgba(0,0,0,0.6)] rounded-2xl max-h-[85vh] overflow-hidden">
+          <div className="px-6 py-5 border-b border-white/[0.06]">
+            <DialogHeader>
+              <DialogTitle className="text-lg font-black text-white flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
+                  <ImageIcon className="w-4 h-4 text-white" />
+                </div>
+                Выбор изображения
+              </DialogTitle>
+              <DialogDescription className="text-white/40 text-sm mt-1">Библиотека или загрузка с компьютера</DialogDescription>
+            </DialogHeader>
+
+            <div className="flex gap-1.5 mt-4 bg-white/[0.04] rounded-xl p-1">
+              <button
+                className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${imagePickerTab === "library" ? "bg-white/[0.1] text-white shadow-sm" : "text-white/40 hover:text-white/60"}`}
+                onClick={() => setImagePickerTab("library")}
+                data-testid="button-picker-library"
+              >
+                <ImagePlus className="w-3.5 h-3.5" />
+                Библиотека
+                {projectImages.length > 0 && <span className="text-[10px] bg-violet-500/30 text-violet-300 px-1.5 py-0.5 rounded-full">{projectImages.length}</span>}
+              </button>
+              <button
+                className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${imagePickerTab === "upload" ? "bg-white/[0.1] text-white shadow-sm" : "text-white/40 hover:text-white/60"}`}
+                onClick={() => setImagePickerTab("upload")}
+                data-testid="button-picker-upload"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Загрузка
+              </button>
+            </div>
+          </div>
+
+          <div className="px-6 py-5 overflow-y-auto max-h-[50vh]">
+            {imagePickerTab === "library" ? (
+              <>
+                {projectImages.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-14 text-white/30">
+                    <div className="w-16 h-16 rounded-2xl bg-white/[0.04] flex items-center justify-center mb-4">
+                      <ImageIcon className="w-8 h-8 opacity-40" />
+                    </div>
+                    <p className="text-sm font-bold text-white/50">Пока пусто</p>
+                    <p className="text-xs mt-1 text-white/30">Сгенерируйте через AI Фото</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 gap-3">
+                    {projectImages.map((img) => (
+                      <button
+                        key={img.id}
+                        className="group relative rounded-xl overflow-hidden border border-white/[0.06] hover:border-violet-500/50 transition-all cursor-pointer aspect-video bg-white/[0.03] hover:scale-[1.02]"
+                        onClick={() => applyImageToIframe(img.url)}
+                        data-testid={`picker-image-${img.id}`}
+                      >
+                        <img src={img.url} alt={img.name} className="w-full h-full object-cover" />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-all flex items-end">
+                          <p className="text-white text-xs font-bold p-2.5 truncate w-full">{img.name}</p>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="flex flex-col items-center justify-center py-12 border border-dashed border-white/[0.1] rounded-2xl bg-white/[0.02] hover:bg-white/[0.04] transition-colors">
+                <input
+                  ref={replaceFileInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleReplaceFileUpload}
+                  className="hidden"
+                />
+                <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-cyan-500/20 to-blue-500/20 flex items-center justify-center mb-4">
+                  <Download className="w-6 h-6 text-cyan-400" />
+                </div>
+                <p className="text-sm font-bold text-white/60 mb-1">Загрузить с компьютера</p>
+                <p className="text-xs text-white/30 mb-5">PNG, JPG, WEBP</p>
+                <Button
+                  className="rounded-xl font-bold bg-white/[0.08] hover:bg-white/[0.12] text-white border border-white/[0.1] shadow-none"
+                  onClick={() => replaceFileInputRef.current?.click()}
+                  data-testid="button-picker-file-upload"
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  Выбрать файл
+                </Button>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={addPageOpen} onOpenChange={setAddPageOpen}>
+        <DialogContent className="sm:max-w-md" aria-describedby="add-page-description">
+          <DialogHeader>
+            <DialogTitle>Новая страница</DialogTitle>
+            <DialogDescription id="add-page-description">Укажите заголовок и имя файла</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3 pt-2">
+            <div>
+              <label className="text-xs font-semibold text-muted-foreground mb-1.5 block">Заголовок страницы</label>
+              <Input
+                value={newPageTitle}
+                onChange={(e) => {
+                  setNewPageTitle(e.target.value);
+                  const auto = e.target.value.trim().toLowerCase()
+                    .replace(/[а-яё]/g, c => ({"а":"a","б":"b","в":"v","г":"g","д":"d","е":"e","ё":"yo","ж":"zh","з":"z","и":"i","й":"y","к":"k","л":"l","м":"m","н":"n","о":"o","п":"p","р":"r","с":"s","т":"t","у":"u","ф":"f","х":"h","ц":"ts","ч":"ch","ш":"sh","щ":"sch","ъ":"","ы":"y","ь":"","э":"e","ю":"yu","я":"ya"} as any)[c] || c)
+                    .replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "");
+                  if (auto) setNewPageName(auto);
+                }}
+                placeholder='Например: О компании'
+                className="h-10 rounded-xl"
+                data-testid="input-new-page-title"
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-muted-foreground mb-1.5 block">Имя файла</label>
+              <div className="flex items-center gap-2">
+                <Input
+                  value={newPageName}
+                  onChange={(e) => setNewPageName(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ""))}
+                  placeholder="about"
+                  className="flex-1 h-10 rounded-xl font-mono text-sm"
+                  data-testid="input-new-page-name"
+                  onKeyDown={(e) => { if (e.key === "Enter") handleAddPage(); }}
+                />
+                <span className="text-sm text-muted-foreground font-mono">.html</span>
+              </div>
+            </div>
+            <Button onClick={handleAddPage} disabled={!newPageName.trim()} className="mt-1" data-testid="button-confirm-add-page">
+              <Plus className="w-4 h-4 mr-2" />
+              Создать
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Favicon Crop Modal */}
+      {faviconCropOpen && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.75)", display: "flex", alignItems: "center", justifyContent: "center" }}
+          onMouseMove={onCropMouseMove} onMouseUp={() => setCropDrag(null)} onMouseLeave={() => setCropDrag(null)}>
+          <div style={{ background: "#1a1a2e", borderRadius: 20, padding: 24, width: 520, maxWidth: "95vw", boxShadow: "0 25px 80px rgba(0,0,0,0.6)" }}>
+            <div style={{ fontWeight: 700, fontSize: "1.1rem", color: "#fff", marginBottom: 6 }}>Обрезать фавикон</div>
+            <div style={{ color: "#aaa", fontSize: "0.8rem", marginBottom: 16 }}>Перетащите квадрат в нужное место. Потяните за угол — изменить размер.</div>
+            <div ref={cropContainerRef} style={{ position: "relative", width: "100%", aspectRatio: "1/1", overflow: "hidden", borderRadius: 12, background: "#000", cursor: cropDrag?.mode === "move" ? "grabbing" : "default" }}>
+              <img ref={cropImgRef} src={faviconRawSrc} onLoad={() => {
+                if (cropContainerRef.current) {
+                  const r = cropContainerRef.current.getBoundingClientRect();
+                  const s = Math.min(r.width, r.height) * 0.8;
+                  setCropBox({ x: (r.width - s) / 2, y: (r.height - s) / 2, size: s });
+                }
+              }} style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", userSelect: "none", pointerEvents: "none" }} alt="" />
+              <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.5)", pointerEvents: "none" }} />
+              <div
+                onMouseDown={(e) => onCropMouseDown(e, "move")}
+                style={{
+                  position: "absolute",
+                  left: cropBox.x, top: cropBox.y,
+                  width: cropBox.size, height: cropBox.size,
+                  border: "2px solid #fff",
+                  boxShadow: "0 0 0 9999px rgba(0,0,0,0.5)",
+                  cursor: "grab",
+                  boxSizing: "border-box",
+                }}
+              >
+                <div style={{ position: "absolute", inset: 0, background: "transparent" }} />
+                <div onMouseDown={(e) => { e.stopPropagation(); onCropMouseDown(e, "resize"); }}
+                  style={{ position: "absolute", bottom: -6, right: -6, width: 16, height: 16, background: "#fff", borderRadius: 4, cursor: "se-resize", boxShadow: "0 2px 6px rgba(0,0,0,0.4)" }} />
+                <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", color: "rgba(255,255,255,0.6)", fontSize: "0.65rem", pointerEvents: "none", whiteSpace: "nowrap" }}>
+                  {Math.round(cropBox.size)} × {Math.round(cropBox.size)}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 16, justifyContent: "flex-end" }}>
+              <Button variant="outline" onClick={() => setFaviconCropOpen(false)} style={{ borderRadius: 10 }}>Отмена</Button>
+              <Button onClick={applyFaviconCrop} style={{ borderRadius: 10, background: "linear-gradient(135deg,#667eea,#764ba2)", border: "none" }}>
+                Сохранить фавикон
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Publish Modal */}
+      <Dialog open={showPublishModal} onOpenChange={setShowPublishModal}>
+        <DialogContent className="w-[min(480px,calc(100vw-1rem))] p-0 flex flex-col" style={{ borderRadius: 0, maxHeight: "calc(100dvh - 2rem)", overflow: "hidden" }}>
+          {/* sticky header */}
+          <div style={{ background: "linear-gradient(135deg,#0f0c29,#302b63,#24243e)", padding: "1rem 1.25rem", flexShrink: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.65rem" }}>
+              <div style={{ width: 34, height: 34, borderRadius: 8, background: "rgba(255,255,255,0.1)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <ExternalLink className="w-4 h-4 text-white" />
+              </div>
+              <div>
+                <div style={{ fontSize: "1rem", fontWeight: 800, color: "#fff", letterSpacing: "-0.02em" }}>Публикация сайта</div>
+                <div style={{ fontSize: "0.72rem", color: "rgba(255,255,255,0.5)" }}>Хостинг сайта · 35 токенов/день</div>
+              </div>
+            </div>
+          </div>
+
+          {/* scrollable body */}
+          <div style={{ overflowY: "auto", flex: 1, padding: "1rem 1.25rem 1.25rem" }}>
+            {!publishResult && !isPublishing && !publishError && project?.publishedUrl && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", color: "#16a34a" }}>
+                  <CheckCircle2 className="w-5 h-5" />
+                  <span style={{ fontWeight: 700, fontSize: "0.95rem" }}>Сайт опубликован</span>
+                </div>
+                <div style={{ background: "#f8f8f8", borderRadius: 12, padding: "0.75rem 1rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <a href={project.publishedUrl} target="_blank" rel="noreferrer" style={{ flex: 1, fontSize: "0.82rem", color: "#007AFF", wordBreak: "break-all" }}>{project.publishedUrl}</a>
+                  <button
+                    onClick={() => handleCopyUrl(project.publishedUrl!)}
+                    style={{ flexShrink: 0, padding: "0.4rem 0.7rem", borderRadius: 8, border: "1px solid #e5e7eb", background: copied ? "#f0fdf4" : "#fff", cursor: "pointer", fontSize: "0.75rem", fontWeight: 600, color: copied ? "#16a34a" : "#555", transition: "all 0.2s" }}
+                  >
+                    {copied ? "Скопировано!" : "Копировать"}
+                  </button>
+                </div>
+
+                <div style={{ borderTop: "1px solid #e5e7eb", paddingTop: "1rem" }}>
+                  <div style={{ fontSize: "0.8rem", fontWeight: 700, color: "#333", marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                    Свой домен
+                    {domainResult && domainVerified === true && (
+                      <span style={{ fontSize: "0.72rem", color: "#16a34a", fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ width: 10, height: 10, borderRadius: "50%", background: "#22c55e", display: "inline-block", boxShadow: "0 0 6px #22c55e" }} />
+                        Подключён
+                      </span>
+                    )}
+                    {domainResult && domainVerified !== true && (
+                      <span style={{ fontSize: "0.72rem", color: "#f59e0b", fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ width: 10, height: 10, borderRadius: "50%", background: "#f59e0b", display: "inline-block", boxShadow: "0 0 6px #f59e0b" }} />
+                        Добавлен
+                      </span>
+                    )}
+                    {domainResult && (
+                      <button
+                        onClick={handleChangeDomain}
+                        style={{ marginLeft: "auto", fontSize: "0.72rem", color: "#6b7280", background: "none", border: "1px solid #e5e7eb", borderRadius: 6, padding: "2px 8px", cursor: "pointer", fontWeight: 500 }}
+                        data-testid="button-change-domain"
+                      >
+                        Сменить домен
+                      </button>
+                    )}
+                  </div>
+                  {!domainResult ? (
+                    <>
+                      <div style={{ display: "flex", gap: "0.5rem" }}>
+                        <input
+                          type="text"
+                          placeholder="example.ru"
+                          value={customDomain}
+                          onChange={(e) => setCustomDomain(e.target.value)}
+                          style={{ flex: 1, padding: "0.5rem 0.75rem", borderRadius: 10, border: "1px solid #e5e7eb", fontSize: "0.85rem", outline: "none" }}
+                          data-testid="input-custom-domain"
+                        />
+                        <Button
+                          size="sm"
+                          onClick={handleAddDomain}
+                          disabled={domainAdding || !customDomain.trim()}
+                          style={{ borderRadius: 10, fontSize: "0.8rem" }}
+                          data-testid="button-add-domain"
+                        >
+                          {domainAdding ? <Loader2 className="w-4 h-4 animate-spin" /> : "Привязать"}
+                        </Button>
+                      </div>
+                      <div style={{ marginTop: 7, fontSize: "0.8rem", color: "#6b7280" }}>
+                        Нет домена?{" "}
+                        <a
+                          href="https://www.reg.ru/domain/new/?rlink=reflink-32024207"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: "#7c3aed", fontWeight: 700, textDecoration: "underline", textDecorationColor: "#c4b5fd" }}
+                        >
+                          Купить
+                        </a>
+                      </div>
+                      {domainError && (
+                        <div style={{ marginTop: 8, fontSize: "0.78rem", color: "#dc2626" }}>{domainError}</div>
+                      )}
+                    </>
+                  ) : (
+                    <DnsInstructions
+                      customDomain={customDomain}
+                      aRecordIp={domainIp}
+                      domainChecking={domainChecking}
+                      domainVerified={domainVerified}
+                      domainDnsReady={domainDnsReady}
+                      domainStatusMessage={domainStatusMessage}
+                      onCheck={handleCheckDomain}
+                      testId="button-check-domain"
+                    />
+                  )}
+                </div>
+
+                <div style={{ display: "flex", gap: "0.75rem" }}>
+                  <Button variant="outline" onClick={() => window.open(project.publishedUrl!, "_blank")} style={{ flex: 1 }}>
+                    <ExternalLink className="w-4 h-4 mr-2" />
+                    Открыть сайт
+                  </Button>
+                  <Button onClick={handlePublish} style={{ flex: 1, background: "linear-gradient(135deg,#667eea,#764ba2)", border: "none" }} data-testid="button-confirm-publish">
+                    Обновить сайт
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {isPublishing && (
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "1rem", padding: "1rem 0" }}>
+                <Loader2 className="w-10 h-10 animate-spin" style={{ color: "#764ba2" }} />
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontWeight: 700, color: "#1D1D1F", marginBottom: 4 }}>Публикуем сайт…</div>
+                  <div style={{ fontSize: "0.82rem", color: "#86868B" }}>Загружаем файлы в Yandex Cloud</div>
+                </div>
+              </div>
+            )}
+
+            {publishResult && !isPublishing && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", color: "#16a34a" }}>
+                  <CheckCircle2 className="w-5 h-5" />
+                  <span style={{ fontWeight: 700, fontSize: "0.95rem" }}>Сайт опубликован!</span>
+                </div>
+                <div style={{ background: "#f8f8f8", borderRadius: 12, padding: "0.75rem 1rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <a href={publishResult} target="_blank" rel="noreferrer" style={{ flex: 1, fontSize: "0.82rem", color: "#007AFF", wordBreak: "break-all" }}>{publishResult}</a>
+                  <button
+                    onClick={() => handleCopyUrl(publishResult)}
+                    style={{ flexShrink: 0, padding: "0.4rem 0.7rem", borderRadius: 8, border: "1px solid #e5e7eb", background: copied ? "#f0fdf4" : "#fff", cursor: "pointer", fontSize: "0.75rem", fontWeight: 600, color: copied ? "#16a34a" : "#555", transition: "all 0.2s" }}
+                  >
+                    {copied ? "Скопировано!" : "Копировать"}
+                  </button>
+                </div>
+
+                <div style={{ borderTop: "1px solid #e5e7eb", paddingTop: "1rem" }}>
+                  <div style={{ fontSize: "0.8rem", fontWeight: 700, color: "#333", marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                    Свой домен
+                    {domainResult && domainVerified === true && (
+                      <span style={{ fontSize: "0.72rem", color: "#16a34a", fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ width: 10, height: 10, borderRadius: "50%", background: "#22c55e", display: "inline-block", boxShadow: "0 0 6px #22c55e" }} />
+                        Подключён
+                      </span>
+                    )}
+                    {domainResult && domainVerified !== true && (
+                      <span style={{ fontSize: "0.72rem", color: "#f59e0b", fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ width: 10, height: 10, borderRadius: "50%", background: "#f59e0b", display: "inline-block", boxShadow: "0 0 6px #f59e0b" }} />
+                        Добавлен
+                      </span>
+                    )}
+                    {domainResult && (
+                      <button
+                        onClick={handleChangeDomain}
+                        style={{ marginLeft: "auto", fontSize: "0.72rem", color: "#6b7280", background: "none", border: "1px solid #e5e7eb", borderRadius: 6, padding: "2px 8px", cursor: "pointer", fontWeight: 500 }}
+                        data-testid="button-change-domain-2"
+                      >
+                        Сменить домен
+                      </button>
+                    )}
+                  </div>
+                  {!domainResult ? (
+                    <>
+                      <div style={{ display: "flex", gap: "0.5rem" }}>
+                        <input
+                          type="text"
+                          placeholder="example.ru"
+                          value={customDomain}
+                          onChange={(e) => setCustomDomain(e.target.value)}
+                          style={{ flex: 1, padding: "0.5rem 0.75rem", borderRadius: 10, border: "1px solid #e5e7eb", fontSize: "0.85rem", outline: "none" }}
+                          data-testid="input-custom-domain-result"
+                        />
+                        <Button
+                          size="sm"
+                          onClick={handleAddDomain}
+                          disabled={domainAdding || !customDomain.trim()}
+                          style={{ borderRadius: 10, fontSize: "0.8rem" }}
+                          data-testid="button-add-domain-result"
+                        >
+                          {domainAdding ? <Loader2 className="w-4 h-4 animate-spin" /> : "Привязать"}
+                        </Button>
+                      </div>
+                      <div style={{ marginTop: 7, fontSize: "0.8rem", color: "#6b7280" }}>
+                        Нет домена?{" "}
+                        <a
+                          href="https://www.reg.ru/domain/new/?rlink=reflink-32024207"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          style={{ color: "#7c3aed", fontWeight: 700, textDecoration: "underline", textDecorationColor: "#c4b5fd" }}
+                        >
+                          Купить
+                        </a>
+                      </div>
+                      {domainError && (
+                        <div style={{ marginTop: 8, fontSize: "0.78rem", color: "#dc2626" }}>{domainError}</div>
+                      )}
+                    </>
+                  ) : (
+                    <DnsInstructions
+                      customDomain={customDomain}
+                      aRecordIp={domainIp}
+                      domainChecking={domainChecking}
+                      domainVerified={domainVerified}
+                      domainDnsReady={domainDnsReady}
+                      domainStatusMessage={domainStatusMessage}
+                      onCheck={handleCheckDomain}
+                      testId="button-check-domain-2"
+                    />
+                  )}
+                </div>
+
+                <div style={{ display: "flex", gap: "0.75rem" }}>
+                  <Button variant="outline" onClick={() => setShowPublishModal(false)} style={{ flex: 1 }}>Закрыть</Button>
+                  <Button
+                    onClick={() => window.open(publishResult, "_blank")}
+                    style={{ flex: 1, background: "linear-gradient(135deg,#667eea,#764ba2)", border: "none" }}
+                  >
+                    <ExternalLink className="w-4 h-4 mr-2" />
+                    Открыть сайт
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {publishError && !isPublishing && (
+              <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", color: "#dc2626" }}>
+                  <XCircle className="w-5 h-5" />
+                  <span style={{ fontWeight: 700, fontSize: "0.95rem" }}>Ошибка публикации</span>
+                </div>
+                <div style={{ background: "#fef2f2", borderRadius: 12, padding: "0.75rem 1rem", fontSize: "0.82rem", color: "#dc2626" }}>{publishError}</div>
+                <div style={{ display: "flex", gap: "0.75rem" }}>
+                  <Button variant="outline" onClick={() => setShowPublishModal(false)} style={{ flex: 1 }}>Закрыть</Button>
+                  <Button onClick={handlePublish} style={{ flex: 1 }}>Повторить</Button>
+                </div>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showGenerations} onOpenChange={setShowGenerations}>
+        <DialogContent className="max-w-2xl max-h-[80vh] bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden p-0">
+          <div className="px-6 pt-6 pb-3">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-3 text-lg font-black">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/30">
+                  <ImagePlus className="w-5 h-5 text-white" />
+                </div>
+                Генерации
+              </DialogTitle>
+              <DialogDescription className="text-slate-500 dark:text-slate-400 text-sm mt-1">Все сгенерированные изображения и 3D модели проекта</DialogDescription>
+            </DialogHeader>
+          </div>
+          <div className="px-6 pb-6 overflow-y-auto max-h-[60vh]">
+            {projectImages.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+                <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center mb-4">
+                  <ImageIcon className="w-8 h-8 opacity-40" />
+                </div>
+                <p className="text-sm font-bold text-slate-500 dark:text-slate-400">Пока пусто</p>
+                <p className="text-xs mt-1 text-slate-400 dark:text-slate-500">Сгенерируйте изображения через AI Фото или 3D модели</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {projectImages.map((img) => {
+                  const is3D = img.url.endsWith(".glb") || img.url.endsWith(".gltf") || img.name.startsWith("3d_model") || img.name.toLowerCase().includes(".glb") || img.name.toLowerCase().includes(".gltf");
+                  return (
+                    <div key={img.id} className="group relative rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 hover:border-cyan-400 dark:hover:border-cyan-500 transition-all bg-slate-50 dark:bg-slate-800" data-testid={`gen-item-${img.id}`}>
+                      {is3D ? (
+                        <div className="aspect-square flex flex-col items-center justify-center bg-gradient-to-br from-violet-100 to-purple-100 dark:from-violet-900/30 dark:to-purple-900/30">
+                          <Box className="w-10 h-10 text-violet-500 mb-2" />
+                          <span className="text-xs font-bold text-violet-600 dark:text-violet-400">3D модель</span>
+                          <span className="text-[10px] text-violet-400 dark:text-violet-500 mt-0.5">.GLB</span>
+                        </div>
+                      ) : (
+                        <div className="aspect-square">
+                          <img src={img.url} alt={img.name} className="w-full h-full object-cover" loading="lazy" />
+                        </div>
+                      )}
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-all flex flex-col items-stretch justify-end p-2.5 gap-1.5">
+                        <p className="text-white text-xs font-bold truncate">{img.name}</p>
+                        {img.prompt && <p className="text-white/60 text-[10px] truncate">{img.prompt}</p>}
+                        <div className="flex gap-1.5">
+                          <Button
+                            size="sm"
+                            className="flex-1 h-7 text-[11px] rounded-lg bg-cyan-500 hover:bg-cyan-600 text-white font-bold"
+                            onClick={async () => {
+                              if (is3D) {
+                                setAttachedModels(prev => [...prev, { id: `lib-${img.id}`, url: img.url, fileName: img.name + ".glb", uploading: false }]);
+                                toast({ title: "3D модель добавлена в чат" });
+                                setShowGenerations(false);
+                              } else {
+                                try {
+                                  let base64: string;
+                                  let mimeType: string;
+                                  const isExternal = img.url.startsWith("http");
+                                  if (isExternal) {
+                                    const proxyRes = await fetch("/api/images/proxy-base64", {
+                                      method: "POST",
+                                      headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({ url: img.url }),
+                                      credentials: "same-origin",
+                                    });
+                                    if (!proxyRes.ok) throw new Error("proxy failed");
+                                    const data = await proxyRes.json();
+                                    base64 = data.base64;
+                                    mimeType = data.mimeType || "image/jpeg";
+                                  } else {
+                                    const r = await fetch(img.url, { credentials: "same-origin" });
+                                    if (!r.ok) throw new Error("fetch failed");
+                                    const blob = await r.blob();
+                                    const dataUrl = await new Promise<string>((resolve, reject) => {
+                                      const reader = new FileReader();
+                                      reader.onload = () => resolve(reader.result as string);
+                                      reader.onerror = () => reject(new Error("read failed"));
+                                      reader.readAsDataURL(blob);
+                                    });
+                                    base64 = dataUrl.split(",")[1];
+                                    mimeType = blob.type || "image/jpeg";
+                                  }
+                                  const preview = `data:${mimeType};base64,${base64}`;
+                                  setAttachedImages(prev => [...prev, { id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, base64, mimeType, preview, fileName: img.name + ".jpg", url: img.url }]);
+                                  toast({ title: "Изображение добавлено в чат" });
+                                  setShowGenerations(false);
+                                } catch (e) {
+                                  console.error("Gen add to chat error:", e);
+                                  toast({ title: "Ошибка загрузки", variant: "destructive" });
+                                }
+                              }
+                            }}
+                            data-testid={`gen-add-${img.id}`}
+                          >
+                            <Send className="w-3 h-3 mr-1" />
+                            В чат
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 w-7 p-0 rounded-lg border-white/30 text-white hover:bg-white/20 hover:border-white/50"
+                            onClick={() => {
+                              const a = document.createElement("a");
+                              a.href = img.url;
+                              a.download = img.name + (is3D ? ".glb" : ".jpg");
+                              a.click();
+                            }}
+                            data-testid={`gen-download-${img.id}`}
+                            title="Скачать"
+                          >
+                            <Download className="w-3 h-3" />
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 w-7 p-0 rounded-lg border-white/30 text-white hover:bg-red-500/80 hover:border-red-500"
+                            onClick={() => { handleDeleteImage(img.id); }}
+                            data-testid={`gen-delete-${img.id}`}
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Legal Audit Modal */}
+      <Dialog open={auditOpen} onOpenChange={setAuditOpen}>
+        <DialogContent className="max-w-lg" style={{ borderRadius: 20 }}>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-lg">
+              <ShieldCheck className="w-5 h-5 text-emerald-500" />
+              Юридический аудит сайта
+            </DialogTitle>
+            <DialogDescription>
+              Проверка соответствия 152-ФЗ и требованиям российского законодательства
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-3 py-1">
+            {auditRunning && (
+              <div className="flex flex-col items-center justify-center gap-3 py-8">
+                <Loader2 className="w-8 h-8 animate-spin text-emerald-500" />
+                <p className="text-sm text-slate-500">ИИ анализирует сайт...</p>
+              </div>
+            )}
+
+            {auditError && !auditRunning && (
+              <div className="flex items-center gap-2 p-3 rounded-xl bg-red-50 text-red-700 text-sm">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                {auditError}
+              </div>
+            )}
+
+            {auditChecks && !auditRunning && (
+              <>
+                {/* Summary badge */}
+                {(() => {
+                  const issues = auditChecks.filter(c => c.status !== "ok");
+                  const okCount = auditChecks.filter(c => c.status === "ok").length;
+                  return (
+                    <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold ${issues.length === 0 ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                      {issues.length === 0
+                        ? <><CheckCircle className="w-4 h-4" /> Всё в порядке — {okCount} из {auditChecks.length} требований выполнено</>
+                        : <><ShieldAlert className="w-4 h-4" /> Найдено {issues.length} нарушени{issues.length === 1 ? "е" : issues.length < 5 ? "я" : "й"} из {auditChecks.length} проверок</>}
+                    </div>
+                  );
+                })()}
+
+                {/* Checklist */}
+                <div className="flex flex-col gap-1.5">
+                  {auditChecks.map(check => (
+                    <div key={check.id} className={`flex items-start gap-3 p-3 rounded-xl border transition-all ${
+                      check.status === "ok" ? "border-emerald-100 bg-emerald-50/50" :
+                      check.status === "partial" ? "border-amber-100 bg-amber-50/50" :
+                      "border-red-100 bg-red-50/50"
+                    }`}>
+                      <div className="mt-0.5 flex-shrink-0">
+                        {check.status === "ok"
+                          ? <CheckCircle className="w-4 h-4 text-emerald-500" />
+                          : check.status === "partial"
+                            ? <AlertTriangle className="w-4 h-4 text-amber-500" />
+                            : <AlertCircle className="w-4 h-4 text-red-500" />}
+                      </div>
+                      <div className="flex flex-col gap-0.5 min-w-0">
+                        <span className={`text-sm font-semibold leading-tight ${
+                          check.status === "ok" ? "text-emerald-800" :
+                          check.status === "partial" ? "text-amber-800" : "text-red-800"
+                        }`}>{check.name}</span>
+                        <span className="text-xs text-slate-500 leading-relaxed">{check.note}</span>
+                      </div>
+                      <span className={`ml-auto flex-shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                        check.status === "ok" ? "bg-emerald-100 text-emerald-700" :
+                        check.status === "partial" ? "bg-amber-100 text-amber-700" :
+                        "bg-red-100 text-red-700"
+                      }`}>
+                        {check.status === "ok" ? "OK" : check.status === "partial" ? "Неполн." : "Нет"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Org details input */}
+                <div className="flex flex-col gap-1.5 pt-1">
+                  <label className="text-xs font-semibold text-slate-600">
+                    Реквизиты организации <span className="font-normal text-slate-400">(для «Исправить всё»)</span>
+                  </label>
+                  <textarea
+                    value={auditOrgDetails}
+                    onChange={e => setAuditOrgDetails(e.target.value)}
+                    placeholder={"ООО «Ромашка», ИНН 7701234567, ОГРН 1027700132195\nАдрес: 125009, г. Москва, ул. Тверская, д. 1\nТел.: +7 (495) 000-00-00, email: info@romashka.ru"}
+                    rows={3}
+                    data-testid="input-org-details"
+                    className="w-full text-xs px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:border-emerald-300 resize-none transition-all"
+                  />
+                </div>
+
+                {/* Action buttons */}
+                <div className="flex gap-2 pt-1">
+                  <Button variant="outline" onClick={() => setAuditOpen(false)} className="flex-1" style={{ borderRadius: 10 }}>
+                    Закрыть
+                  </Button>
+                  {auditHasIssues && (
+                    <Button
+                      onClick={applyLegalFixes}
+                      className="flex-1 font-semibold"
+                      style={{ borderRadius: 10, background: "linear-gradient(135deg,#10b981,#059669)", border: "none" }}
+                      data-testid="button-apply-legal-fixes"
+                    >
+                      <ShieldCheck className="w-4 h-4 mr-1.5" />
+                      Исправить всё
+                    </Button>
+                  )}
+                  <Button
+                    variant="outline"
+                    onClick={runLegalAudit}
+                    className="w-10 flex-shrink-0 px-0"
+                    style={{ borderRadius: 10 }}
+                    title="Повторить аудит"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Yandex Metrika & Webmaster Modal */}
+      <Dialog open={yandexOpen} onOpenChange={setYandexOpen}>
+        <DialogContent className="max-w-lg" style={{ borderRadius: 20 }}>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-lg">
+              <BarChart2 className="w-5 h-5 text-red-500" />
+              Яндекс-интеграции
+            </DialogTitle>
+            <DialogDescription>
+              Вставьте код или номер счётчика — он будет автоматически добавлен в правильное место сайта
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-5 py-2">
+            {/* Metrika */}
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-semibold text-slate-700 flex items-center gap-1.5">
+                <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-100 text-red-600 text-xs font-bold">М</span>
+                Яндекс.Метрика
+              </label>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Вставьте только <strong>номер счётчика</strong> (например: <code className="bg-slate-100 px-1 rounded">110093984</code>) или полный код <code className="bg-slate-100 px-1 rounded">&lt;script&gt;...&lt;/script&gt;</code> из интерфейса Метрики
+              </p>
+              <Textarea
+                value={yandexMetrika}
+                onChange={e => setYandexMetrika(e.target.value)}
+                placeholder={"110093984\n\nили вставьте полный скрипт Яндекс.Метрики"}
+                rows={4}
+                className="font-mono text-xs resize-none"
+                data-testid="input-yandex-metrika"
+              />
+            </div>
+
+            {/* Webmaster */}
+            <div className="flex flex-col gap-2">
+              <label className="text-sm font-semibold text-slate-700 flex items-center gap-1.5">
+                <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-yellow-100 text-yellow-700 text-xs font-bold">В</span>
+                Яндекс.Вебмастер — подтверждение прав
+              </label>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Скопируйте метатег из Яндекс.Вебмастера (раздел «Подтверждение прав → HTML-файл / Метатег») и вставьте сюда
+              </p>
+              <Textarea
+                value={yandexWebmaster}
+                onChange={e => setYandexWebmaster(e.target.value)}
+                placeholder={'<meta name="yandex-verification" content="df43d5ca01a446cc" />\n\nили просто значение content: df43d5ca01a446cc'}
+                rows={3}
+                className="font-mono text-xs resize-none"
+                data-testid="input-yandex-webmaster"
+              />
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <Button
+                variant="outline"
+                onClick={() => setYandexOpen(false)}
+                className="flex-1"
+                style={{ borderRadius: 10 }}
+              >
+                Отмена
+              </Button>
+              <Button
+                onClick={saveYandex}
+                disabled={yandexSaving || (!yandexMetrika.trim() && !yandexWebmaster.trim())}
+                className="flex-1"
+                style={{ borderRadius: 10, background: "linear-gradient(135deg,#f43f5e,#dc2626)", border: "none" }}
+                data-testid="button-save-yandex"
+              >
+                {yandexSaving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null}
+                Сохранить и применить
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <UITemplatesModal
+        open={showTemplates}
+        onClose={() => setShowTemplates(false)}
+        onInsert={(html, css) => {
+          const code = `\n<!-- UI Template -->\n<style>\n${css}\n</style>\n${html}\n`;
+          navigator.clipboard.writeText(code).then(() => {
+            toast({ title: "Код скопирован!", description: "Вставьте его в чат или используйте Ctrl+V" });
+          });
+          setShowTemplates(false);
+        }}
+      />
+
+    </div>
+  );
+}

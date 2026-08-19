@@ -1,0 +1,61 @@
+modules = ["nodejs-20", "web", "python-3.11", "postgresql-16"]
+run = "npm run dev"
+hidden = [".config", ".git", "generated-icon.png", "node_modules", "dist"]
+
+[nix]
+channel = "stable-24_05"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 5904
+externalPort = 3000
+
+[env]
+PORT = "5000"
+
+[deployment]
+deploymentTarget = "vm"
+run = ["node", "./dist/index.cjs"]
+build = ["npm", "run", "build"]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "npm run dev"
+waitForPort = 5000
+
+[agent]
+integrations = ["javascript_gemini_ai_integrations:2.0.0", "javascript_object_storage:2.0.0"]
+
+[userenv]
+
+[userenv.shared]
+KIE_API_KEY = "7fffdc464ea80b7a9b1bc6d55f234eda"
+VITE_TELEGRAM_BOT_USERNAME = "Craft_AI_RU_bot"
+VERCEL_TEAM_ID = "team_fCrQIv76IWyFW4VRtMnBAMl5"
+VERCEL_TOKEN = "vcp_4bMqxx6CUY5WTee7y93ZdwXPNfKuAW2a8gHGLpL8IAldonmtpx2JigD6"
+WAVESPEED_API_KEY = "999e06ab39d0a191d4f70f4cdc30535dd4135e0bff241897e4b9067d904577ba"
+VITE_YANDEX_CLIENT_ID = "bfd0ce127ec3456294a95e804eed9a4f"
+DOMAIN_PROXY_IP = "45.153.69.131"
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000

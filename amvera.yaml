@@ -1,0 +1,15 @@
+meta:
+  environment: nodejs
+  toolchain:
+    name: npm
+    version: "20"
+
+build:
+  # Force public npm registry — Amvera builds can inherit a broken Replit
+  # package-firewall registry from historical .replit projects.
+  additionalCommands: npm config set registry https://registry.npmjs.org/ && npm install --include=dev --registry=https://registry.npmjs.org/ && npm run build
+
+run:
+  command: npm run start
+  containerPort: 5000
+  persistenceMount: /data

@@ -1,0 +1,14 @@
+node_modules
+dist
+.cursor
+.agents
+uploads/
+__pycache__/
+*.pyc
+.DS_Store
+server/public
+vite.config.ts.*
+*.tar.gz
+.env
+.env.*
+!.env.example
