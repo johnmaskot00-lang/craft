@@ -37,26 +37,44 @@ async function comparePasswords(supplied: string, stored: string | null) {
   return timingSafeEqual(hashedPasswordBuf, suppliedPasswordBuf);
 }
 
+/** Fields Telegram includes in the Login Widget HMAC (never extras like `ref`). */
+const TELEGRAM_AUTH_FIELDS = [
+  "id",
+  "first_name",
+  "last_name",
+  "username",
+  "photo_url",
+  "auth_date",
+] as const;
+
 function verifyTelegramHash(data: Record<string, any>): boolean {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) return false;
 
-  const { hash, ...rest } = data;
+  const hash = typeof data.hash === "string" ? data.hash : "";
   if (!hash) return false;
 
-  const dataCheckString = Object.keys(rest)
+  // Only official Telegram fields — client may also send `ref` / referral extras.
+  const dataCheckString = TELEGRAM_AUTH_FIELDS
+    .filter((key) => data[key] !== undefined && data[key] !== null && data[key] !== "")
+    .slice()
     .sort()
-    .filter(key => rest[key] !== undefined && rest[key] !== null)
-    .map(key => `${key}=${rest[key]}`)
+    .map((key) => `${key}=${String(data[key])}`)
     .join("\n");
 
   const secretKey = createHash("sha256").update(botToken).digest();
   const hmac = createHmac("sha256", secretKey).update(dataCheckString).digest("hex");
 
-  if (hmac !== hash) return false;
+  try {
+    const a = Buffer.from(hmac, "hex");
+    const b = Buffer.from(hash, "hex");
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
+  } catch {
+    return false;
+  }
 
-  const authDate = parseInt(rest.auth_date);
-  if (Date.now() / 1000 - authDate > 86400) return false;
+  const authDate = parseInt(String(data.auth_date), 10);
+  if (!Number.isFinite(authDate) || Date.now() / 1000 - authDate > 86400) return false;
 
   return true;
 }
