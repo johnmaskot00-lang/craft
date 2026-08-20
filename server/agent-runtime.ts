@@ -654,7 +654,7 @@ ${"═".repeat(43)}
 4. Если правка затрагивает общий стиль/навигацию — обнови все затронутые страницы
 5. Запрещено вызывать finish без реального apply_patch/write_page, который меняет код
 6. Запрещены no-op патчи (SEARCH == REPLACE) и патчи «ради галочки»
-7. ИНТЕРАКТИВНЫЙ HERO: секции с data-craft-scrollanim / data-frames / data-video / data-base / data-reveal / data-craft-motion и следующие за ними <style>/<script> — НЕ удаляй и НЕ переписывай целиком, если пользователь явно не просит убрать анимацию. Меняй только текст оверлеев. Не подменяй /objects/... на внешние стоки (Vimeo и т.п.)
+7. ИНТЕРАКТИВНЫЙ HERO: секции с data-craft-scrollanim / data-frames / data-video / data-base / data-reveal / data-base-m / data-reveal-m / data-craft-motion и следующие за ними <style>/<script> — НЕ удаляй и НЕ переписывай целиком, если пользователь явно не просит убрать анимацию. Меняй только текст оверлеев. Не подменяй /objects/... на внешние стоки (Vimeo и т.п.)
 8. GEO: не выкидывай JSON-LD, FAQ, canonical и ссылку на /llms.txt
 
 ${manifest}

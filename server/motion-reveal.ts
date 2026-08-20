@@ -3,15 +3,23 @@
  *
  * Pipeline: base FULL-COLOR still, then reveal I2I from that exact base via
  * KIE nano-banana-2 (1K, fast poll)
- * → self-contained HTML with fluid cursor reveal, chromatic edges, soft pixelation.
+ * → desktop 16:9 pair + mobile 9:16 pair
+ * → self-contained HTML with fluid cursor reveal (desktop) / scroll-driven reveal (phone).
  *
- * The sequential base→reveal order is intentional: the reveal must preserve the
- * first frame's object geometry and pixel placement for a stable morph.
- * Look: vivid color↔color morph (day/night, mood shift) — not forced B&W→color.
+ * Mobile: touch does NOT paint the trail (that blocked page scroll). Reveal follows
+ * scroll progress instead; portrait art is used when available.
  */
-export const SCROLL_MOTION_COST = 120;
+export const SCROLL_MOTION_COST = 140;
 
 export type MotionText = { title: string; sub: string };
+
+export type MotionRevealPair = {
+  baseUrl: string;
+  revealUrl: string;
+  /** Portrait 9:16 pair for phones — optional if generation fails. */
+  baseMobileUrl?: string;
+  revealMobileUrl?: string;
+};
 
 export type GenerateMotionRevealDeps = {
   kieApiKey: string;
@@ -30,6 +38,8 @@ const STILL_RESOLUTION = "1K";
 const STILL_DEADLINE_MS = 120 * 1000;
 const MAX_STILL_ATTEMPTS = 6;
 const POLL_MS = 1500;
+
+type MotionAspect = "16:9" | "9:16";
 
 function cleanEnglishPrompt(raw: string): string {
   const cleaned = raw
@@ -119,6 +129,7 @@ async function createStill(
   deps: GenerateMotionRevealDeps,
   prompt: string,
   label: string,
+  aspect: MotionAspect,
   inputUrl?: string,
 ): Promise<string | null> {
   if (!deps.kieApiKey) return null;
@@ -131,13 +142,13 @@ async function createStill(
       ? {
           prompt,
           image_input: [inputUrl],
-          aspect_ratio: "16:9",
+          aspect_ratio: aspect,
           resolution: STILL_RESOLUTION,
           output_format: "jpg",
         }
       : {
           prompt,
-          aspect_ratio: "16:9",
+          aspect_ratio: aspect,
           resolution: STILL_RESOLUTION,
           output_format: "jpg",
         };
@@ -163,123 +174,213 @@ async function createStill(
   return null;
 }
 
-function buildBasePrompt(baseScene: string, hasProduct: boolean): string {
+function compositionHint(aspect: MotionAspect): string {
+  if (aspect === "9:16") {
+    return (
+      `VERTICAL 9:16 phone hero framing: keep the main subject in the LOWER/CENTER area, ` +
+      `leave calm uncluttered negative space in the UPPER third for website hero text overlay. ` +
+      `Tall portrait crop, not landscape.`
+    );
+  }
+  return (
+    `Keep the main subject on the RIGHT half and leave calm uncluttered negative space on the LEFT for website hero text. ` +
+    `Wide 16:9 desktop hero framing.`
+  );
+}
+
+function buildBasePrompt(baseScene: string, hasProduct: boolean, aspect: MotionAspect): string {
+  const frame = compositionHint(aspect);
+  const ratioLabel = aspect === "9:16" ? "9:16 vertical" : "16:9";
   if (hasProduct) {
     return (
       `Take the exact product from the reference image and keep it perfectly identical ` +
       `(same shape, label, text, colors and proportions). Place it as the clear hero inside this niche scene: ${baseScene}. ` +
-      `Keep the main subject on the RIGHT half and leave calm uncluttered negative space on the LEFT for website hero text. ` +
+      `${frame} ` +
       `FULL VIVID COLOR photorealistic commercial photography — rich brand colors, dramatic directional light, ` +
       `soft volumetric haze, premium campaign still. Match the niche environment and props from the description. ` +
-      `Do NOT invent an unrelated portrait. No text, no watermark, no logos added. Ultra-high detail, 16:9.`
+      `Do NOT invent an unrelated portrait. No text, no watermark, no logos added. Ultra-high detail, ${ratioLabel}.`
     );
   }
   return (
     `${baseScene}. ` +
     `Create a photorealistic FULL-COLOR commercial HERO still tailored to this exact business niche and subject. ` +
-    `Keep the main subject on the RIGHT half and leave calm uncluttered negative space on the LEFT for website hero text. ` +
+    `${frame} ` +
     `Follow the described scene, environment, props and composition closely — it may be a person, product, ` +
     `interior, workspace, dish, building, vehicle, tool, or any niche-specific subject (NOT forced to be a fashion portrait). ` +
     `Vivid saturated color, cinematic lighting, soft atmospheric haze, powerful iconic framing for a premium website hero. ` +
     `Do NOT render black-and-white or desaturated monochrome unless the scene itself asks for night/shadow mood in color. ` +
-    `No text, no watermark, no logos. Ultra-high detail, 16:9 aspect ratio.`
+    `No text, no watermark, no logos. Ultra-high detail, ${ratioLabel} aspect ratio.`
   );
 }
 
-function buildRevealPrompt(revealScene: string, hasProduct: boolean): string {
+function buildRevealPrompt(revealScene: string, hasProduct: boolean, aspect: MotionAspect): string {
+  const ratioLabel = aspect === "9:16" ? "9:16 vertical" : "16:9";
   if (hasProduct) {
     return (
       `Edit the reference image in place. Keep the EXACT same product identity, pose, framing and composition. ` +
       `Do not move, rotate, resize, recrop, replace or redraw any object. Preserve exact pixel positions, silhouette, ` +
-      `camera perspective, background geometry and the empty text space on the left. ` +
+      `camera perspective, background geometry and the empty text space. ` +
       `Transform into the ALTERNATE COLOR state for this niche: ${revealScene}. ` +
       `FULL VIVID COLOR, richer premium commercial lighting, stronger accents, subtle chromatic edges, liquid iridescence where it fits. ` +
       `Same camera angle — only mood, materials, light and atmosphere change (day↔night, calm↔energy, before↔after). ` +
       `The metamorphosis must feel native to the niche. Product identity stays identical. ` +
-      `No black-and-white. No text, no watermark. Ultra-high detail, 16:9.`
+      `No black-and-white. No text, no watermark. Ultra-high detail, ${ratioLabel}.`
     );
   }
   return (
     `Edit the reference image in place. Keep the EXACT same subject identity, camera angle, pose and composition. ` +
     `Do not move, rotate, resize, recrop, replace or redraw any subject, prop or background element. ` +
-    `Preserve exact pixel positions, silhouette, camera perspective, background geometry and the empty text space on the left. ` +
+    `Preserve exact pixel positions, silhouette, camera perspective, background geometry and the empty text space. ` +
     `Reveal the ALTERNATE COLOR metamorphosis described here: ${revealScene}. ` +
     `Same silhouette and framing — only the look, materials, lighting and atmosphere transform. ` +
     `FULL VIVID COLOR, niche-authentic before→after that makes sense for THIS business ` +
     `(warm→cool, dusk→dawn, raw→finished, quiet→festive — always in color), ` +
     `premium commercial photography, subtle chromatic aberration on reveal edges, cinematic gloss. ` +
     `Do NOT force black-and-white, fashion helmets or unrelated sci-fi props unless the niche asks for them. ` +
-    `No text, no watermark. Ultra-high detail, 16:9.`
+    `No text, no watermark. Ultra-high detail, ${ratioLabel}.`
   );
+}
+
+async function createPairForAspect(
+  deps: GenerateMotionRevealDeps,
+  baseScene: string,
+  revealScene: string,
+  hasProduct: boolean,
+  productImageUrl: string | undefined,
+  aspect: MotionAspect,
+  labelPrefix: string,
+): Promise<{ baseUrl: string; revealUrl: string } | null> {
+  deps.onStatus?.(
+    aspect === "9:16"
+      ? "Моушн: создаю портретные кадры 9:16 для телефона…"
+      : "Моушн: создаю первый кадр 16:9…",
+  );
+  let baseUrl = await createStill(
+    deps,
+    buildBasePrompt(baseScene, hasProduct, aspect),
+    `${labelPrefix} base`,
+    aspect,
+    productImageUrl,
+  );
+
+  if (!baseUrl && !deps.shouldStop()) {
+    console.warn(`[MOTION] ${labelPrefix} base failed — recreating…`);
+    deps.onStatus?.(
+      aspect === "9:16"
+        ? "Моушн: KIE ошибка на 9:16 кадре 1 — пересоздаю…"
+        : "Моушн: KIE ошибка на кадре 1 — пересоздаю…",
+    );
+    baseUrl = await createStill(
+      deps,
+      buildBasePrompt(baseScene, hasProduct, aspect),
+      `${labelPrefix} base-retry`,
+      aspect,
+      productImageUrl,
+    );
+  }
+
+  if (!baseUrl) return null;
+
+  deps.onStatus?.(
+    aspect === "9:16"
+      ? "Моушн: второй 9:16 кадр (image-to-image)…"
+      : "Моушн: создаю второй кадр из первого (image-to-image)…",
+  );
+  let revealUrl = await createStill(
+    deps,
+    buildRevealPrompt(revealScene, hasProduct, aspect),
+    `${labelPrefix} reveal-i2i`,
+    aspect,
+    baseUrl,
+  );
+
+  if (!revealUrl && !deps.shouldStop()) {
+    console.warn(`[MOTION] ${labelPrefix} reveal failed — recreating…`);
+    deps.onStatus?.(
+      aspect === "9:16"
+        ? "Моушн: KIE ошибка на 9:16 кадре 2 — пересоздаю…"
+        : "Моушн: KIE ошибка на кадре 2 — пересоздаю…",
+    );
+    revealUrl = await createStill(
+      deps,
+      buildRevealPrompt(revealScene, hasProduct, aspect),
+      `${labelPrefix} reveal-retry`,
+      aspect,
+      baseUrl,
+    );
+  }
+
+  if (!revealUrl) return null;
+  return { baseUrl, revealUrl };
 }
 
 export async function generateMotionRevealPair(opts: {
   scenePrompt: string;
   productImageUrl?: string;
   deps: GenerateMotionRevealDeps;
-}): Promise<{ baseUrl: string; revealUrl: string } | null> {
+}): Promise<MotionRevealPair | null> {
   const { deps } = opts;
   const { baseScene, revealScene } = parseMotionDualPrompt(opts.scenePrompt);
   const hasProduct = !!opts.productImageUrl;
   const t0 = Date.now();
 
-  // Frame 1 must exist before frame 2: frame 2 is always an image-to-image edit
-  // of the actual generated base, never an independent T2I composition.
-  deps.onStatus?.("Моушн: создаю первый кадр…");
-  let baseUrl = await createStill(
+  // Desktop 16:9 pair first (required).
+  const desktop = await createPairForAspect(
     deps,
-    buildBasePrompt(baseScene, hasProduct),
-    "MOTION base",
+    baseScene,
+    revealScene,
+    hasProduct,
     opts.productImageUrl,
+    "16:9",
+    "MOTION",
   );
 
-  // If KIE failed frame 1 — recreate that same slot before starting I2I.
-  if (!baseUrl && !deps.shouldStop()) {
-    console.warn("[MOTION] base still failed — recreating via KIE…");
-    deps.onStatus?.("Моушн: KIE ошибка на кадре 1 — пересоздаю…");
-    baseUrl = await createStill(
+  if (!desktop) {
+    console.warn(`[MOTION] desktop pair incomplete after ${Date.now() - t0}ms`);
+    return null;
+  }
+
+  // Phone 9:16 pair — best-effort; site still ships with desktop art if this fails.
+  let mobile: { baseUrl: string; revealUrl: string } | null = null;
+  if (!deps.shouldStop()) {
+    mobile = await createPairForAspect(
       deps,
-      buildBasePrompt(baseScene, hasProduct),
-      "MOTION base-retry",
+      baseScene,
+      revealScene,
+      hasProduct,
       opts.productImageUrl,
+      "9:16",
+      "MOTION-m",
     );
+    if (!mobile) {
+      console.warn("[MOTION] mobile 9:16 pair failed — desktop art will be used on phones");
+      deps.onStatus?.("Моушн: портретные кадры не готовы — на телефоне будет 16:9");
+    }
   }
 
-  if (!baseUrl) {
-    console.warn(`[MOTION] base incomplete after ${Date.now() - t0}ms`);
-    return null;
-  }
-
-  deps.onStatus?.("Моушн: создаю второй кадр из первого (image-to-image)…");
-  let revealUrl = await createStill(
-    deps,
-    buildRevealPrompt(revealScene, hasProduct),
-    "MOTION reveal-i2i",
-    baseUrl,
+  console.log(
+    `[MOTION] pair ready in ${Date.now() - t0}ms (mobile=${!!mobile})`,
+  );
+  deps.onStatus?.(
+    mobile
+      ? `Моушн готов за ${Math.round((Date.now() - t0) / 1000)} с (ПК + телефон)`
+      : `Моушн готов за ${Math.round((Date.now() - t0) / 1000)} с`,
   );
 
-  // Retry the same reveal slot from the same base reference.
-  if (!revealUrl && !deps.shouldStop()) {
-    console.warn("[MOTION] reveal still failed — recreating via KIE…");
-    deps.onStatus?.("Моушн: KIE ошибка на кадре 2 — пересоздаю…");
-    revealUrl = await createStill(
-      deps,
-      buildRevealPrompt(revealScene, hasProduct),
-      "MOTION reveal-retry",
-      baseUrl,
-    );
-  }
+  return {
+    baseUrl: desktop.baseUrl,
+    revealUrl: desktop.revealUrl,
+    baseMobileUrl: mobile?.baseUrl,
+    revealMobileUrl: mobile?.revealUrl,
+  };
+}
 
-  if (!baseUrl || !revealUrl) {
-    console.warn(
-      `[MOTION] pair incomplete base=${!!baseUrl} reveal=${!!revealUrl} after ${Date.now() - t0}ms`,
-    );
-    return null;
-  }
-
-  console.log(`[MOTION] pair ready in ${Date.now() - t0}ms`);
-  deps.onStatus?.(`Моушн готов за ${Math.round((Date.now() - t0) / 1000)} с`);
-  return { baseUrl, revealUrl };
+function jsStr(url: string): string {
+  return String(url)
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/</g, "\\u003c")
+    .replace(/\n/g, "\\n");
 }
 
 export function buildMotionRevealHtml(
@@ -288,11 +389,12 @@ export function buildMotionRevealHtml(
   texts: MotionText[],
   navCtl: string,
   esc: (s: string) => string,
+  mobile?: { baseUrl?: string; revealUrl?: string },
 ): string {
   const cid = "mot" + Math.random().toString(36).slice(2, 8);
   const cards = (texts.length ? texts : [{ title: "", sub: "" }]).slice(0, 5);
   const n = Math.max(1, cards.length);
-  const scrollVh = Math.max(260, Math.min(560, Math.round(n * 95 + 140)));
+  const scrollVh = Math.max(220, Math.min(480, Math.round(n * 85 + 120)));
 
   const layers = cards
     .map((t, i) => {
@@ -312,27 +414,36 @@ export function buildMotionRevealHtml(
 
   const baseEsc = esc(baseUrl);
   const revEsc = esc(revealUrl);
-  // Safe for single-quoted JS string literals inside <script>
-  const baseJs = String(baseUrl).replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/</g, "\\u003c").replace(/\n/g, "\\n");
-  const revJs = String(revealUrl).replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/</g, "\\u003c").replace(/\n/g, "\\n");
+  const baseM = mobile?.baseUrl || "";
+  const revM = mobile?.revealUrl || "";
+  const baseMEsc = esc(baseM);
+  const revMEsc = esc(revM);
+  const baseJs = jsStr(baseUrl);
+  const revJs = jsStr(revealUrl);
+  const baseMJs = jsStr(baseM);
+  const revMJs = jsStr(revM);
+  const mobileAttrs =
+    baseM && revM
+      ? ` data-base-m="${baseMEsc}" data-reveal-m="${revMEsc}"`
+      : "";
 
   return `
 <section class="${cid}-scroll" data-layout="motion" data-craft-scrollanim="1" data-craft-motion="1"
-  data-base="${baseEsc}" data-reveal="${revEsc}">
+  data-base="${baseEsc}" data-reveal="${revEsc}"${mobileAttrs}>
   <div class="${cid}-sticky">
     <canvas class="${cid}-canvas" aria-hidden="true"></canvas>
     <div class="${cid}-veil"></div>
     <div class="${cid}-overlays">
 ${layers}
     </div>
-    <div class="${cid}-hint"><span>ведите курсором</span><i></i></div>
+    <div class="${cid}-hint"><span class="${cid}-hint-desk">ведите курсором</span><span class="${cid}-hint-mob">листайте вниз</span><i></i></div>
   </div>
 </section>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Manrope:wght@400;500;600&display=swap');
 .${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;background:#050505;}
-.${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#050505;cursor:none;}
-.${cid}-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;touch-action:none;}
+.${cid}-sticky{position:sticky;top:0;height:100vh;height:100dvh;width:100%;overflow:hidden;background:#050505;cursor:none;}
+.${cid}-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;touch-action:pan-y;}
 .${cid}-veil{position:absolute;inset:0;z-index:1;pointer-events:none;background:
   radial-gradient(ellipse 65% 55% at 50% 42%,rgba(0,0,0,0.08) 0%,rgba(0,0,0,0.45) 72%,rgba(0,0,0,0.72) 100%),
   linear-gradient(180deg,rgba(0,0,0,0.28) 0%,rgba(0,0,0,0.05) 40%,rgba(0,0,0,0.55) 100%);}
@@ -341,13 +452,22 @@ ${layers}
 .${cid}-text h2{margin:0;font-family:'Syne',system-ui,sans-serif;font-weight:800;font-size:clamp(2rem,5.2vw,4rem);line-height:1.02;letter-spacing:-0.03em;text-shadow:0 10px 48px rgba(0,0,0,0.55);}
 .${cid}-text p{margin:1rem 0 0;max-width:38ch;font-family:'Manrope',system-ui,sans-serif;font-size:clamp(1rem,1.6vw,1.22rem);line-height:1.55;color:rgba(255,255,255,0.82);text-shadow:0 4px 24px rgba(0,0,0,0.45);}
 .${cid}-hint{position:absolute;left:50%;bottom:max(22px,env(safe-area-inset-bottom));transform:translateX(-50%);z-index:3;display:flex;flex-direction:column;align-items:center;gap:8px;font-family:'Manrope',system-ui,sans-serif;font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:rgba(255,255,255,.55);transition:opacity .4s;pointer-events:none;}
+.${cid}-hint-mob{display:none;}
 .${cid}-hint i{width:28px;height:28px;border:1.5px solid rgba(255,255,255,.35);border-radius:50%;position:relative;}
 .${cid}-hint i::after{content:"";position:absolute;left:50%;top:50%;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;background:#fff;animation:${cid}-pulse 1.4s ease-in-out infinite;}
 @keyframes ${cid}-pulse{0%,100%{transform:scale(.7);opacity:.35}50%{transform:scale(1.15);opacity:1}}
-@media (max-width:700px){
-  .${cid}-sticky{cursor:auto;}
-  .${cid}-text{left:24px;right:24px;width:auto;}
+@media (max-width:700px),(hover:none) and (pointer:coarse){
+  .${cid}-scroll{height:${Math.max(180, Math.min(320, Math.round(n * 70 + 90)))}vh;}
+  .${cid}-sticky{cursor:auto;touch-action:pan-y;}
+  .${cid}-canvas{touch-action:pan-y;pointer-events:none;}
+  .${cid}-text{left:20px;right:20px;top:18%;transform:none;width:auto;text-align:left;}
+  .${cid}-text h2{font-size:clamp(1.65rem,8vw,2.4rem);}
+  .${cid}-hint-desk{display:none;}
+  .${cid}-hint-mob{display:inline;}
+  .${cid}-hint i{width:18px;height:28px;border-radius:10px;}
+  .${cid}-hint i::after{width:4px;height:8px;margin:-6px 0 0 -2px;border-radius:2px;animation:${cid}-scrollhint 1.6s ease-in-out infinite;}
 }
+@keyframes ${cid}-scrollhint{0%{transform:translateY(0);opacity:.3}50%{transform:translateY(6px);opacity:1}100%{transform:translateY(10px);opacity:0}}
 @media (prefers-reduced-motion:reduce){
   .${cid}-hint i::after{animation:none;}
 }
@@ -362,6 +482,8 @@ ${layers}
     var hint=root.querySelector('.${cid}-hint');
     var texts=[].slice.call(root.querySelectorAll('.${cid}-text'));
     var reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var phoneMq=window.matchMedia('(max-width:700px), (hover: none) and (pointer: coarse)');
+    function isPhone(){return phoneMq.matches;}
     var gl=canvas.getContext('webgl',{alpha:false,antialias:true,preserveDrawingBuffer:false})
       ||canvas.getContext('experimental-webgl',{alpha:false,antialias:true});
     if(!gl){var bu0=root.getAttribute('data-base')||'';if(bu0)root.style.background='center/cover no-repeat url("'+bu0.replace(/"/g,'')+'")';return;}
@@ -418,23 +540,55 @@ ${layers}
       return t;
     }
     function loadTex(url,cb){
+      if(!url){cb(null,0,0);return;}
       var t=makeTex(gl.LINEAR),im=new Image();im.crossOrigin='anonymous';
       im.onload=function(){gl.bindTexture(gl.TEXTURE_2D,t);gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL,1);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,im);cb(t,im.naturalWidth,im.naturalHeight);};
       im.onerror=function(){cb(null,0,0);};im.src=url;
     }
 
-    var baseTex=null,revTex=null,baseSize=[1,1],revSize=[1,1],loaded=0;
-    function onReady(){
-      loaded++;
-      if(loaded>=2){
-        try{window.__craftAnimReady=true;window.dispatchEvent(new Event('craft:anim-ready'));window.dispatchEvent(new Event('craft:frames-ready'));}catch(e){}
-        resize();loop();
-      }
+    var deskBaseUrl=root.getAttribute('data-base')||'${baseJs}';
+    var deskRevUrl=root.getAttribute('data-reveal')||'${revJs}';
+    var mobBaseUrl=root.getAttribute('data-base-m')||'${baseMJs}';
+    var mobRevUrl=root.getAttribute('data-reveal-m')||'${revMJs}';
+    var usingMobile=false;
+    var baseTex=null,revTex=null,baseSize=[1,1],revSize=[1,1],ready=false;
+
+    function markReady(){
+      if(ready)return;ready=true;
+      try{window.__craftAnimReady=true;window.dispatchEvent(new Event('craft:anim-ready'));window.dispatchEvent(new Event('craft:frames-ready'));}catch(e){}
+      resize();loop();
     }
-    var baseUrl=root.getAttribute('data-base')||'${baseJs}';
-    var revUrl=root.getAttribute('data-reveal')||'${revJs}';
-    loadTex(baseUrl,function(t,w,h){baseTex=t;baseSize=[w||1,h||1];onReady();});
-    loadTex(revUrl,function(t,w,h){revTex=t;revSize=[w||1,h||1];onReady();});
+    function applyPair(t1,w1,h1,t2,w2,h2,asMobile){
+      if(!(t1&&t2))return false;
+      usingMobile=!!asMobile;
+      baseTex=t1;revTex=t2;baseSize=[w1||1,h1||1];revSize=[w2||1,h2||1];
+      if(ready) resize();
+      else markReady();
+      return true;
+    }
+    function loadPair(b,r,asMobile){
+      var a=null,aw=0,ah=0,btex=null,bw=0,bh=0,n=0;
+      function done(){
+        n++;
+        if(n<2)return;
+        if(applyPair(a,aw,ah,btex,bw,bh,asMobile))return;
+        if(asMobile) loadPair(deskBaseUrl,deskRevUrl,false);
+      }
+      loadTex(b,function(t,w,h){a=t;aw=w;ah=h;done();});
+      loadTex(r,function(t,w,h){btex=t;bw=w;bh=h;done();});
+    }
+    function pickArt(){
+      if(isPhone()&&mobBaseUrl&&mobRevUrl) loadPair(mobBaseUrl,mobRevUrl,true);
+      else loadPair(deskBaseUrl,deskRevUrl,false);
+    }
+    pickArt();
+    if(phoneMq.addEventListener){
+      phoneMq.addEventListener('change',function(){
+        var wantMobile=isPhone()&&mobBaseUrl&&mobRevUrl;
+        if(wantMobile===usingMobile&&baseTex&&revTex)return;
+        pickArt();
+      });
+    }
 
     var trailA=makeTex(gl.LINEAR),trailB=makeTex(gl.LINEAR),fbo=gl.createFramebuffer();
     var tw=1,th=1,flip=false;
@@ -444,7 +598,6 @@ ${layers}
         gl.bindTexture(gl.TEXTURE_2D,t);
         gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,tw,th,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
       });
-      // clear
       gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
       gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,trailA,0);
       gl.viewport(0,0,tw,th);gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
@@ -453,8 +606,9 @@ ${layers}
       gl.bindFramebuffer(gl.FRAMEBUFFER,null);
     }
 
-    var mouse={x:0.5,y:0.5},drawing=0,hasMoved=0,start=performance.now();
+    var mouse={x:0.5,y:0.5},drawing=0,hasMoved=0,start=performance.now(),scrollP=0;
     function setPtr(e){
+      if(isPhone())return; // phones: never capture touch — scroll must stay free
       var r=canvas.getBoundingClientRect();
       var cx=(e.clientX!==undefined?e.clientX:(e.touches&&e.touches[0]?e.touches[0].clientX:r.left+r.width/2));
       var cy=(e.clientY!==undefined?e.clientY:(e.touches&&e.touches[0]?e.touches[0].clientY:r.top+r.height/2));
@@ -465,10 +619,8 @@ ${layers}
     }
     canvas.addEventListener('pointermove',setPtr,{passive:true});
     canvas.addEventListener('pointerdown',setPtr,{passive:true});
-    canvas.addEventListener('touchmove',function(e){if(e.touches&&e.touches[0])setPtr(e.touches[0]);},{passive:true});
-    canvas.addEventListener('touchstart',function(e){if(e.touches&&e.touches[0])setPtr(e.touches[0]);},{passive:true});
+    // No touchmove/touchstart painters — they fight native scroll on iOS/Android
     window.addEventListener('pointerup',function(){drawing=0;});
-    // Idle auto-reveal pulse so the effect is discoverable without hover
     var autoT=0;
 
     function bindAttr(p){
@@ -486,19 +638,31 @@ ${layers}
       gl.useProgram(trailP);bindAttr(trailP);
       gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,read);
       gl.uniform1i(gl.getUniformLocation(trailP,'uPrev'),0);
-      var mx=mouse.x,my=mouse.y;
-      if(!hasMoved&&!reduce){
-        autoT+=dt;
-        mx=0.5+Math.sin(autoT*0.55)*0.22;
-        my=0.48+Math.cos(autoT*0.4)*0.16;
+      var mx=mouse.x,my=mouse.y,drawAmt=0,radius=0.12;
+      if(isPhone()){
+        // Scroll drives a soft vertical wipe — no finger painting
+        var p=scrollP;
+        mx=0.42+Math.sin(p*Math.PI)*0.28;
+        my=0.78-p*0.55;
+        drawAmt=reduce?0.55:1;
+        radius=0.22+p*0.12;
+        hasMoved=p>0.04?1:hasMoved;
+        if(hint&&p>0.08)hint.style.opacity=String(Math.max(0,1-p*4));
+      }else{
+        if(!hasMoved&&!reduce){
+          autoT+=dt;
+          mx=0.5+Math.sin(autoT*0.55)*0.22;
+          my=0.48+Math.cos(autoT*0.4)*0.16;
+        }
+        drawAmt=(drawing||!hasMoved)?1:0;
+        if(reduce)drawAmt=hasMoved?1:0.35;
+        radius=hasMoved?0.12:0.16;
       }
       gl.uniform2f(gl.getUniformLocation(trailP,'uMouse'),mx,my);
-      var drawAmt=(drawing||!hasMoved)?1:0;
-      if(reduce)drawAmt=hasMoved?1:0.35;
       gl.uniform1f(gl.getUniformLocation(trailP,'uDraw'),drawAmt);
-      gl.uniform1f(gl.getUniformLocation(trailP,'uRadius'),hasMoved?0.12:0.16);
-      gl.uniform1f(gl.getUniformLocation(trailP,'uHard'),0.55);
-      gl.uniform1f(gl.getUniformLocation(trailP,'uFade'),0.965);
+      gl.uniform1f(gl.getUniformLocation(trailP,'uRadius'),radius);
+      gl.uniform1f(gl.getUniformLocation(trailP,'uHard'),isPhone()?0.4:0.55);
+      gl.uniform1f(gl.getUniformLocation(trailP,'uFade'),isPhone()?0.985:0.965);
       gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
       flip=!flip;
       gl.bindFramebuffer(gl.FRAMEBUFFER,null);
@@ -522,11 +686,11 @@ ${layers}
       gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
     }
 
-    var last=performance.now();
+    var last=performance.now(),raf=0;
     function loop(){
       var now=performance.now(),dt=Math.min(0.05,(now-last)/1000);last=now;
       if(baseTex&&revTex){stepTrail(dt);drawMain();}
-      requestAnimationFrame(loop);
+      raf=requestAnimationFrame(loop);
     }
 
     function resize(){
@@ -540,7 +704,8 @@ ${layers}
     function clamp(x,a,b){return Math.max(a,Math.min(b,x));}
     function setP(p){
       p=clamp(p,0,1);
-      if(hint&&hasMoved)hint.style.opacity=String(clamp(1-p*3.5,0,1));
+      scrollP=p;
+      if(hint&&hasMoved&&!isPhone())hint.style.opacity=String(clamp(1-p*3.5,0,1));
       texts.forEach(function(el){
         var fi=parseFloat(el.getAttribute('data-fi')),fis=parseFloat(el.getAttribute('data-fis'));
         var fos=parseFloat(el.getAttribute('data-fos')),fo=parseFloat(el.getAttribute('data-fo'));
@@ -550,7 +715,11 @@ ${layers}
         }
         op=clamp(op,0,1);
         el.style.opacity=op.toFixed(3);
-        el.style.transform='translateY(calc(-50% + '+((1-op)*18)+'px))';
+        if(isPhone()){
+          el.style.transform='translateY('+((1-op)*14)+'px)';
+        }else{
+          el.style.transform='translateY(calc(-50% + '+((1-op)*18)+'px))';
+        }
       });
     }
     function secTop(){return root.getBoundingClientRect().top+(window.pageYOffset||document.documentElement.scrollTop);}

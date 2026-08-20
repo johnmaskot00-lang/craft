@@ -2106,6 +2106,8 @@ function collectInteractiveMediaUrls(html: string): string[] {
   for (const m of html.matchAll(/\sdata-video=(["'])([^"']*)\1/gi)) add(m[2]);
   for (const m of html.matchAll(/\sdata-base=(["'])([^"']*)\1/gi)) add(m[2]);
   for (const m of html.matchAll(/\sdata-reveal=(["'])([^"']*)\1/gi)) add(m[2]);
+  for (const m of html.matchAll(/\sdata-base-m=(["'])([^"']*)\1/gi)) add(m[2]);
+  for (const m of html.matchAll(/\sdata-reveal-m=(["'])([^"']*)\1/gi)) add(m[2]);
 
   for (const m of html.matchAll(/\sdata-frames\s*=\s*(["'])([\s\S]*?)\1/gi)) {
     try {
@@ -2704,7 +2706,7 @@ async function resolveScrollAnimMarkers(
   const planned = entries.slice(0, layout === "immersion" ? 1 : 2); // immersion: one world; others: at most 2
   // Immersion runs 2N−1 Kling jobs (dives + connectors); allow a longer wall-clock budget.
   // Motion is sequential base → I2I reveal; allow both KIE tasks and retries.
-  const phaseDeadline = Date.now() + (layout === "immersion" ? 5400000 : layout === "motion" ? 900000 : 2520000);
+    const phaseDeadline = Date.now() + (layout === "immersion" ? 5400000 : layout === "motion" ? 1200000 : 2520000);
 
   // Product still is regenerated lazily (ONCE) AFTER the first successful credit
   // deduction inside the loop, so we never spend external API budget on a user who
@@ -2795,10 +2797,25 @@ async function resolveScrollAnimMarkers(
       if (pair?.baseUrl && pair?.revealUrl) {
         // Build navCtl the same way as buildScrollAnimHtml (header transparency + sticky fix).
         const navCtl = `\n<style>header{transition:background .45s ease,background-color .45s ease,backdrop-filter .45s ease,-webkit-backdrop-filter .45s ease,border-color .45s ease,box-shadow .45s ease;}body:not(.craft-anim-passed) header{background:transparent!important;background-color:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;border-color:transparent!important;box-shadow:none!important;}</style>\n<script>(function(){if(window.__craftNavCtl)return;window.__craftNavCtl=true;function fixSticky(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;for(var i=0;i<s.length;i++){var el=s[i];while(el&&el.nodeType===1&&el!==document.documentElement){var cs=getComputedStyle(el);if(cs.overflowX==='hidden')el.style.overflowX='clip';if(cs.overflowY==='hidden')el.style.overflowY='clip';el=el.parentElement;}}var de=document.documentElement,b=document.body;[de,b].forEach(function(n){if(!n)return;var c=getComputedStyle(n);if(c.overflowX==='hidden')n.style.overflowX='clip';if(c.overflowY==='hidden')n.style.overflowY='clip';});}function u(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;var h=document.querySelector('header');var th=h?h.offsetHeight:64;var passed=true;for(var i=0;i<s.length;i++){if(s[i].getBoundingClientRect().bottom>th){passed=false;break;}}document.body.classList.toggle('craft-anim-passed',passed);}window.addEventListener('scroll',u,{passive:true});window.addEventListener('resize',u);if(document.readyState!=='loading'){fixSticky();u();}else{document.addEventListener('DOMContentLoaded',function(){fixSticky();u();});}fixSticky();u();})();</script>`;
-        replaceMap.set(raw, buildMotionRevealHtml(pair.baseUrl, pair.revealUrl, parsed.texts, navCtl, csaEsc));
+        replaceMap.set(
+          raw,
+          buildMotionRevealHtml(pair.baseUrl, pair.revealUrl, parsed.texts, navCtl, csaEsc, {
+            baseUrl: pair.baseMobileUrl,
+            revealUrl: pair.revealMobileUrl,
+          }),
+        );
         generated++;
         if (billed) creditsUsed += blockCost;
-        try { res.write(`data: ${JSON.stringify({ status: "Моушн готов — hover-reveal активен" })}\n\n`); } catch {}
+        const mobOk = !!(pair.baseMobileUrl && pair.revealMobileUrl);
+        try {
+          res.write(
+            `data: ${JSON.stringify({
+              status: mobOk
+                ? "Моушн готов — ПК hover + телефон scroll-reveal (9:16)"
+                : "Моушн готов — hover-reveal активен",
+            })}\n\n`,
+          );
+        } catch {}
       } else if (billed && userId) {
         try { await storage.refundCredits(userId, blockCost); } catch {}
       }

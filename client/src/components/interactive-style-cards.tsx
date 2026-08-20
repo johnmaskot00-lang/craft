@@ -30,7 +30,7 @@ export const INTERACTIVE_STYLES: Array<{
   { id: "parallax", label: "Параллакс", desc: "Видео на весь экран, текст поверх", tokenCost: VIDEO_STYLE_COST },
   { id: "split", label: "Сплит", desc: "Текст слева, продукт справа", tokenCost: VIDEO_STYLE_COST },
   { id: "action", label: "Экшн", desc: "Слоумо и облёт камеры", tokenCost: VIDEO_STYLE_COST },
-  { id: "motion", label: "Моушн", desc: "Объект морфится · текст слева", tokenCost: VIDEO_STYLE_COST },
+  { id: "motion", label: "Моушн", desc: "Морф 16:9 + 9:16 · скролл на телефоне", tokenCost: VIDEO_STYLE_COST },
   { id: "trigger", label: "Тригер", desc: "Сцены следят за курсором", tokenCost: VIDEO_STYLE_COST },
 ];
 

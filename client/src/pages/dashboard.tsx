@@ -1454,7 +1454,7 @@ export default function DashboardPage() {
                           </div>
                           {interactiveStyle === "motion" && (
                             <p className="shrink-0" style={{ fontSize: '0.68rem', color: '#0d9488', margin: 0, paddingLeft: 4, lineHeight: 1.35 }}>
-                              В Моушн ИИ проанализирует фото и сделает 2 кадра для hover — например лето → зима во льду
+                              В Моушн ИИ сделает 2 кадра 16:9 для ПК (hover) и 2 кадра 9:16 для телефона (анимация по скроллу)
                             </p>
                           )}
                           <input
@@ -1509,7 +1509,7 @@ export default function DashboardPage() {
                                 <p className="text-xs font-semibold" style={{ color: '#0d9488' }}>Загрузить фото продукта</p>
                                 <p className="text-[10px] mt-0.5" style={{ color: '#5eead4' }}>
                                   {interactiveStyle === "motion"
-                                    ? "PNG, JPG до 10 МБ — AI сделает пару кадров для morph"
+                                    ? "PNG, JPG до 10 МБ — AI: 16:9 + 9:16 пары для morph"
                                     : "PNG, JPG до 10 МБ — AI оживит его"}
                                 </p>
                               </div>
