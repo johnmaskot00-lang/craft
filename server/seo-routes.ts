@@ -346,13 +346,13 @@ function defaultReferralCopy(kw: SeoKeyword, niche: string, slot: "top" | "botto
   const nicheLabel = (niche || "вашей нише").trim();
   if (slot === "top") {
     return {
-      title: `Практичный следующий шаг по теме «${topic}»`,
-      desc: `Редакция отобрала проверенный вариант для ${nicheLabel}: продолжите прямо отсюда — без лишних поисков и случайных ссылок.`,
+      title: `Попробуйте сервис по теме «${topic}»`,
+      desc: `Редакция рекомендует проверенный инструмент для ${nicheLabel}: откройте оффер и начните сразу — без лишнего поиска.`,
     };
   }
   return {
-    title: "Если материал попал в цель — откройте рекомендацию",
-    desc: `Закрепите результат: перейдите по партнёрской ссылке издания и продолжите уже на площадке, которая подходит под «${topic}».`,
+    title: "Готовы перейти от теории к практике?",
+    desc: `Если материал помог — закрепите результат: перейдите по рекомендации издания и продолжите уже в сервисе под «${topic}».`,
   };
 }
 
@@ -366,7 +366,7 @@ function buildReferralOfferHtml(opts: {
 }): string {
   const url = safeHref(opts.url);
   if (!url) return "";
-  const label = esc(opts.label || "Перейти →");
+  const label = esc(opts.label || "Попробовать →");
   const title = esc(opts.title.slice(0, 120));
   const desc = esc(opts.desc.slice(0, 240));
   const niche = esc((opts.niche || "").slice(0, 80));
@@ -377,7 +377,6 @@ function buildReferralOfferHtml(opts: {
       <span class="ref-offer-eyebrow">Редакция рекомендует${niche ? ` · ${niche}` : ""}</span>
       <strong class="ref-offer-title">${title}</strong>
       <p class="ref-offer-desc">${desc}</p>
-      <span class="ref-offer-note">Партнёрская рекомендация издания — ссылка ведёт на проверенный ресурс</span>
     </div>
     <a href="${url}" class="ref-offer-btn" target="_blank" rel="noopener sponsored nofollow">
       <span class="ref-offer-btn-label">${label}</span>
@@ -436,10 +435,16 @@ function ensureArticleReferralOffers(
   });
 
   const leadRe = /(<p class="lead"[\s\S]*?<\/p>)/i;
-  if (leadRe.test(out)) {
+  // Prefer native offer at the very start of the article (after cover), then after lead.
+  if (/<img class="hero-article-img"[\s\S]*?>/i.test(out) || /<div class="hero-cover-fallback"[\s\S]*?<\/div>/i.test(out)) {
+    out = out.replace(
+      /(<img class="hero-article-img"[\s\S]*?>|<div class="hero-cover-fallback"[\s\S]*?<\/div>)/i,
+      `$1\n${topHtml}`,
+    );
+  } else if (leadRe.test(out)) {
     out = out.replace(leadRe, `$1\n${topHtml}`);
   } else if (/<div class="key-takeaways"[\s\S]*?<\/div>/i.test(out)) {
-    out = out.replace(/(<div class="key-takeaways"[\s\S]*?<\/div>)/i, `$1\n${topHtml}`);
+    out = out.replace(/(<div class="key-takeaways"[\s\S]*?<\/div>)/i, `${topHtml}\n$1`);
   } else if (/<div class="article-body"[^>]*>/i.test(out)) {
     out = out.replace(/(<div class="article-body"[^>]*>)/i, `$1\n${topHtml}`);
   } else {
@@ -1228,7 +1233,8 @@ async function persistUniqueSkin(
     (existing.code.includes("magazine-art-v6") ||
       existing.code.includes("structural-guard-v8") ||
       existing.code.includes("structural-guard-v9") ||
-      existing.code.includes("structural-guard-v10"));
+      existing.code.includes("structural-guard-v10") ||
+      existing.code.includes("structural-guard-v11"));
   if (isArtDirectedSeo(next) && hasAgentCss && existing?.code) {
     const guarded = ensureStructuralGuardCss(existing.code, next);
     if (guarded !== existing.code) {
@@ -1834,7 +1840,7 @@ function ensureStructuralGuardCss(css: string, cfg?: SeoConfig): string {
   if (cfg && isArtDirectedSeo(cfg)) {
     return ensureSoftMagazineGuardCss(css);
   }
-  if (css.includes("structural-guard-v8") || css.includes("structural-guard-v9") || css.includes("structural-guard-v10") || css.includes("magazine-art-v6")) {
+  if (css.includes("structural-guard-v8") || css.includes("structural-guard-v9") || css.includes("structural-guard-v10") || css.includes("structural-guard-v11") || css.includes("magazine-art-v6")) {
     return ensureSoftMagazineGuardCss(css);
   }
   if (css.includes("structural-guard-v7")) return css;
@@ -2429,18 +2435,16 @@ INTERNAL LINKS (use naturally in body text as real <a href="..."> — ONLY URLs 
 ${relatedLinks || "(none yet)"}
 Never invent article titles or URLs. Do not add a "Читайте также" block with fake cards — the server injects real related links.
 ${hasReferral ? `
-REFERRAL / TRAFFIC OFFER (CRITICAL — monetization of SEO traffic):
-The site owner configured a partner referral URL. You MUST place TWO copy markers (server wraps them into a beautiful branded section with a shimmer button — do NOT invent your own gradient CTA boxes, do NOT output <div class="cta-block">, do NOT style a plain button):
-  1) Right after the opening <p class="lead">…</p> (before first H2):
-     {{REF_TOP:Native 8-14 word editorial hook tied to this article|||One concrete sentence: what the reader gains by clicking, relevant to "${kw.keyword}" and niche "${offerNiche}"}}
+REFERRAL / TRAFFIC OFFER (CRITICAL — monetization, native editorial recommend):
+The site owner configured a partner offer. You MUST place TWO copy markers (server wraps them into a branded section with CTA button "${offer.ctaLabel}" — do NOT invent your own gradient CTA boxes, do NOT output <div class="cta-block">):
+  1) RIGHT AFTER {{COVER}} (before key-takeaways) — this is the opening native recommendation readers see first:
+     {{REF_TOP:8-14 word native staff tip that recommends trying/buying the service for this article|||One concrete sentence: what the reader gets by clicking, tied to "${kw.keyword}" / niche "${offerNiche}"}}
   2) Right before the author-box:
-     {{REF_BOTTOM:Closing editorial nudge (different wording from top)|||One sentence that feels like a staff recommendation, not spam}}
-Rules for the copy:
-- Sound like magazine staff recommending a next step, not an ad banner
-- Same language as the article
-- Never change the referral URL — the server injects it
-- Never invent a different product than niche "${offerNiche}"
-Button label will be: "${offer.ctaLabel}"` : ""}
+     {{REF_BOTTOM:Closing staff nudge (different wording)|||One sentence recommendation, not spam}}
+Rules:
+- Sound like the magazine staff recommending a next step (Попробовать / Купить / Открыть — button text is already "${offer.ctaLabel}")
+- Same language as the article; never change the referral URL; never invent another product than "${offerNiche}"
+` : ""}
 
 OUTPUT EXACTLY THIS STRUCTURE (no outer wrappers, no page-level tags):
 <div class="article-header">
@@ -2453,11 +2457,11 @@ OUTPUT EXACTLY THIS STRUCTURE (no outer wrappers, no page-level tags):
   </div>
 </div>
 {{COVER}}
+${hasReferral ? "{{REF_TOP:...}} marker here — native service recommend with CTA" : ""}
 <div class="key-takeaways"><h3>Короткий ответ</h3><ul>[3-5 citation-ready bullets]</ul></div>
 [toc if guide/tutorial/listicle]
 <div class="article-body">
   <p class="lead">[opening lead paragraph — bold, sets the stakes, answers the query in 2 sentences]</p>
-  ${hasReferral ? "{{REF_TOP:...}} marker here" : ""}
   [h2 sections with full content; rich visual elements (pull-quote / callout / stat-grid) and optional {{IMG:...}} markers interleaved; internal links where relevant]
   ${hasReferral ? "{{REF_BOTTOM:...}} marker here" : ""}
 </div>
@@ -3397,7 +3401,7 @@ ${brief}
 - Основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст WCAG AA. Текст на фото — .on-media + overlay.
 - Сохраняй data-seo-article-feed и .article-card на главной (сервер обновляет карточки).
 - Статьи: без SVG-анимаций; до 3 фото; две секции .ref-offer. Не превращай в .cta-block.
-- Маркеры magazine-art-v6 / structural-guard-v10 не удаляй. Запрещены горизонтальный скролл и микротекст.
+- Маркеры magazine-art-v6 / structural-guard-v11 не удаляй. Запрещены горизонтальный скролл и микротекст.
 - Для фото — точные URL из вложений. Не выдумывай стоки.
 - Краткий итог после патчей, без огромного HTML в чат.
 - Пользователь смотрит файл «${safeActive}».`;

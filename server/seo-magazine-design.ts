@@ -107,10 +107,11 @@ CREATIVE MANDATE
 3. Interactive Hero is the star. Brand name + short description MUST appear in/near the hero.
 4. Below hero: magazine-grade topics + article feed (not a dump of plain boxes).
 5. Article feed contract (CRITICAL — server refreshes + paginates):
-   - Exactly ONE wrapper: <div data-seo-article-feed data-page-size="12" class="articles-grid ...">...</div>
+   - Exactly ONE wrapper: <div data-seo-article-feed data-page-size="12" class="articles-grid">...</div>
    - Put article-cards ONLY inside that wrapper — never duplicate cards outside it
-   - Include ~${Math.min(12, feedPreview.length)} sample cards now; server replaces contents with ALL articles and adds pager (12 per page)
-   - Each card: <a class="article-card" href="..."> with .ac-img-wrap / .ac-title / .ac-cat / .ac-body
+   - COMPACT GRID ONLY: 4 equal cards per row (photo on top + title below). NO full-bleed mega-cards, NO featured span-8/12, NO single huge cover card in the feed.
+   - Include up to 12 sample compact cards now; server replaces with ALL articles + pager (12/page, 4 columns)
+   - Each card: <a class="article-card" href="..."> with .ac-img-wrap (16:10 photo) / .ac-title / optional short .ac-cat — keep cards equal height, modest image height (~140–180px)
 6. Sticky top chrome MUST be <header class="site-header"> with brand + <nav> category links + optional CTA.
    Server COPIES this entire <header> onto category/article pages — it must look finished on every page.
 7. Footer with niche line + category links.
@@ -187,14 +188,12 @@ export function parseMagazineDesignFiles(raw: string): { css?: string; html?: st
   return out;
 }
 
-/** Minimal safety net — does NOT restyle agent header/menu/cards (that made every SEO site look identical). */
+/** Safety net + forced compact home feed (4×3) + readable offers — chrome/menu stays agent-owned. */
 export function buildSoftMagazineGuardCss(): string {
   return `
-/* structural-guard-v10 — safety + article readability only; chrome stays agent-owned */
+/* structural-guard-v11 — compact feed 4-col + offer + article readability */
 html,body{overflow-x:hidden!important;max-width:100%!important}
 img,video,canvas,svg{max-width:100%;height:auto}
-.ref-offer{display:block!important;position:relative!important;margin:2.25rem 0!important;border-radius:18px!important;overflow:hidden!important}
-.ref-offer-btn{position:relative!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;min-height:48px!important;padding:.9rem 1.4rem!important;border-radius:999px!important;font-weight:800!important;text-decoration:none!important}
 .cta-block{display:none!important}
 .on-media{color:#fff!important;text-shadow:0 1px 2px rgba(0,0,0,.45)}
 .article-page{max-width:var(--w,1120px);margin:0 auto;padding:0 1.25rem 4rem;box-sizing:border-box}
@@ -206,12 +205,78 @@ img,video,canvas,svg{max-width:100%;height:auto}
 .article-body .lead{font-size:1.1em;line-height:1.65}
 .breadcrumb{display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;padding:.75rem 0;font-size:.78rem}
 .hero-article-img{width:100%;max-height:min(520px,58vw);object-fit:cover;display:block;border-radius:var(--r,12px);margin:0 0 1.25rem}
+
+/* Home feed: always 4 compact photo+title cards per row (12/page) */
+[data-seo-article-feed]{
+  display:grid!important;
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:clamp(.85rem,1.5vw,1.15rem)!important;
+  margin:0 0 1rem!important;
+  align-items:stretch!important;
+}
+[data-seo-article-feed]>.article-card,
+[data-seo-article-feed]>a.article-card{
+  grid-column:auto!important;
+  grid-row:auto!important;
+  width:100%!important;
+  max-width:none!important;
+  display:flex!important;
+  flex-direction:column!important;
+  text-decoration:none!important;
+  color:inherit!important;
+  overflow:hidden!important;
+  border-radius:var(--r,14px)!important;
+  border:1px solid var(--border,rgba(255,255,255,.12))!important;
+  background:color-mix(in srgb,var(--bg2,var(--bg,#111)) 92%,transparent)!important;
+  min-height:0!important;
+  height:auto!important;
+}
+[data-seo-article-feed] .ac-img-wrap{
+  position:relative!important;
+  width:100%!important;
+  height:auto!important;
+  min-height:0!important;
+  aspect-ratio:16/10!important;
+  overflow:hidden!important;
+  background:rgba(0,0,0,.25)!important;
+  flex:0 0 auto!important;
+}
+[data-seo-article-feed] .ac-img-wrap img,
+[data-seo-article-feed] .ac-img-grad{
+  width:100%!important;height:100%!important;object-fit:cover!important;display:block!important;
+}
+[data-seo-article-feed] .ac-body,
+[data-seo-article-feed] .ac-content{padding:.7rem .8rem .85rem!important;flex:1 1 auto!important}
+[data-seo-article-feed] .ac-cat{display:block!important;font-size:.62rem!important;font-weight:800!important;letter-spacing:.06em!important;text-transform:uppercase!important;opacity:.75!important;margin:0 0 .3rem!important}
+[data-seo-article-feed] .ac-title{font-family:var(--heading-font,inherit)!important;font-size:clamp(.82rem,.7rem + .35vw,.98rem)!important;font-weight:750!important;line-height:1.3!important;margin:0!important;display:-webkit-box!important;-webkit-line-clamp:3!important;-webkit-box-orient:vertical!important;overflow:hidden!important}
+
+/* Native referral offer — always visible at article start */
+.ref-offer{display:block!important;position:relative!important;margin:1.5rem 0 1.75rem!important;border-radius:calc(var(--r,14px) + 4px)!important;overflow:hidden!important;border:1px solid color-mix(in srgb,var(--brand,currentColor) 32%,var(--border,rgba(127,127,127,.35)))!important;background:linear-gradient(160deg,color-mix(in srgb,var(--brand,currentColor) 12%,var(--bg,transparent)) 0%,var(--bg,transparent) 55%)!important}
+.ref-offer-glow{position:absolute!important;inset:-40% auto auto -25%!important;width:70%!important;height:90%!important;background:radial-gradient(circle,color-mix(in srgb,var(--brand,currentColor) 28%,transparent),transparent 70%)!important;pointer-events:none!important;filter:blur(10px)!important}
+.ref-offer-inner{position:relative!important;z-index:1!important;display:grid!important;grid-template-columns:minmax(0,1fr) auto!important;gap:1.1rem!important;align-items:center!important;padding:clamp(1rem,2vw,1.45rem) clamp(1rem,2vw,1.5rem)!important}
+.ref-offer-copy{min-width:0!important;display:grid!important;gap:.4rem!important}
+.ref-offer-eyebrow{display:inline-flex!important;align-self:flex-start!important;font-size:.68rem!important;font-weight:800!important;letter-spacing:.1em!important;text-transform:uppercase!important;opacity:.9!important}
+.ref-offer-title{font-family:var(--heading-font,inherit)!important;font-size:clamp(1.05rem,1rem + .45vw,1.35rem)!important;font-weight:800!important;line-height:1.25!important;color:var(--text,inherit)!important}
+.ref-offer-desc{margin:0!important;font-size:.92rem!important;line-height:1.5!important;color:var(--text2,inherit)!important;opacity:.9!important}
+.ref-offer-note{font-size:.7rem!important;opacity:.65!important}
+.ref-offer-btn{position:relative!important;isolation:isolate!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;min-height:48px!important;padding:.85rem 1.35rem!important;border-radius:999px!important;text-decoration:none!important;font-weight:800!important;font-size:.9rem!important;white-space:nowrap!important;color:#fff!important;background:var(--brand,#2563eb)!important;box-shadow:0 10px 24px color-mix(in srgb,var(--brand,#2563eb) 35%,transparent)!important}
+.ref-offer-btn-label{position:relative!important;z-index:2!important;color:#fff!important}
+.ref-offer-btn-shine{position:absolute!important;inset:0!important;z-index:1!important;background:linear-gradient(110deg,transparent 20%,rgba(255,255,255,.45) 48%,transparent 72%)!important;transform:translateX(-130%)!important;animation:refBtnShine 2.6s ease-in-out infinite!important}
+@keyframes refBtnShine{0%{transform:translateX(-130%)}55%,100%{transform:translateX(130%)}}
 .seo-feed-pager{display:flex;align-items:center;justify-content:center;gap:.65rem;flex-wrap:wrap;margin:1.25rem 0 2.5rem;font-family:var(--heading-font,inherit)}
 .seo-feed-pager[hidden]{display:none!important}
 .seo-feed-pager button{appearance:none;border:1px solid var(--border,currentColor);background:transparent;color:inherit;font:inherit;font-weight:700;padding:.55rem .9rem;border-radius:999px;cursor:pointer;opacity:.9}
 .seo-feed-pager button:disabled{opacity:.35;cursor:default}
 .seo-feed-pager span{font-size:.85rem;font-weight:700;letter-spacing:.04em;opacity:.75}
-@media(max-width:900px){.article-layout,.article-layout-sidebar-left{grid-template-columns:1fr}.sidebar{position:static}}
+@media(max-width:1024px){[data-seo-article-feed]{grid-template-columns:repeat(3,minmax(0,1fr))!important}}
+@media(max-width:720px){
+  [data-seo-article-feed]{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+  .ref-offer-inner{grid-template-columns:1fr!important}
+  .ref-offer-btn{width:100%!important}
+  .article-layout,.article-layout-sidebar-left{grid-template-columns:1fr}
+  .sidebar{position:static}
+}
+@media(max-width:420px){[data-seo-article-feed]{grid-template-columns:1fr!important}}
 `;
 }
 
@@ -236,10 +301,10 @@ export function applyHeroVariantToTheme(theme: SeoTheme | undefined, hero: SeoHe
 export function refreshArticleFeedHtml(articles: SeoArticleBrief[]): string {
   return articles
     .map(
-      (a, i) => `<a href="${escapeHtml(a.href)}" class="article-card">
+      (a, i) => `<a href="${escapeHtml(a.href)}" class="article-card article-card--compact">
   <div class="ac-img-wrap">${
     a.image
-      ? `<img src="${escapeHtml(a.image)}" alt="${escapeHtml(a.title)}" loading="lazy">`
+      ? `<img src="${escapeHtml(a.image)}" alt="${escapeHtml(a.title)}" loading="lazy" width="480" height="300">`
       : `<div class="ac-img-grad" style="background:linear-gradient(135deg,hsl(${(i * 47) % 360} 55% 42%),hsl(${(i * 47 + 40) % 360} 50% 28%));width:100%;height:100%"></div>`
   }</div>
   <div class="ac-body">
@@ -347,6 +412,23 @@ export function patchHomeArticleFeed(homeHtml: string, articles: SeoArticleBrief
   let html = stripOrphanHomeArticleCards(homeHtml);
   const feed = refreshArticleFeedHtml(articles);
   if (/data-seo-article-feed/i.test(html)) {
+    // Normalize wrapper: drop featured/span mega-card classes from agent HTML
+    html = html.replace(
+      /<([^>]*\bdata-seo-article-feed\b)([^>]*)>/i,
+      (_m, start: string, rest: string) => {
+        let attrs = `${start}${rest}`;
+        attrs = attrs.replace(/\sclass=(["'])([\s\S]*?)\1/i, (_c, q: string, cls: string) => {
+          const cleaned = String(cls)
+            .split(/\s+/)
+            .filter((c) => c && !/feed-span|featured|span-\d+|col-span|mega/i.test(c));
+          if (!cleaned.includes("articles-grid")) cleaned.push("articles-grid");
+          return ` class=${q}${cleaned.join(" ")}${q}`;
+        });
+        if (!/\bclass=/i.test(attrs)) attrs += ` class="articles-grid"`;
+        if (!/data-page-size=/i.test(attrs)) attrs += ` data-page-size="${SEO_HOME_FEED_PAGE_SIZE}"`;
+        return `<${attrs}>`;
+      },
+    );
     html = html.replace(
       /(<[^>]*\bdata-seo-article-feed\b[^>]*>)([\s\S]*?)(<\/[^>]+>)/i,
       `$1\n${feed}\n$3`,
