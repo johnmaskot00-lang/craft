@@ -130,6 +130,33 @@ export function resolveSeoOffer(
   return { niche, targetUrl, ctaLabel };
 }
 
+/** Human product name for native editorial mentions (niche or hostname). */
+export function seoOfferProductName(niche: string, targetUrl: string): string {
+  const n = String(niche || "").trim();
+  if (n) {
+    const words = n.split(/\s+/).filter(Boolean);
+    // Short brand-like niches: "Dremia", "AI Dream", "Маркетплейс Dremia"
+    if (words.length <= 4 && n.length <= 48) {
+      const brandish = words.find((w) => /^[A-Za-z][\w.-]{1,24}$/.test(w) && /[a-zA-Z]/.test(w));
+      if (brandish && !/^(ai|ии|для|the|and|маркетплейс|сервис|платформа)$/i.test(brandish)) {
+        return brandish;
+      }
+      if (words.length <= 2) return n;
+    }
+  }
+  try {
+    const host = new URL(targetUrl).hostname.replace(/^www\./i, "");
+    const base = (host.split(".")[0] || host).replace(/[-_]+/g, " ");
+    return base
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+      .join(" ") || "сервис";
+  } catch {
+    return n || "сервис";
+  }
+}
+
 export const projects = pgTable("projects", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull(),

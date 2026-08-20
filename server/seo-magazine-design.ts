@@ -84,8 +84,9 @@ PUBLICATION
 - Niche: ${JSON.stringify(cfg.niche)}
 - Description: ${JSON.stringify(cfg.siteDescription)}
 - Logo URL (optional <img>): ${logoUrl ? JSON.stringify(logoUrl) : "(text mark OK)"}
-- CTA URL (optional, use rel=noopener sponsored if present): ${cfg.targetUrl ? JSON.stringify(cfg.targetUrl) : "(none)"}
+- OWNER OFFER URL (header CTA + every article recommends this — never invent another): ${cfg.targetUrl ? JSON.stringify(cfg.targetUrl) : "(none — omit partner CTA)"}
 - CTA label: ${JSON.stringify(cfg.ctaLabel || "Подробнее")}
+- Niche / product to promote in chrome: ${JSON.stringify(cfg.niche || "")}
 
 ASSIGNED HERO ARCHETYPE (build THIS interactive hero — invent the visual language):
 ${heroVariantDescription(heroVariant)}
@@ -262,6 +263,8 @@ img,video,canvas,svg{max-width:100%;height:auto}
 .ref-offer-btn{position:relative!important;isolation:isolate!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;min-height:48px!important;padding:.85rem 1.35rem!important;border-radius:999px!important;text-decoration:none!important;font-weight:800!important;font-size:.9rem!important;white-space:nowrap!important;color:#fff!important;background:var(--brand,#2563eb)!important;box-shadow:0 10px 24px color-mix(in srgb,var(--brand,#2563eb) 35%,transparent)!important}
 .ref-offer-btn-label{position:relative!important;z-index:2!important;color:#fff!important}
 .ref-offer-btn-shine{position:absolute!important;inset:0!important;z-index:1!important;background:linear-gradient(110deg,transparent 20%,rgba(255,255,255,.45) 48%,transparent 72%)!important;transform:translateX(-130%)!important;animation:refBtnShine 2.6s ease-in-out infinite!important}
+.offer-inline-tip{margin:0.85rem 0 1.1rem!important;padding:0.75rem 1rem!important;border-left:3px solid var(--brand,currentColor)!important;background:color-mix(in srgb,var(--brand,currentColor) 8%,transparent)!important;border-radius:0 var(--r,10px) var(--r,10px) 0!important;font-size:0.95em!important;line-height:1.55!important}
+.offer-inline-tip a{font-weight:700!important;text-decoration:underline!important;text-underline-offset:2px!important}
 @keyframes refBtnShine{0%{transform:translateX(-130%)}55%,100%{transform:translateX(130%)}}
 .seo-feed-pager{display:flex;align-items:center;justify-content:center;gap:.65rem;flex-wrap:wrap;margin:1.25rem 0 2.5rem;font-family:var(--heading-font,inherit)}
 .seo-feed-pager[hidden]{display:none!important}

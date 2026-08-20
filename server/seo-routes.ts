@@ -3,7 +3,7 @@ import type { IStorage } from "./storage";
 import { deployToYandex, type DeployFile } from "./yandex-deploy";
 import { isInternalAgentFile } from "@shared/project-files";
 import type { SeoConfig, SeoCluster, SeoKeyword, SeoLayoutFamily, SeoTheme } from "@shared/schema";
-import { resolveSeoOffer } from "@shared/schema";
+import { resolveSeoOffer, seoOfferProductName } from "@shared/schema";
 import crypto from "crypto";
 import { withKieCallback, waitForKieJob, kieResultUrl, type KieTaskData } from "./kie-jobs";
 import { tryAcquireGenerate, withImageSlot } from "./resource-guards";
@@ -341,19 +341,77 @@ const LAYOUT_FAMILIES: SeoLayoutFamily[] = ["editorial", "magazine", "knowledge"
 const RADII = ["2px", "6px", "10px", "14px", "20px", "28px"];
 
 
-function defaultReferralCopy(kw: SeoKeyword, niche: string, slot: "top" | "bottom"): { title: string; desc: string } {
+function defaultReferralCopy(
+  kw: SeoKeyword,
+  niche: string,
+  slot: "top" | "bottom",
+  productName?: string,
+): { title: string; desc: string } {
   const topic = (kw.title || kw.keyword || niche || "этой теме").trim();
   const nicheLabel = (niche || "вашей нише").trim();
+  const brand = (productName || "сервис").trim() || "сервис";
   if (slot === "top") {
     return {
-      title: `Попробуйте сервис по теме «${topic}»`,
-      desc: `Редакция рекомендует проверенный инструмент для ${nicheLabel}: откройте оффер и начните сразу — без лишнего поиска.`,
+      title: `${brand}: решение под «${topic}»`,
+      desc: `Редакция рекомендует ${brand} для ниши «${nicheLabel}» — нативный следующий шаг после этой статьи, без поиска сторонних площадок.`,
     };
   }
   return {
-    title: "Готовы перейти от теории к практике?",
-    desc: `Если материал помог — закрепите результат: перейдите по рекомендации издания и продолжите уже в сервисе под «${topic}».`,
+    title: `Закрепите результат в ${brand}`,
+    desc: `Если материал по «${topic}» был полезен — продолжите практику в ${brand}: платформа под эту нишу, которую рекомендует издание.`,
   };
+}
+
+/** Recover owner CTA URL from art-directed homepage header when seoConfig.targetUrl was never saved. */
+function extractOfferUrlFromHomeHtml(html: string): string {
+  if (!html) return "";
+  const patterns = [
+    /<a\b[^>]*\b(?:btn-header-cta|cta-btn|header-cta)\b[^>]*\bhref=["'](https?:\/\/[^"']+)["']/i,
+    /<a\b[^>]*\bhref=["'](https?:\/\/[^"']+)["'][^>]*\b(?:btn-header-cta|cta-btn|header-cta|rel=["'][^"']*sponsored)/i,
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (m?.[1] && safeHref(m[1])) return String(m[1]).trim();
+  }
+  return "";
+}
+
+function cfgWithOfferFallback(cfg: SeoConfig, homeHtml?: string): SeoConfig {
+  if (safeHref(cfg.targetUrl)) return cfg;
+  const fromHome = extractOfferUrlFromHomeHtml(homeHtml || "");
+  if (!fromHome) return cfg;
+  return { ...cfg, targetUrl: fromHome, ctaLabel: cfg.ctaLabel || "Попробовать →" };
+}
+
+/** Ensure body text has at least one sponsored link to the owner offer (native placement). */
+function ensureInlineOfferMention(
+  html: string,
+  offer: { niche: string; targetUrl: string; ctaLabel: string },
+): string {
+  const url = safeHref(offer.targetUrl);
+  if (!html || !url) return html;
+  const host = (() => {
+    try { return new URL(offer.targetUrl).hostname.replace(/^www\./i, ""); } catch { return ""; }
+  })();
+  // Ignore links inside .ref-offer boxes — we still want a body mention.
+  const bodyProbe = html
+    .replace(/<aside class="ref-offer[\s\S]*?<\/aside>/gi, "")
+    .replace(/<header\b[\s\S]*?<\/header>/gi, "")
+    .replace(/<nav\b[\s\S]*?<\/nav>/gi, "")
+    .replace(/<footer\b[\s\S]*?<\/footer>/gi, "");
+  if (host && new RegExp(`href=["'][^"']*${host.replace(/\./g, "\\.")}`, "i").test(bodyProbe)) {
+    return html;
+  }
+  if (/offer-inline-tip/i.test(html)) return html;
+  const product = seoOfferProductName(offer.niche, offer.targetUrl);
+  const tip = `<p class="offer-inline-tip">Практика по теме материала: редакция рекомендует <a href="${url}" target="_blank" rel="noopener sponsored">${esc(product)}</a> — платформу под нишу «${esc(offer.niche || product)}».</p>`;
+  if (/<p class="lead"[\s\S]*?<\/p>/i.test(html)) {
+    return html.replace(/(<p class="lead"[\s\S]*?<\/p>)/i, `$1\n${tip}`);
+  }
+  if (/<div class="article-body"[^>]*>/i.test(html)) {
+    return html.replace(/(<div class="article-body"[^>]*>)/i, `$1\n${tip}`);
+  }
+  return html;
 }
 
 function buildReferralOfferHtml(opts: {
@@ -408,14 +466,17 @@ function ensureArticleReferralOffers(
   const url = safeHref(offer.targetUrl);
   if (!html || !url) return html;
 
-  const topCopy = parseRefCopyMarker(html, "top") || defaultReferralCopy(kw, offer.niche || cfg.niche || cluster.name, "top");
-  const bottomCopy = parseRefCopyMarker(html, "bottom") || defaultReferralCopy(kw, offer.niche || cfg.niche || cluster.name, "bottom");
+  const product = seoOfferProductName(offer.niche || cfg.niche || cluster.name, offer.targetUrl);
+  const nicheForCopy = offer.niche || cfg.niche || cluster.name;
+  const topCopy = parseRefCopyMarker(html, "top") || defaultReferralCopy(kw, nicheForCopy, "top", product);
+  const bottomCopy = parseRefCopyMarker(html, "bottom") || defaultReferralCopy(kw, nicheForCopy, "bottom", product);
 
   let out = html
     .replace(/\{\{REF_TOP:[\s\S]*?\}\}/gi, "")
     .replace(/\{\{REF_BOTTOM:[\s\S]*?\}\}/gi, "")
     .replace(/<aside class="ref-offer[\s\S]*?<\/aside>/gi, "")
-    .replace(/<div class="cta-block"[\s\S]*?<\/div>/gi, "");
+    .replace(/<div class="cta-block"[\s\S]*?<\/div>/gi, "")
+    .replace(/<p class="offer-inline-tip"[\s\S]*?<\/p>/gi, "");
 
   const topHtml = buildReferralOfferHtml({
     url: offer.targetUrl,
@@ -423,7 +484,7 @@ function ensureArticleReferralOffers(
     title: topCopy.title,
     desc: topCopy.desc,
     slot: "top",
-    niche: offer.niche || cfg.niche || cluster.name,
+    niche: nicheForCopy,
   });
   const bottomHtml = buildReferralOfferHtml({
     url: offer.targetUrl,
@@ -431,7 +492,7 @@ function ensureArticleReferralOffers(
     title: bottomCopy.title,
     desc: bottomCopy.desc,
     slot: "bottom",
-    niche: offer.niche || cfg.niche || cluster.name,
+    niche: nicheForCopy,
   });
 
   const leadRe = /(<p class="lead"[\s\S]*?<\/p>)/i;
@@ -463,23 +524,35 @@ function ensureArticleReferralOffers(
     /(<aside class="ref-offer[\s\S]*?<a href=")[^"]+(" class="ref-offer-btn")/gi,
     `$1${url}$2`,
   );
+  out = ensureInlineOfferMention(out, offer);
   return out;
 }
 
 async function refreshArticleReferralOffers(storage: IStorage, projectId: number, cfg: SeoConfig): Promise<void> {
+  const home = await storage.getProjectFile(projectId, "index.html");
+  const effectiveCfg = cfgWithOfferFallback(cfg, home?.code);
   const hasOffer = !!(
-    safeHref(cfg.targetUrl)
-    || cfg.clusters.some((c) => safeHref(c.targetUrl) || c.keywords.some((k) => safeHref(k.targetUrl)))
+    safeHref(effectiveCfg.targetUrl)
+    || effectiveCfg.clusters.some((c) => safeHref(c.targetUrl) || c.keywords.some((k) => safeHref(k.targetUrl)))
   );
   if (!hasOffer) return;
+
+  // Persist recovered URL so agents and future generates see it.
+  if (!safeHref(cfg.targetUrl) && safeHref(effectiveCfg.targetUrl)) {
+    await storage.updateProject(projectId, {
+      seoConfig: { ...cfg, targetUrl: effectiveCfg.targetUrl, ctaLabel: effectiveCfg.ctaLabel },
+    } as any);
+  }
+
   const files = await storage.getProjectFiles(projectId);
   for (const f of files) {
     const m = /^([^/]+)\/([^/]+)\/index\.html$/.exec(f.filename);
     if (!m || !f.code) continue;
-    const cluster = cfg.clusters.find((c) => c.slug === m[1]);
+    const cluster = effectiveCfg.clusters.find((c) => c.slug === m[1]);
     const kw = cluster?.keywords.find((k) => k.slug === m[2]);
-    if (!cluster || !kw || kw.status !== "done") continue;
-    const next = ensureArticleReferralOffers(f.code, kw, cluster, cfg);
+    if (!cluster || !kw) continue;
+    if (kw.status !== "done" && !kw.filename && !f.code) continue;
+    const next = ensureArticleReferralOffers(f.code, kw, cluster, effectiveCfg);
     if (next !== f.code) {
       await storage.upsertProjectFile({ projectId, filename: f.filename, code: next });
     }
@@ -2381,6 +2454,7 @@ async function generateArticleHtml(
   const safeUrl = safeHref(offer.targetUrl);
   const offerNiche = offer.niche || cfg.niche;
   const hasReferral = !!safeUrl;
+  const productName = hasReferral ? seoOfferProductName(offerNiche || cluster.name, offer.targetUrl) : "";
 
   const prompt = `You are a world-class editorial designer + SEO writer creating a PREMIUM WEB MAGAZINE article. Write ONLY the inner article HTML fragment — NO <!DOCTYPE>, NO <html>, NO <head>, NO <nav>, NO <footer>, NO <body>.
 
@@ -2392,8 +2466,11 @@ PUBLICATION DESIGN BRIEF:
 ${(cfg.theme?.designBrief || `${cfg.theme?.name || ""} · ${cfg.theme?.headingFont || ""} / ${cfg.theme?.bodyFont || ""}`).slice(0, 900)}
 Write as this magazine's staff writer — tone and typography rhythm should match the brief, not a generic blog.
 ARTICLE NICHE / PRODUCT: "${offerNiche}"
-${safeUrl ? `TARGET URL (referral for THIS niche only): ${safeUrl} | CTA BUTTON TEXT: "${offer.ctaLabel}"
-IMPORTANT: Promote ONLY this product/offer via the TARGET URL above. Do not substitute other products or site-wide offers.` : ""}
+${safeUrl ? `OWNER OFFER (monetization — MANDATORY):
+- Product brand: "${productName}"
+- Referral URL: ${safeUrl}
+- CTA button text: "${offer.ctaLabel}"
+Promote ONLY this product/platform. Do not substitute Midjourney/Adobe Stock/etc. as the primary place to "try or buy" — those may be mentioned as market context, but the reader’s practical next step is always "${productName}".` : ""}
 
 ${contentTypeBlock}
 
@@ -2435,15 +2512,17 @@ INTERNAL LINKS (use naturally in body text as real <a href="..."> — ONLY URLs 
 ${relatedLinks || "(none yet)"}
 Never invent article titles or URLs. Do not add a "Читайте также" block with fake cards — the server injects real related links.
 ${hasReferral ? `
-REFERRAL / TRAFFIC OFFER (CRITICAL — monetization, native editorial recommend):
-The site owner configured a partner offer. You MUST place TWO copy markers (server wraps them into a branded section with CTA button "${offer.ctaLabel}" — do NOT invent your own gradient CTA boxes, do NOT output <div class="cta-block">):
-  1) RIGHT AFTER {{COVER}} (before key-takeaways) — this is the opening native recommendation readers see first:
-     {{REF_TOP:8-14 word native staff tip that recommends trying/buying the service for this article|||One concrete sentence: what the reader gets by clicking, tied to "${kw.keyword}" / niche "${offerNiche}"}}
-  2) Right before the author-box:
-     {{REF_BOTTOM:Closing staff nudge (different wording)|||One sentence recommendation, not spam}}
-Rules:
-- Sound like the magazine staff recommending a next step (Попробовать / Купить / Открыть — button text is already "${offer.ctaLabel}")
-- Same language as the article; never change the referral URL; never invent another product than "${offerNiche}"
+NATIVE PRODUCT RECOMMENDATION (CRITICAL — adapt to THIS article’s keyword):
+The site owner’s platform is "${productName}" (${safeUrl}), niche "${offerNiche}".
+1) In the ARTICLE BODY, weave 2–3 natural editorial tips that recommend "${productName}" as the practical next step for readers of THIS specific topic (e.g. if the article is about AI art freelancing → recommend the marketplace/platform to sell or commission; if about a model → where to run/buy related work). Different wording each time — never spam.
+2) At least TWO of those body mentions MUST be real HTML links:
+   <a href="${safeUrl}" target="_blank" rel="noopener sponsored">${productName}</a>
+3) Also place TWO copy markers (server wraps them into branded .ref-offer sections with CTA "${offer.ctaLabel}" — do NOT invent <div class="cta-block">):
+   a) RIGHT AFTER {{COVER}} (before key-takeaways):
+      {{REF_TOP:8-14 word native staff tip naming ${productName} for this article|||One concrete sentence: what the reader gets on ${productName}, tied to "${kw.keyword}"}}
+   b) Right before the author-box:
+      {{REF_BOTTOM:Closing staff nudge naming ${productName} (different wording)|||One sentence recommendation, not spam}}
+Rules: same language as the article; never change the referral URL; never invent another primary product than "${productName}".
 ` : ""}
 
 OUTPUT EXACTLY THIS STRUCTURE (no outer wrappers, no page-level tags):
@@ -2462,7 +2541,7 @@ ${hasReferral ? "{{REF_TOP:...}} marker here — native service recommend with C
 [toc if guide/tutorial/listicle]
 <div class="article-body">
   <p class="lead">[opening lead paragraph — bold, sets the stakes, answers the query in 2 sentences]</p>
-  [h2 sections with full content; rich visual elements (pull-quote / callout / stat-grid) and optional {{IMG:...}} markers interleaved; internal links where relevant]
+  [h2 sections with full content; rich visual elements (pull-quote / callout / stat-grid) and optional {{IMG:...}} markers interleaved; internal links where relevant; ${hasReferral ? `2–3 native ${productName} recommendations with sponsored links` : "no referral"}]
   ${hasReferral ? "{{REF_BOTTOM:...}} marker here" : ""}
 </div>
 <div class="author-box"><div class="author-avatar">${esc((cfg.siteTitle || "R").slice(0, 1))}</div><div class="author-info"><div class="author-name">${esc(cfg.siteTitle)}</div><div class="author-bio">Редакция издания. Тема: ${esc(cfg.niche || cluster.name)}. Обновлено: ${today}.</div></div></div>
@@ -3147,6 +3226,61 @@ Respond with ONLY valid JSON, no explanation:
     }
   });
 
+  // POST /api/seo/:id/offer — update site-wide product URL and inject into all articles
+  app.post("/api/seo/:id/offer", async (req, res) => {
+    const userId = requireAuth(req, res);
+    if (!userId) return;
+    const proj = await storage.getProject(parseInt(req.params.id));
+    if (!proj || proj.userId !== userId) return res.status(404).json({ message: "Not found" });
+    if ((proj as any).type !== "seo") return res.status(400).json({ message: "Это не SEO-проект" });
+
+    const cfg = (proj.seoConfig || {}) as SeoConfig;
+    const nextUrl = String(req.body?.targetUrl ?? cfg.targetUrl ?? "").trim().slice(0, 2000);
+    const nextCta = String(req.body?.ctaLabel ?? cfg.ctaLabel ?? "Попробовать →").trim().slice(0, 80) || "Попробовать →";
+    const nextNiche = String(req.body?.niche ?? cfg.niche ?? "").trim().slice(0, 120);
+
+    if (nextUrl && !safeHref(nextUrl)) {
+      return res.status(400).json({ message: "Укажите абсолютную ссылку http(s)://…" });
+    }
+
+    const updated: SeoConfig = {
+      ...cfg,
+      targetUrl: nextUrl || undefined,
+      ctaLabel: nextCta,
+      ...(nextNiche ? { niche: nextNiche } : {}),
+    };
+    await storage.updateProject(proj.id, { seoConfig: updated } as any);
+    await refreshArticleReferralOffers(storage, proj.id, updated);
+
+    // Keep header CTA href in sync when possible
+    if (nextUrl) {
+      const files = await storage.getProjectFiles(proj.id);
+      const hrefRe = /(<a\b[^>]*\b(?:btn-header-cta|cta-btn|header-cta)\b[^>]*\bhref=["'])[^"']+(["'])/gi;
+      const hrefRe2 = /(<a\b[^>]*\bhref=["'])[^"']+(["'][^>]*\b(?:btn-header-cta|cta-btn|header-cta)\b)/gi;
+      for (const f of files) {
+        if (!f.filename.toLowerCase().endsWith(".html") || !f.code) continue;
+        let next = f.code.replace(hrefRe, `$1${esc(nextUrl)}$2`);
+        next = next.replace(hrefRe2, `$1${esc(nextUrl)}$2`);
+        if (next !== f.code) {
+          await storage.upsertProjectFile({ projectId: proj.id, filename: f.filename, code: next });
+        }
+      }
+      await syncSeoShellAcrossPages(storage, proj.id, updated);
+    }
+
+    res.json({
+      ok: true,
+      offer: {
+        niche: updated.niche || null,
+        targetUrl: updated.targetUrl || null,
+        ctaLabel: updated.ctaLabel || null,
+        product: updated.targetUrl
+          ? seoOfferProductName(updated.niche || "", updated.targetUrl)
+          : null,
+      },
+    });
+  });
+
   // POST /api/seo/:id/add-keywords — merge a new keyword pack into existing site
   // Optional niche/targetUrl/ctaLabel stamp every new keyword (and new clusters) so
   // one SEO site can promote multiple affiliate offers / niches.
@@ -3379,12 +3513,29 @@ Respond ONLY with valid JSON (no markdown):
 
       const t = themeOf(cfg);
       const brief = (t.designBrief || `${t.name} · ${t.headingFont} / ${t.bodyFont} · ${t.layout || ""}`).slice(0, 1200);
+      const homeForOffer = sitePages.find((p) => p.filename === "index.html")?.code || "";
+      const offerCfg = cfgWithOfferFallback(cfg, homeForOffer);
+      const offerUrl = safeHref(offerCfg.targetUrl);
+      const offerProduct = offerUrl
+        ? seoOfferProductName(offerCfg.niche || "", offerCfg.targetUrl || "")
+        : "";
+      const offerBlock = offerUrl
+        ? `МОНЕТИЗАЦИЯ / ОФФЕР ВЛАДЕЛЬЦА (КРИТИЧНО — ты ОБЯЗАН это знать и использовать):
+- Продукт: «${offerProduct}»
+- Ниша: ${offerCfg.niche || "—"}
+- Ссылка (не меняй): ${offerUrl}
+- Текст кнопки: ${offerCfg.ctaLabel || "Попробовать →"}
+В КАЖДОЙ статье: две секции .ref-offer с этой ссылкой + нативные рекомендации «${offerProduct}» в тексте (адаптируй угол под тему статьи). Не подменяй чужими маркетплейсами/сервисами. Если оффера нет в статье — добавь.`
+        : `МОНЕТИЗАЦИЯ: ссылка оффера не задана в настройках. Если пользователь присылает URL продукта — сохрани его в CTA шапки и в .ref-offer всех статей.`;
+
       const baseSystem = `Ты — арт-директор премиального цифрового веб-журнала Craft AI («SEO-машина»). Не шаблонный верстальщик.
 Издание: «${cfg.siteTitle || proj.title}». Ниша: ${cfg.niche || "—"}.
 Архитектура: v${cfg.architectureVersion || 6}${isArtDirectedSeo(cfg) ? " · art-directed (агент владеет дизайном)" : ""}.
 Семейство: ${t.layoutFamily || "magazine"}; hero=${t.homeVariant || "custom"}; статья=${t.articleVariant || "sidebar-right"}.
 Бриф:
 ${brief}
+
+${offerBlock}
 
 Многостраничный контентный журнал: главная (index.html), разделы, статьи, assets/style.css.
 
@@ -3400,7 +3551,7 @@ ${brief}
 - Если правишь статью — сохрани «Короткий ответ» (key-takeaways) и FAQ.
 - Основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст WCAG AA. Текст на фото — .on-media + overlay.
 - Сохраняй data-seo-article-feed и .article-card на главной (сервер обновляет карточки).
-- Статьи: без SVG-анимаций; до 3 фото; две секции .ref-offer. Не превращай в .cta-block.
+- Статьи: без SVG-анимаций; до 3 фото; две секции .ref-offer с оффером владельца. Не превращай в .cta-block.
 - Маркеры magazine-art-v6 / structural-guard-v11 не удаляй. Запрещены горизонтальный скролл и микротекст.
 - Для фото — точные URL из вложений. Не выдумывай стоки.
 - Краткий итог после патчей, без огромного HTML в чат.
@@ -3501,6 +3652,20 @@ ${brief}
           for (const fn of allHtml) {
             if (!changedList.includes(fn)) changedList.push(fn);
           }
+        }
+        // Re-inject owner offer into every article after agent edits (agents often omit it).
+        try {
+          const freshProj = await storage.getProject(proj.id);
+          const freshCfg = (freshProj?.seoConfig || cfg) as SeoConfig;
+          await refreshArticleReferralOffers(storage, proj.id, freshCfg);
+          const allHtml = (await storage.getProjectFiles(proj.id))
+            .filter((f) => /^[^/]+\/[^/]+\/index\.html$/i.test(f.filename))
+            .map((f) => f.filename);
+          for (const fn of allHtml) {
+            if (!changedList.includes(fn)) changedList.push(fn);
+          }
+        } catch (offerErr: any) {
+          console.warn("[SEO-AGENT] referral refresh failed:", offerErr?.message);
         }
         const filesAfter = await storage.getProjectFiles(proj.id);
         for (const f of filesAfter) {
