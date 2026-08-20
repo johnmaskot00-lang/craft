@@ -17,6 +17,17 @@ import {
 } from "./agent-runtime";
 import { bundleSeoMediaForDeploy, normalizeSeoMediaUrls, persistSeoCoverFromUrl } from "./seo-media";
 import { KIE_GEMINI_MODEL, KIE_GEMINI_SYNC_URL, withKieGeminiRetry } from "./kie-gemini";
+import {
+  applyHeroVariantToTheme,
+  buildMagazineDesignPrompt,
+  collectSeoArticleBriefs,
+  ensureSoftMagazineGuardCss,
+  isArtDirectedSeo,
+  parseMagazineDesignFiles,
+  patchHomeArticleFeed,
+  pickHeroVariant,
+  type SeoHeroVariant,
+} from "./seo-magazine-design";
 
 const KIE_API_KEY = process.env.KIE_API_KEY;
 const KIE_GEMINI_URL = KIE_GEMINI_SYNC_URL;
@@ -580,6 +591,9 @@ function bodyClass(cfg: SeoConfig): string {
     cfg.structuralVersion === 2 && t.homeVariant ? `home-${t.homeVariant}` : "",
     cfg.structuralVersion === 2 && t.categoryVariant ? `category-${t.categoryVariant}` : "",
     cfg.structuralVersion === 2 && t.articleVariant ? `article-${t.articleVariant}` : "",
+    isArtDirectedSeo(cfg) ? "art-directed" : "",
+    isArtDirectedSeo(cfg) && t.homeVariant ? `hero-${t.homeVariant}` : "",
+    !isArtDirectedSeo(cfg) && (cfg.architectureVersion ?? 0) >= 5 ? "home-unified" : "",
     t.dark ? "is-dark" : "",
   ].filter(Boolean).join(" ");
 }
@@ -590,6 +604,10 @@ async function upgradeSeoArchitectureV5(
   cfg: SeoConfig,
 ): Promise<{ config: SeoConfig; upgraded: boolean }> {
   if (cfg.structuralVersion !== 2) {
+    return { config: cfg, upgraded: false };
+  }
+  // v6+ agent-designed magazines must never be forced back to the v5 hero-split shell.
+  if (isArtDirectedSeo(cfg) || (cfg.architectureVersion ?? 0) >= 6) {
     return { config: cfg, upgraded: false };
   }
   if ((cfg.architectureVersion ?? 0) >= 5) {
@@ -604,7 +622,7 @@ async function upgradeSeoArchitectureV5(
       await storage.upsertProjectFile({
         projectId,
         filename: "assets/style.css",
-        code: ensureStructuralGuardCss(buildSiteCss(themeOf(cfg))),
+        code: ensureStructuralGuardCss(buildSiteCss(themeOf(cfg)), cfg),
       });
     }
     return { config: cfg, upgraded: true };
@@ -891,13 +909,27 @@ function buildArticleSidebar(kw: SeoKeyword, cluster: SeoCluster, cfg: SeoConfig
 }
 
 async function syncSeoShellAcrossPages(storage: IStorage, projectId: number, cfg: SeoConfig): Promise<number> {
-  const nav = buildNav(cfg);
-  const footer = buildFooter(cfg);
-  const cls = bodyClass(cfg);
   const files = await storage.getProjectFiles(projectId);
+  let nav = buildNav(cfg);
+  let footer = buildFooter(cfg);
+  let cls = bodyClass(cfg);
+
+  if (isArtDirectedSeo(cfg)) {
+    const home = files.find((f) => f.filename === "index.html");
+    const homeNav = home?.code?.match(/<nav[\s\S]*?<\/nav>/i)?.[0];
+    const homeFooter = home?.code?.match(/<footer[\s\S]*?<\/footer>/i)?.[0];
+    const homeBody = home?.code?.match(/<body([^>]*)>/i)?.[1] || "";
+    const homeClass = /class=["']([^"']+)["']/i.exec(homeBody)?.[1];
+    if (homeNav) nav = homeNav;
+    if (homeFooter) footer = homeFooter;
+    if (homeClass) cls = homeClass;
+  }
+
   let updated = 0;
   for (const f of files) {
     if (!f.filename.toLowerCase().endsWith(".html") || !f.code) continue;
+    // Never overwrite the art-directed homepage shell with itself inconsistently
+    if (isArtDirectedSeo(cfg) && f.filename === "index.html") continue;
     let next = f.code;
     if (/<nav[\s\S]*?<\/nav>/i.test(next)) {
       next = next.replace(/<nav[\s\S]*?<\/nav>/i, nav);
@@ -905,7 +937,15 @@ async function syncSeoShellAcrossPages(storage: IStorage, projectId: number, cfg
     if (/<footer[\s\S]*?<\/footer>/i.test(next)) {
       next = next.replace(/<footer[\s\S]*?<\/footer>/i, footer);
     }
-    next = next.replace(/<body[^>]*>/i, `<body class="${cls}">`);
+    if (!isArtDirectedSeo(cfg)) {
+      next = next.replace(/<body[^>]*>/i, `<body class="${cls}">`);
+    } else if (cls && /<body[^>]*>/i.test(next)) {
+      // Keep article structure classes but don't force home hero classes onto articles
+      next = next.replace(/<body([^>]*)>/i, (full, attrs) => {
+        if (/structure-v2/.test(attrs) || /article-/.test(attrs)) return full;
+        return `<body class="${esc(cls)}">`;
+      });
+    }
     if (next !== f.code) {
       await storage.upsertProjectFile({ projectId, filename: f.filename, code: next });
       updated++;
@@ -951,20 +991,46 @@ async function repairSeoSiteLayout(storage: IStorage, projectId: number, cfg: Se
   await refreshArticleSeoMetadata(storage, projectId, cfg);
   await refreshArticleReferralOffers(storage, projectId, cfg);
   await refreshArticleSidebars(storage, projectId, cfg);
-  for (const cluster of cfg.clusters) {
-    const catHtml = buildCategoryPage(cluster, cfg);
-    await storage.upsertProjectFile({ projectId, filename: `${cluster.slug}/index.html`, code: catHtml });
-  }
-  const homeHtml = buildHomePage(cfg);
-  await storage.upsertProjectFile({ projectId, filename: "index.html", code: homeHtml });
-  await syncSeoShellAcrossPages(storage, projectId, cfg);
-  const cssFile = await storage.getProjectFile(projectId, "assets/style.css");
-  if (cssFile?.code) {
-    const guarded = ensureStructuralGuardCss(cssFile.code);
-    if (guarded !== cssFile.code) {
-      await storage.upsertProjectFile({ projectId, filename: "assets/style.css", code: guarded });
+
+  if (isArtDirectedSeo(cfg)) {
+    // Agent owns homepage + CSS — only soft-refresh feeds / categories / guard.
+    for (const cluster of cfg.clusters) {
+      const catHtml = buildCategoryPage(cluster, cfg);
+      await storage.upsertProjectFile({ projectId, filename: `${cluster.slug}/index.html`, code: catHtml });
+    }
+    const articles = collectSeoArticleBriefs(cfg);
+    const home = await storage.getProjectFile(projectId, "index.html");
+    if (home?.code) {
+      const patched = patchHomeArticleFeed(home.code, articles);
+      if (patched !== home.code) {
+        await storage.upsertProjectFile({ projectId, filename: "index.html", code: patched });
+      }
+      await syncSeoShellAcrossPages(storage, projectId, cfg);
+    }
+    const cssFile = await storage.getProjectFile(projectId, "assets/style.css");
+    if (cssFile?.code) {
+      const guarded = ensureStructuralGuardCss(cssFile.code, cfg);
+      if (guarded !== cssFile.code) {
+        await storage.upsertProjectFile({ projectId, filename: "assets/style.css", code: guarded });
+      }
+    }
+  } else {
+    for (const cluster of cfg.clusters) {
+      const catHtml = buildCategoryPage(cluster, cfg);
+      await storage.upsertProjectFile({ projectId, filename: `${cluster.slug}/index.html`, code: catHtml });
+    }
+    const homeHtml = buildHomePage(cfg);
+    await storage.upsertProjectFile({ projectId, filename: "index.html", code: homeHtml });
+    await syncSeoShellAcrossPages(storage, projectId, cfg);
+    const cssFile = await storage.getProjectFile(projectId, "assets/style.css");
+    if (cssFile?.code) {
+      const guarded = ensureStructuralGuardCss(cssFile.code, cfg);
+      if (guarded !== cssFile.code) {
+        await storage.upsertProjectFile({ projectId, filename: "assets/style.css", code: guarded });
+      }
     }
   }
+
   const files = await storage.getProjectFiles(projectId);
   for (const f of files) {
     if (!f.filename.toLowerCase().endsWith(".html") || !f.code) continue;
@@ -974,6 +1040,107 @@ async function repairSeoSiteLayout(storage: IStorage, projectId: number, cfg: Se
       await storage.upsertProjectFile({ projectId, filename: f.filename, code: next });
     }
   }
+}
+
+/**
+ * Gemini art-director pass: invents magazine CSS + interactive hero homepage.
+ * Replaces the old fixed server-assembled home template for architectureVersion 6.
+ */
+async function designSeoMagazineSite(
+  storage: IStorage,
+  projectId: number,
+  cfg: SeoConfig,
+  onStatus?: (msg: string) => void,
+): Promise<SeoConfig> {
+  const seed = `${cfg.siteTitle}|${cfg.niche}|${projectId}|${cfg.clusters.map((c) => c.slug).join(",")}`;
+  const heroVariant: SeoHeroVariant = pickHeroVariant(seed);
+  const articles = collectSeoArticleBriefs(cfg);
+  onStatus?.(`Арт-директор: hero «${heroVariant}»`);
+
+  const prompt = buildMagazineDesignPrompt({
+    cfg,
+    heroVariant,
+    articles,
+    logoUrl: cfg.logoUrl,
+  });
+
+  let raw = "";
+  try {
+    raw = await kieSync([
+      {
+        role: "system",
+        content:
+          "You are a world-class digital magazine art director and front-end designer. Output only the two FILE blocks requested. No preamble.",
+      },
+      { role: "user", content: prompt },
+    ], 180000);
+  } catch (err: any) {
+    console.warn("[SEO] magazine design agent failed:", err?.message || err);
+    // Fallback: keep readable server home so generate never blanks the site.
+    const fallbackCfg: SeoConfig = {
+      ...cfg,
+      architectureVersion: 6,
+      theme: applyHeroVariantToTheme(themeOf(cfg), "slider-split"),
+    };
+    await storage.upsertProjectFile({
+      projectId,
+      filename: "assets/style.css",
+      code: ensureStructuralGuardCss(buildSiteCss(themeOf(fallbackCfg)), fallbackCfg),
+    });
+    await storage.upsertProjectFile({
+      projectId,
+      filename: "index.html",
+      code: buildHomePage(fallbackCfg).replace("home-unified", `structure-v2 art-directed hero-slider-split`),
+    });
+    return fallbackCfg;
+  }
+
+  const parsed = parseMagazineDesignFiles(raw);
+  if (!parsed.css || !parsed.html || parsed.html.length < 400 || parsed.css.length < 200) {
+    console.warn("[SEO] magazine design parse incomplete — using fallback shell");
+    const fallbackCfg: SeoConfig = {
+      ...cfg,
+      architectureVersion: 6,
+      theme: applyHeroVariantToTheme(themeOf(cfg), heroVariant),
+    };
+    await storage.upsertProjectFile({
+      projectId,
+      filename: "assets/style.css",
+      code: ensureStructuralGuardCss(buildSiteCss(themeOf(fallbackCfg)), fallbackCfg),
+    });
+    await storage.upsertProjectFile({
+      projectId,
+      filename: "index.html",
+      code: buildHomePage(fallbackCfg).replace(
+        "home-unified",
+        `structure-v2 art-directed hero-${heroVariant}`,
+      ),
+    });
+    return fallbackCfg;
+  }
+
+  let css = parsed.css;
+  if (!/magazine-art-v6/i.test(css)) css = `/* magazine-art-v6 */\n${css}`;
+  css = ensureSoftMagazineGuardCss(css);
+
+  let html = parsed.html;
+  if (!/^<!DOCTYPE/i.test(html) && !/^<html/i.test(html)) {
+    html = `<!DOCTYPE html>\n${html}`;
+  }
+  html = patchHomeArticleFeed(html, articles);
+  html = normalizeSeoMediaUrls(html);
+
+  await storage.upsertProjectFile({ projectId, filename: "assets/style.css", code: css });
+  await storage.upsertProjectFile({ projectId, filename: "index.html", code: html });
+
+  const next: SeoConfig = {
+    ...cfg,
+    architectureVersion: 6,
+    theme: applyHeroVariantToTheme(themeOf(cfg), heroVariant),
+  };
+  await storage.updateProject(projectId, { seoConfig: next, generatedCode: html } as any);
+  console.log(`[SEO] magazine art-directed home ready (hero=${heroVariant}, css=${css.length}, html=${html.length})`);
+  return next;
 }
 
 async function refreshArticleSeoMetadata(storage: IStorage, projectId: number, cfg: SeoConfig): Promise<void> {
@@ -1028,26 +1195,41 @@ async function persistUniqueSkin(
   mode: "fast" | "art" = "fast",
 ): Promise<SeoConfig> {
   let next = !cfg.theme?.layout ? { ...cfg, theme: themeOf(cfg) } : cfg;
+
+  // Never overwrite an agent-designed magazine CSS with the old editorial template.
   const existing = await storage.getProjectFile(projectId, "assets/style.css");
+  const hasAgentCss =
+    !!existing?.code &&
+    (existing.code.includes("magazine-art-v6") || existing.code.includes("structural-guard-v8"));
+  if (isArtDirectedSeo(next) && hasAgentCss) {
+    return next;
+  }
+
   const needsEditorialCss =
     mode === "art" ||
     !existing?.code ||
     existing.code.includes("publication-skin") ||
-    !existing.code.includes("editorial-system-v4");
-  if (needsEditorialCss) {
-    await storage.upsertProjectFile({ projectId, filename: "assets/style.css", code: ensureStructuralGuardCss(buildSiteCss(themeOf(next))) });
+    (!existing.code.includes("editorial-system-v4") && !hasAgentCss);
+  if (needsEditorialCss && !hasAgentCss) {
+    await storage.upsertProjectFile({
+      projectId,
+      filename: "assets/style.css",
+      code: ensureStructuralGuardCss(buildSiteCss(themeOf(next)), next),
+    });
   }
 
   if (next !== cfg && next.theme?.layout !== cfg.theme?.layout) {
     await storage.updateProject(projectId, { seoConfig: next } as any);
   }
 
-  const files = await storage.getProjectFiles(projectId);
-  const cls = bodyClass(next);
-  for (const f of files) {
-    if (!f.filename.toLowerCase().endsWith(".html") || !f.code) continue;
-    const patched = f.code.replace(/<body([^>]*)>/i, `<body class="${cls}">`);
-    if (patched !== f.code) await storage.upsertProjectFile({ projectId, filename: f.filename, code: patched });
+  if (!isArtDirectedSeo(next)) {
+    const files = await storage.getProjectFiles(projectId);
+    const cls = bodyClass(next);
+    for (const f of files) {
+      if (!f.filename.toLowerCase().endsWith(".html") || !f.code) continue;
+      const patched = f.code.replace(/<body([^>]*)>/i, `<body class="${cls}">`);
+      if (patched !== f.code) await storage.upsertProjectFile({ projectId, filename: f.filename, code: patched });
+    }
   }
   return next;
 }
@@ -1615,8 +1797,14 @@ body.structure-v2 .cta-block{display:none!important}
 `;
 }
 
-function ensureStructuralGuardCss(css: string): string {
+function ensureStructuralGuardCss(css: string, cfg?: SeoConfig): string {
   if (!css) return css;
+  if (cfg && isArtDirectedSeo(cfg)) {
+    return ensureSoftMagazineGuardCss(css);
+  }
+  if (css.includes("structural-guard-v8") || css.includes("magazine-art-v6")) {
+    return ensureSoftMagazineGuardCss(css);
+  }
   if (css.includes("structural-guard-v7")) return css;
   const withoutOldGuard = css.replace(/\n?\/\*\s*structural-guard(?:-v\d+)?[\s\S]*$/i, "").trim();
   return `${withoutOldGuard}\n${buildStructuralGuardCss()}`;
@@ -2385,22 +2573,26 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
       if (!cfg.theme?.layout) cfg = await persistUniqueSkin(storage, proj.id, cfg);
       const architecture = await upgradeSeoArchitectureV5(storage, proj.id, cfg);
       cfg = architecture.config;
-      if (architecture.upgraded && cfg.pagesGenerated > 0) {
+      if (architecture.upgraded && cfg.pagesGenerated > 0 && !isArtDirectedSeo(cfg)) {
         await storage.upsertProjectFile({
           projectId: proj.id,
           filename: "assets/style.css",
-          code: ensureStructuralGuardCss(buildSiteCss(themeOf(cfg))),
+          code: ensureStructuralGuardCss(buildSiteCss(themeOf(cfg)), cfg),
         });
         await repairSeoSiteLayout(storage, proj.id, cfg);
         const home = await storage.getProjectFile(proj.id, "index.html");
         await storage.updateProject(proj.id, { seoConfig: cfg, generatedCode: home?.code || proj.generatedCode } as any);
       }
       const cssFile = await storage.getProjectFile(proj.id, "assets/style.css");
-      if (cssFile?.code && (!cssFile.code.includes("structural-guard-v7") || !cssFile.code.includes("home-hero-split"))) {
+      if (
+        cssFile?.code &&
+        !isArtDirectedSeo(cfg) &&
+        (!cssFile.code.includes("structural-guard-v7") || !cssFile.code.includes("home-hero-split"))
+      ) {
         await storage.upsertProjectFile({
           projectId: proj.id,
           filename: "assets/style.css",
-          code: ensureStructuralGuardCss(buildSiteCss(themeOf(cfg))),
+          code: ensureStructuralGuardCss(buildSiteCss(themeOf(cfg)), cfg),
         });
       }
       (proj as any).seoConfig = cfg;
@@ -2488,22 +2680,24 @@ CONTENT ARCHITECTURE:
 - For each keyword, identify 3 real questions searchers have (short, 60 chars max each)
 
 PUBLICATION ARCHITECTURE (CRITICAL):
-- Choose ONE reader-first publication model:
+- Choose ONE reader-first publication model that fits the niche audience:
   * editorial — thoughtful long-form journal
-  * magazine — broad topical publication
+  * magazine — broad topical web magazine (prefer for media/tech/lifestyle niches)
   * knowledge — structured evergreen reference
-  * portal — frequently updated news/information site
+  * portal — frequently updated information hub
   * digest — concise curated reading
-- Base the choice on search intent and reading behavior, not visual novelty.
-- The server owns typography, contrast, navigation and responsive layout to guarantee readability.
+- Also invent a short art-direction brief: mood, color energy, typography vibe (Cyrillic-capable fonts), and whether the site should feel dark/cinematic or bright/editorial.
+- A separate art-director agent will design the interactive homepage (7 hero systems). You only choose the editorial model + visual mood — do NOT prescribe fixed HTML templates.
 
 Respond with ONLY valid JSON, no explanation:
 {
   "siteTitle": "Human-readable site title about the niche",
   "siteDescription": "One compelling sentence describing what the site covers (120-160 chars)",
   "visualIdentity": {
-    "mood": "3-6 word editorial tone",
-    "layoutFamily": "editorial|magazine|knowledge|portal|digest"
+    "mood": "3-8 word art direction (palette + atmosphere)",
+    "layoutFamily": "editorial|magazine|knowledge|portal|digest",
+    "typographyVibe": "short note on heading vs body feel",
+    "backgroundEnergy": "calm|living-deep|cinematic|airy"
   },
   "clusters": [
     {
@@ -2524,7 +2718,7 @@ Respond with ONLY valid JSON, no explanation:
 }`;
 
       const responseText = await kieSync([
-        { role: "system", content: "You are a principal SEO information architect. Choose the publication model that best serves search intent and sustained reading. Prioritize clear hierarchy, topical authority and useful navigation over novelty. Respond only with valid JSON." },
+        { role: "system", content: "You are a principal SEO information architect and brand art director. Choose the publication model and a vivid visual mood for a unique web magazine. Prioritize topical authority and a distinctive editorial personality. Respond only with valid JSON." },
         { role: "user", content: prompt },
       ], 120000);
 
@@ -2564,6 +2758,15 @@ Respond with ONLY valid JSON, no explanation:
       // Project name is authoritative — used verbatim as siteTitle across the whole site.
       const finalName = siteName || parsed.siteTitle || proj.title;
       const theme = selectTheme(finalName, siteNiche, parsed.visualIdentity || parsed.visual);
+      const mood = String(parsed.visualIdentity?.mood || parsed.visual?.mood || "").trim();
+      const bgEnergy = String(parsed.visualIdentity?.backgroundEnergy || "").trim();
+      if (mood || bgEnergy) {
+        theme.designBrief = [mood, bgEnergy, parsed.visualIdentity?.typographyVibe]
+          .filter(Boolean)
+          .join(" · ")
+          .slice(0, 400);
+        theme.artDirected = true;
+      }
       const updatedConfig: SeoConfig = {
         niche: siteNiche,
         rawKeywords: limited,
@@ -2575,7 +2778,7 @@ Respond with ONLY valid JSON, no explanation:
         ctaLabel: siteCtaLabel,
         theme,
         structuralVersion: 2,
-        architectureVersion: 5,
+        architectureVersion: 6,
         logoStatus: "pending",
         faviconDataUrl: prevCfg.faviconDataUrl,
         faviconMime: prevCfg.faviconMime,
@@ -2585,7 +2788,8 @@ Respond with ONLY valid JSON, no explanation:
       };
 
       await storage.updateProject(proj.id, { seoConfig: updatedConfig, title: finalName } as any);
-      const withSkin = await persistUniqueSkin(storage, proj.id, updatedConfig, "art");
+      // Lightweight bootstrap CSS only — final magazine skin is agent-designed after articles generate.
+      const withSkin = await persistUniqueSkin(storage, proj.id, updatedConfig, "fast");
       res.json({ config: withSkin });
     } catch (e: any) {
       await storage.updateProject(proj.id, {
@@ -2628,8 +2832,8 @@ Respond with ONLY valid JSON, no explanation:
 
     try {
     send({ type: "start", total: cfg.pagesTotal });
-    send({ type: "progress", keyword: "Арт-директор: уникальный дизайн издания", status: "generating" });
-    cfg = await persistUniqueSkin(storage, proj.id, cfg, "art");
+    send({ type: "progress", keyword: "Подготовка издания", status: "generating" });
+    cfg = await persistUniqueSkin(storage, proj.id, { ...cfg, architectureVersion: 6 }, "fast");
 
     if (cfg.structuralVersion === 2 && !cfg.logoUrl && cfg.logoStatus !== "fallback" && !aborted) {
       send({ type: "brand", status: "generating", label: "Создаю логотип 1:1" });
@@ -2751,10 +2955,24 @@ Respond with ONLY valid JSON, no explanation:
       await repairArticleCovers(storage, proj.id, { ...cfg, clusters: allClusters });
     }
 
-    // finalizeSeoSite rebuilds categories, home, shell sync, CSS guard, media paths
+    // Articles keep SEO writing quality; homepage/CSS are invented by the magazine art-director agent.
     if (!aborted) {
       const doneStatus = creditsDepleted ? "idle" : "done";
-      const finalCfg: SeoConfig = { ...cfg, clusters: allClusters, pagesGenerated: generated, status: doneStatus };
+      let finalCfg: SeoConfig = {
+        ...cfg,
+        clusters: allClusters,
+        pagesGenerated: generated,
+        status: doneStatus,
+        architectureVersion: 6,
+      };
+      send({ type: "progress", keyword: "Арт-директор: интерактивный журналный Hero", status: "generating" });
+      try {
+        finalCfg = await designSeoMagazineSite(storage, proj.id, finalCfg, (msg) =>
+          send({ type: "progress", keyword: msg, status: "generating" }),
+        );
+      } catch (designErr: any) {
+        console.warn("[SEO] designSeoMagazineSite error:", designErr?.message || designErr);
+      }
       await finalizeSeoSite(storage, proj.id, finalCfg);
       await persistGeoSurfaces(storage, proj.id, finalCfg, projectOrigin(proj));
       const homeFile = await storage.getProjectFile(proj.id, "index.html");
@@ -2796,7 +3014,7 @@ Respond with ONLY valid JSON, no explanation:
 
     for (const f of deployFiles) {
       if (f.filename !== "assets/style.css" || !f.content) continue;
-      f.content = ensureStructuralGuardCss(f.content);
+      f.content = ensureStructuralGuardCss(f.content, cfg);
       if (f.content.includes("overflow-x:hidden")) continue;
       f.content = f.content.includes("html{scroll-behavior:smooth}")
         ? f.content.replace("html{scroll-behavior:smooth}", "html{scroll-behavior:smooth;overflow-x:hidden;max-width:100%}body{overflow-x:hidden;max-width:100%;min-width:0}")
@@ -3063,32 +3281,32 @@ Respond ONLY with valid JSON (no markdown):
 
       const t = themeOf(cfg);
       const brief = (t.designBrief || `${t.name} · ${t.headingFont} / ${t.bodyFont} · ${t.layout || ""}`).slice(0, 1200);
-      const baseSystem = `Ты — арт-директор и шеф-редактор цифрового журнала Craft AI («SEO-машина»), не шаблонный верстальщик.
+      const baseSystem = `Ты — арт-директор премиального цифрового веб-журнала Craft AI («SEO-машина»). Не шаблонный верстальщик.
 Издание: «${cfg.siteTitle || proj.title}». Ниша: ${cfg.niche || "—"}.
-Структурное семейство: ${cfg.structuralVersion === 2 ? `${t.layoutFamily || "magazine"}; навигация=${t.navVariant || "bar"}; главная=${t.homeVariant || "lead-grid"}; категория=${t.categoryVariant || "grid"}; статья=${t.articleVariant || "sidebar-right"}; порядок=${(t.sectionOrder || []).join("→")}` : "legacy — не мигрировать без прямой просьбы"}.
-Бриф дизайна:
+Архитектура: v${cfg.architectureVersion || 6}${isArtDirectedSeo(cfg) ? " · art-directed (агент владеет дизайном)" : ""}.
+Семейство: ${t.layoutFamily || "magazine"}; hero=${t.homeVariant || "custom"}; статья=${t.articleVariant || "sidebar-right"}.
+Бриф:
 ${brief}
 
-Это многостраничный контентный сайт: главная (index.html), разделы (slug/index.html), статьи (slug/article/index.html) и общий CSS (assets/style.css).
+Многостраничный контентный журнал: главная (index.html), разделы, статьи, assets/style.css.
 
 ТВОЯ РОЛЬ:
-- Сам понимаешь аудиторию и задачу чтения, но ставишь ясность, доверие и навигацию выше визуальных трюков.
-- Типографика, сетка, ритм, шапка, карточки и статья — как у сильного независимого издания: выразительно, но спокойно и предсказуемо.
-- Глобальный дизайн правь в assets/style.css. Nav/footer одинаковы на всех ${editable.filter(f => f.filename.endsWith('.html')).length} страницах — для меню достаточно CSS.
+- Сам креативно подбираешь шрифты, цвета, глубину фона, motion и UI под нишу — уровень лучших UI-дизайнеров веб-журналов.
+- Главная: уникальный интерактивный Hero (один из 7 вариантов обложек/сцен) + лента статей. Не возвращай унылый белый шаблонный блог.
+- Глобальный дизайн — в assets/style.css. Nav/footer согласованы на всех страницах.
 
 ПРАВИЛА:
-- Меняй то, что просит пользователь, но держи уровень «premium publication».
+- Меняй то, что просит пользователь, сохраняя premium magazine quality.
 - Не удаляй статьи, slug и внутренние ссылки без явной просьбы.
-- GEO: не выкидывай FAQ, .key-takeaways, JSON-LD, canonical, llms.txt, robots.txt, sitemap.xml.
-- Если правишь статью — сохрани «Короткий ответ» (key-takeaways) и FAQ с самодостаточными ответами, которые нейросеть может процитировать.
-- Основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст не ниже WCAG AA. Текст поверх фото — только с устойчивым затемнением.
-- Главная v5: меню сверху → Hero (слева title/desc, справа слайдер статей) → статьи 4 в ряд. Не возвращай старый hero-grid.
-- Статьи: без SVG-анимаций; до 3 фото; две секции .ref-offer с реф-ссылкой (начало и конец) — не превращай в плоский .cta-block.
-- Текст на подложках читаемый: в ref-offer title/desc тёмные, кнопка белая на brand.
-- Сохраняй маркеры editorial-system-v4 и structural-guard-v7. Запрещены горизонтальный скролл, микротекст, кислотные фоны и эффекты, мешающие чтению.
-- Для фото используй ТОЧНЫЕ URL из вложений как src у <img>. Не выдумывай стоковые CDN.
-- Не выводи огромный HTML в чат — краткий итог после патчей.
-- Пользователь сейчас смотрит файл «${safeActive}».`;
+- GEO обязательно: FAQ, .key-takeaways, JSON-LD, canonical, llms.txt, robots.txt, sitemap.xml.
+- Если правишь статью — сохрани «Короткий ответ» (key-takeaways) и FAQ.
+- Основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст WCAG AA. Текст на фото — .on-media + overlay.
+- Сохраняй data-seo-article-feed и .article-card на главной (сервер обновляет карточки).
+- Статьи: без SVG-анимаций; до 3 фото; две секции .ref-offer. Не превращай в .cta-block.
+- Маркеры magazine-art-v6 / structural-guard-v8 не удаляй. Запрещены горизонтальный скролл и микротекст.
+- Для фото — точные URL из вложений. Не выдумывай стоки.
+- Краткий итог после патчей, без огромного HTML в чат.
+- Пользователь смотрит файл «${safeActive}».`;
 
       const systemPrompt = buildSeoMultipageEditSystemPrompt({
         baseSystem,
@@ -3171,7 +3389,7 @@ ${brief}
       if (cssTouched || htmlTouched) {
         const cssFile = await storage.getProjectFile(proj.id, "assets/style.css");
         if (cssFile?.code) {
-          const guarded = ensureStructuralGuardCss(cssFile.code);
+          const guarded = ensureStructuralGuardCss(cssFile.code, cfg);
           if (guarded !== cssFile.code) {
             await storage.upsertProjectFile({ projectId: proj.id, filename: "assets/style.css", code: guarded });
             if (!changedList.includes("assets/style.css")) changedList.push("assets/style.css");

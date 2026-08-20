@@ -371,18 +371,17 @@ export function buildSeoMultipageEditSystemPrompt(opts: {
 ${"═".repeat(43)}
 
 АРХИТЕКТУРА (КРИТИЧНО):
-1. Nav, footer и body class ОДИНАКОВЫ на всех страницах — сервер синхронизирует shell после каждой правки.
-2. Дизайн меню и визуальные токены → assets/style.css. Структурные секции главной/категории меняй в HTML только по явной просьбе.
-3. НЕ патчи <nav>/<footer> в HTML (кроме явной просьбы изменить текст пункта меню).
+1. Nav, footer и визуальный shell согласованы — для art-directed журналов nav/footer берутся с index.html.
+2. Дизайн токены / hero / motion → assets/style.css. Главная — уникальный интерактивный Hero (журнал), не SaaS-лендинг.
+3. НЕ патчи <nav>/<footer> в каждой статье без нужды — правь CSS или index.html.
 4. Правка статьи → только её slug/.../index.html.
-5. Сохраняй body-классы structure-v2, family-*, home-*, category-* и article-* — они фиксируют выбранное структурное семейство.
-6. Не превращай разные семейства обратно в универсальную hero + одинаковую 3-колоночную сетку. При CSS-правках сохраняй композиционный характер текущего family-*.
-7. Не удаляй canonical, Open Graph, JSON-LD, FAQ, key-takeaways, breadcrumbs, внутренние ссылки и логотип из общего shell.
-8. На главной: одно меню сверху (nav-top), затем Hero-split — слева название+описание, справа слайдер новых статей. После Hero — сетка статей 4 в ряд (.articles-grid-4). Не ломай .home-hero-split / .hero-slider / .articles-grid-4.
-9. В статьях запрещены SVG-анимации и декоративные SVG. Живость — через фото, callout, pull-quote, таблицы. До 3 фото на статью (обложка + до 2 inline).
-9b. Реф-оффер: в каждой статье две секции .ref-offer (начало и конец) с партнёрской ссылкой владельца. Не заменяй их на градиентный .cta-block. Кнопка .ref-offer-btn со shine — часть дизайна издания.
-10. ЧИТАЕМОСТЬ НЕПРИКОСНОВЕННА: основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст текста не ниже WCAG AA; текст поверх фото только с классом .on-media и тёмным overlay. В .ref-offer заголовок/описание — тёмные цвета темы, на кнопке — белый текст.
-11. Не удаляй маркеры editorial-system-v4 и structural-guard-v6 из assets/style.css. Не делай горизонтальный скролл, микротекст или кислотные фоны.
+5. Сохраняй structure-v2, art-directed, hero-* / family-* классы.
+6. Не сжимай уникальный журнал обратно в белый шаблонный блог.
+7. Не удаляй canonical, Open Graph, JSON-LD, FAQ, key-takeaways, breadcrumbs, внутренние ссылки и логотип.
+8. На главной сохрани data-seo-article-feed и .article-card. Hero может быть любым из 7 интерактивных вариантов (slider-split, cinematic-cover, mosaic-stage, newsroom-wire, story-rail, topic-orbit, magazine-deck) — развивай выбранный, не ломай интерактив.
+9. В статьях запрещены SVG-анимации. Живость — фото, callout, pull-quote. До 3 фото. Две секции .ref-offer.
+10. ЧИТАЕМОСТЬ: 17–19px, line-height 1.65–1.85, 62–76ch, WCAG AA; .on-media только с overlay.
+11. Не удаляй magazine-art-v6 / structural-guard-v8. Без горизонтального скролла и микротекста.
 
 ${manifest}
 

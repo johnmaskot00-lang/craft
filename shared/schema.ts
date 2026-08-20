@@ -85,7 +85,7 @@ export interface SeoTheme {
   artDirected?: boolean;
   designBrief?: string;
   layoutFamily?: SeoLayoutFamily;
-  homeVariant?: "lead-grid" | "single-feature" | "topic-first" | "story-mosaic" | "newsroom" | "compact-feed";
+  homeVariant?: "lead-grid" | "single-feature" | "topic-first" | "story-mosaic" | "newsroom" | "compact-feed" | "slider-split" | "cinematic-cover" | "mosaic-stage" | "story-rail" | "topic-orbit" | "magazine-deck";
   categoryVariant?: "grid" | "index" | "featured" | "feed";
   articleVariant?: "sidebar-right" | "sidebar-left" | "focus" | "wide";
   sectionOrder?: Array<"hero" | "topics" | "latest" | "trending" | "cta">;
@@ -102,7 +102,7 @@ export interface SeoConfig {
   /** Set only for newly analyzed projects; missing means preserve the legacy skeleton. */
   structuralVersion?: 2;
   /** Curated architecture/navigation generation version for safe in-place upgrades of v2 sites. */
-  architectureVersion?: 4 | 5;
+  architectureVersion?: 4 | 5 | 6;
   /** One generated square brand mark reused across every page and deployment. */
   logoUrl?: string;
   logoStatus?: "pending" | "generating" | "ready" | "fallback";
