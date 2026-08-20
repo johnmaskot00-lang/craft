@@ -1,6 +1,8 @@
-import { db } from "./db";
-import { users, projects, projectMessages, projectImages, projectVersions, projectFiles, leads, creditTransactions, paymentOrders, promoCodes, promoRedemptions, type User, type InsertUser, type Project, type InsertProject, type ProjectMessage, type InsertProjectMessage, type ProjectImage, type InsertProjectImage, type ProjectVersion, type InsertProjectVersion, type ProjectFile, type InsertProjectFile, type Lead, type InsertLead, type CreditTransaction, type PaymentOrder, type PromoCode } from "@shared/schema";
-import { eq, desc, and, sql, gte } from "drizzle-orm";
+﻿import { db } from "./db";
+import { users, projects, projectMessages, projectImages, projectVersions, projectFiles, leads, creditTransactions, paymentOrders, promoCodes, promoRedemptions, referralRewards, type User, type InsertUser, type Project, type InsertProject, type ProjectMessage, type InsertProjectMessage, type ProjectImage, type InsertProjectImage, type ProjectVersion, type InsertProjectVersion, type ProjectFile, type InsertProjectFile, type Lead, type InsertLead, type CreditTransaction, type PaymentOrder, type PromoCode } from "@shared/schema";
+import { eq, desc, and, sql, gte, isNull } from "drizzle-orm";
+import crypto from "crypto";
+import { referralBonusTokens, normalizeReferralCode } from "./referral";
 
 export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
@@ -83,6 +85,30 @@ export interface IStorage {
     error?: "not_found" | "inactive" | "exhausted" | "already_used" | "invalid";
   }>;
   ensurePromoTables(): Promise<void>;
+
+  ensureReferralSchema(): Promise<void>;
+  ensureReferralCode(userId: number): Promise<string>;
+  getUserByReferralCode(code: string): Promise<User | undefined>;
+  attachReferral(newUserId: number, referralCode: string | null | undefined): Promise<{ attached: boolean; referrerId?: number }>;
+  awardReferralForPayment(order: {
+    id: number;
+    userId: number;
+    tokens: number;
+  }): Promise<{ awarded: boolean; tokens?: number; referrerId?: number }>;
+  getReferralStats(referrerUserId: number): Promise<{
+    code: string;
+    referredCount: number;
+    paidReferredCount: number;
+    totalTokensEarned: number;
+    recent: Array<{
+      id: number;
+      referredUserId: number;
+      referredDisplayName: string;
+      paymentOrderId: number;
+      tokensAwarded: number;
+      createdAt: Date;
+    }>;
+  }>;
 }
 
 export const NEW_USER_CREDITS = 0;
@@ -104,19 +130,25 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createUser(insertUser: InsertUser): Promise<User> {
+    await this.ensureReferralSchema();
+    const referralCode = await this.allocateReferralCode();
     const [user] = await db.insert(users).values({
       ...insertUser,
       credits: NEW_USER_CREDITS,
+      referralCode,
     }).returning();
     return user;
   }
 
   async createTelegramUser(data: { telegramId: string; displayName: string; avatarUrl?: string }): Promise<User> {
+    await this.ensureReferralSchema();
+    const referralCode = await this.allocateReferralCode();
     const [user] = await db.insert(users).values({
       displayName: data.displayName,
       telegramId: data.telegramId,
       avatarUrl: data.avatarUrl ?? null,
       credits: NEW_USER_CREDITS,
+      referralCode,
     }).returning();
     return user;
   }
@@ -127,12 +159,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createYandexUser(data: { yandexId: string; displayName: string; email?: string; avatarUrl?: string }): Promise<User> {
+    await this.ensureReferralSchema();
+    const referralCode = await this.allocateReferralCode();
     const [user] = await db.insert(users).values({
       displayName: data.displayName,
       yandexId: data.yandexId,
       email: data.email ?? null,
       avatarUrl: data.avatarUrl ?? null,
       credits: NEW_USER_CREDITS,
+      referralCode,
     }).returning();
     return user;
   }
@@ -189,7 +224,7 @@ export class DatabaseStorage implements IStorage {
         const user = await this.getUser(userId);
         return { success: false, newBalance: user?.credits ?? 0 };
       }
-      // Unique race: another txn inserted the same key — treat as replay if matching
+      // Unique race: another txn inserted the same key вЂ” treat as replay if matching
       const existing = await db.select().from(creditTransactions).where(eq(creditTransactions.idempotencyKey, idempotencyKey));
       if (existing.length > 0) {
         const row = existing[0];
@@ -343,7 +378,7 @@ export class DatabaseStorage implements IStorage {
         url: projectImages.url,
         prompt: projectImages.prompt,
         createdAt: projectImages.createdAt,
-        projectTitle: sql<string>`COALESCE(${projects.title}, 'Удалённый проект')`,
+        projectTitle: sql<string>`COALESCE(${projects.title}, 'РЈРґР°Р»С‘РЅРЅС‹Р№ РїСЂРѕРµРєС‚')`,
       })
       .from(projectImages)
       .leftJoin(projects, eq(projectImages.projectId, projects.id))
@@ -376,7 +411,7 @@ export class DatabaseStorage implements IStorage {
         url: projectImages.url,
         prompt: projectImages.prompt,
         createdAt: projectImages.createdAt,
-        projectTitle: sql<string>`COALESCE(${projects.title}, 'Удалённый проект')`,
+        projectTitle: sql<string>`COALESCE(${projects.title}, 'РЈРґР°Р»С‘РЅРЅС‹Р№ РїСЂРѕРµРєС‚')`,
       })
       .from(projectImages)
       .leftJoin(projects, eq(projectImages.projectId, projects.id))
@@ -469,7 +504,7 @@ export class DatabaseStorage implements IStorage {
         } as ProjectFile;
       }
     } catch (err: any) {
-      // Unique index may not exist yet in older DBs — fall back to select/update.
+      // Unique index may not exist yet in older DBs вЂ” fall back to select/update.
       console.warn("[storage] upsert ON CONFLICT failed, fallback:", err?.message?.slice?.(0, 120));
     }
     const existing = await this.getProjectFile(file.projectId, file.filename);
@@ -583,13 +618,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAllProjectsWithPendingAnim(): Promise<Project[]> {
-    // SQL filter — avoid loading every project's generatedCode into Node.
+    // SQL filter вЂ” avoid loading every project's generatedCode into Node.
     return db.select().from(projects).where(
       sql`${projects.generatedCode} LIKE '%data-scroll-anim-pending="1"%'`,
     );
   }
 
-  // Returns all projects that have a Kling task ID stored — either in a pending
+  // Returns all projects that have a Kling task ID stored вЂ” either in a pending
   // spinner section or in a fallback section written after a server restart.
   // Used by the periodic animation-resume job.
   async getAllProjectsWithAnimTaskId(): Promise<Project[]> {
@@ -784,7 +819,7 @@ export class DatabaseStorage implements IStorage {
         RETURNING id
       `);
       if (!bumped.rows?.length) {
-        // Cap hit between select and update — roll back via throwing
+        // Cap hit between select and update вЂ” roll back via throwing
         throw Object.assign(new Error("PROMO_EXHAUSTED"), { promoError: "exhausted" as const });
       }
 
@@ -794,7 +829,7 @@ export class DatabaseStorage implements IStorage {
         amount: promo.credits,
         type: "credit",
         operation: "promo",
-        note: `Промокод ${promo.code}`,
+        note: `РџСЂРѕРјРѕРєРѕРґ ${promo.code}`,
         idempotencyKey,
       }).onConflictDoNothing().returning();
 
@@ -814,6 +849,216 @@ export class DatabaseStorage implements IStorage {
       throw err;
     });
   }
+  async ensureReferralSchema(): Promise<void> {
+    await db.execute(sql`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code text
+    `);
+    await db.execute(sql`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by_user_id integer
+    `);
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS users_referral_code_uniq
+      ON users (referral_code)
+    `);
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS referral_rewards (
+        id serial PRIMARY KEY,
+        referrer_user_id integer NOT NULL,
+        referred_user_id integer NOT NULL,
+        payment_order_id integer NOT NULL,
+        tokens_awarded integer NOT NULL,
+        created_at timestamp DEFAULT CURRENT_TIMESTAMP NOT NULL
+      )
+    `);
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS referral_rewards_order_uniq
+      ON referral_rewards (payment_order_id)
+    `);
+  }
+
+  private async allocateReferralCode(): Promise<string> {
+    for (let attempt = 0; attempt < 16; attempt++) {
+      const code = crypto.randomBytes(4).toString("hex").toUpperCase();
+      const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.referralCode, code)).limit(1);
+      if (!existing) return code;
+    }
+    return `C${Date.now().toString(36).toUpperCase()}${crypto.randomBytes(2).toString("hex").toUpperCase()}`.slice(0, 16);
+  }
+
+  async ensureReferralCode(userId: number): Promise<string> {
+    await this.ensureReferralSchema();
+    const user = await this.getUser(userId);
+    if (!user) throw new Error("USER_NOT_FOUND");
+    if (user.referralCode) return user.referralCode;
+    for (let attempt = 0; attempt < 16; attempt++) {
+      const code = await this.allocateReferralCode();
+      try {
+        const [updated] = await db
+          .update(users)
+          .set({ referralCode: code })
+          .where(and(eq(users.id, userId), isNull(users.referralCode)))
+          .returning();
+        if (updated?.referralCode) return updated.referralCode;
+        const fresh = await this.getUser(userId);
+        if (fresh?.referralCode) return fresh.referralCode;
+      } catch {
+        /* unique race — try another code */
+      }
+    }
+    throw new Error("REFERRAL_CODE_ALLOC_FAILED");
+  }
+
+  async getUserByReferralCode(code: string): Promise<User | undefined> {
+    await this.ensureReferralSchema();
+    const normalized = normalizeReferralCode(code);
+    if (!normalized) return undefined;
+    const [user] = await db.select().from(users).where(eq(users.referralCode, normalized)).limit(1);
+    return user;
+  }
+
+  async attachReferral(
+    newUserId: number,
+    referralCode: string | null | undefined,
+  ): Promise<{ attached: boolean; referrerId?: number }> {
+    await this.ensureReferralSchema();
+    const normalized = normalizeReferralCode(referralCode);
+    if (!normalized) return { attached: false };
+
+    const referrer = await this.getUserByReferralCode(normalized);
+    if (!referrer || referrer.id === newUserId) return { attached: false };
+
+    const [updated] = await db
+      .update(users)
+      .set({ referredByUserId: referrer.id })
+      .where(and(
+        eq(users.id, newUserId),
+        isNull(users.referredByUserId),
+      ))
+      .returning();
+
+    if (!updated) return { attached: false };
+    console.log(`[Referral] user ${newUserId} attached to referrer ${referrer.id} (code=${normalized})`);
+    return { attached: true, referrerId: referrer.id };
+  }
+
+  async awardReferralForPayment(order: {
+    id: number;
+    userId: number;
+    tokens: number;
+  }): Promise<{ awarded: boolean; tokens?: number; referrerId?: number }> {
+    await this.ensureReferralSchema();
+    const bonus = referralBonusTokens(order.tokens);
+    if (bonus < 1) return { awarded: false };
+
+    const buyer = await this.getUser(order.userId);
+    const referrerId = buyer?.referredByUserId;
+    if (!referrerId || referrerId === order.userId) return { awarded: false };
+
+    const referrer = await this.getUser(referrerId);
+    if (!referrer) return { awarded: false };
+
+    return await db.transaction(async (tx) => {
+      const insertedReward = await tx.insert(referralRewards).values({
+        referrerUserId: referrerId,
+        referredUserId: order.userId,
+        paymentOrderId: order.id,
+        tokensAwarded: bonus,
+      }).onConflictDoNothing().returning();
+
+      if (insertedReward.length === 0) {
+        return { awarded: false };
+      }
+
+      const idempotencyKey = `referral_payment_${order.id}`;
+      const creditInserted = await tx.insert(creditTransactions).values({
+        userId: referrerId,
+        amount: bonus,
+        type: "credit",
+        operation: "referral",
+        note: `Р РµС„РµСЂР°Р»СЊРЅС‹Р№ Р±РѕРЅСѓСЃ 20% Р·Р° РѕРїР»Р°С‚Сѓ РґСЂСѓРіР° (#${order.id})`,
+        idempotencyKey,
+      }).onConflictDoNothing().returning();
+
+      if (creditInserted.length === 0) {
+        return { awarded: false };
+      }
+
+      await tx.execute(
+        sql`UPDATE users SET credits = credits + ${bonus} WHERE id = ${referrerId}`,
+      );
+
+      console.log(
+        `[Referral] +${bonus} tokens в†’ user ${referrerId} from payment order ${order.id} (buyer ${order.userId})`,
+      );
+      return { awarded: true, tokens: bonus, referrerId };
+    });
+  }
+
+  async getReferralStats(referrerUserId: number): Promise<{
+    code: string;
+    referredCount: number;
+    paidReferredCount: number;
+    totalTokensEarned: number;
+    recent: Array<{
+      id: number;
+      referredUserId: number;
+      referredDisplayName: string;
+      paymentOrderId: number;
+      tokensAwarded: number;
+      createdAt: Date;
+    }>;
+  }> {
+    await this.ensureReferralSchema();
+    const code = await this.ensureReferralCode(referrerUserId);
+
+    const [countRow] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(users)
+      .where(eq(users.referredByUserId, referrerUserId));
+
+    const paidRes = await db.execute(sql`
+      SELECT COUNT(DISTINCT referred_user_id)::int AS n
+      FROM referral_rewards
+      WHERE referrer_user_id = ${referrerUserId}
+    `);
+    const paidRow = (paidRes.rows as Array<{ n: number }>)[0];
+
+    const [sumRow] = await db
+      .select({ total: sql<number>`coalesce(sum(${referralRewards.tokensAwarded}), 0)::int` })
+      .from(referralRewards)
+      .where(eq(referralRewards.referrerUserId, referrerUserId));
+
+    const recentRows = await db
+      .select({
+        id: referralRewards.id,
+        referredUserId: referralRewards.referredUserId,
+        referredDisplayName: users.displayName,
+        paymentOrderId: referralRewards.paymentOrderId,
+        tokensAwarded: referralRewards.tokensAwarded,
+        createdAt: referralRewards.createdAt,
+      })
+      .from(referralRewards)
+      .leftJoin(users, eq(users.id, referralRewards.referredUserId))
+      .where(eq(referralRewards.referrerUserId, referrerUserId))
+      .orderBy(desc(referralRewards.createdAt))
+      .limit(20);
+
+    return {
+      code,
+      referredCount: Number(countRow?.n || 0),
+      paidReferredCount: Number(paidRow?.n || 0),
+      totalTokensEarned: Number(sumRow?.total || 0),
+      recent: recentRows.map((r) => ({
+        id: r.id,
+        referredUserId: r.referredUserId,
+        referredDisplayName: r.referredDisplayName || `ID ${r.referredUserId}`,
+        paymentOrderId: r.paymentOrderId,
+        tokensAwarded: r.tokensAwarded,
+        createdAt: r.createdAt,
+      })),
+    };
+  }
 }
 
 export const storage = new DatabaseStorage();
+

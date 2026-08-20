@@ -122,6 +122,12 @@ import {
   isRetryableKieGeminiError,
   withKieGeminiRetry,
 } from "./kie-gemini";
+import {
+  REFERRAL_RATE,
+  normalizeReferralCode,
+  referralShareUrl,
+  setReferralCookie,
+} from "./referral";
 
 /** Refund only when billed AND we are 100% sure KIE API failed. */
 async function refundIfConfirmedKie(
@@ -4186,6 +4192,9 @@ export async function registerRoutes(
   setupAuth(app);
   registerGeoRoutes(app);
   registerKieCallbackRoute(app);
+  void storage.ensureReferralSchema().catch((err: any) => {
+    console.warn("[Referral] schema ensure failed:", err?.message || err);
+  });
 
   app.get("/api/health", async (_req, res) => {
     const mem = process.memoryUsage();
@@ -4671,6 +4680,7 @@ export async function registerRoutes(
         admin_add: "Начисление (админ)",
         admin_deduct: "Списание (админ)",
         promo: "Промокод",
+        referral: "Реферальный бонус",
       };
       const totalPages = Math.max(1, Math.ceil(total / limit));
       res.json({
@@ -9299,13 +9309,24 @@ ${fullHtml}`;
   async function creditPaidOrder(order: { id: number; userId: number; amount: number; tokens: number; status: string }, yooPaymentId: string) {
     if (order.status === "paid") return { already: true as const };
     await storage.updatePaymentOrderStatus(order.id, "paid", yooPaymentId, new Date());
-    await storage.creditPayment(
+    const payResult = await storage.creditPayment(
       order.userId,
       order.tokens,
       `payment_${order.id}`,
       `Оплата ${order.amount}₽ — ${order.tokens} токенов`,
     );
     console.log(`[Payment] User ${order.userId} credited ${order.tokens} tokens (order ${order.id}, yoo=${yooPaymentId})`);
+    if (payResult.credited) {
+      try {
+        await storage.awardReferralForPayment({
+          id: order.id,
+          userId: order.userId,
+          tokens: order.tokens,
+        });
+      } catch (refErr: any) {
+        console.error("[Referral] award failed:", refErr?.message || refErr);
+      }
+    }
     return { already: false as const };
   }
 
@@ -9487,6 +9508,36 @@ ${fullHtml}`;
       res.json(orders);
     } catch (err: any) {
       res.status(500).json({ message: "Ошибка загрузки истории" });
+    }
+  });
+
+  // ── Referral program ────────────────────────────────────────────────────────
+  app.get("/api/referral/capture", async (req, res) => {
+    const code = normalizeReferralCode(req.query.ref ?? req.query.code);
+    if (!code) return res.status(400).json({ message: "Некорректный код" });
+    const referrer = await storage.getUserByReferralCode(code);
+    if (!referrer) return res.status(404).json({ message: "Реферальная ссылка не найдена" });
+    setReferralCookie(res, code);
+    res.json({ ok: true, code });
+  });
+
+  app.get("/api/referral/me", requireAuth, async (req, res) => {
+    try {
+      const userId = (req.user as any).id as number;
+      const stats = await storage.getReferralStats(userId);
+      res.json({
+        code: stats.code,
+        link: referralShareUrl(stats.code),
+        rate: REFERRAL_RATE,
+        ratePercent: Math.round(REFERRAL_RATE * 100),
+        referredCount: stats.referredCount,
+        paidReferredCount: stats.paidReferredCount,
+        totalTokensEarned: stats.totalTokensEarned,
+        recent: stats.recent,
+      });
+    } catch (err: any) {
+      console.error("[Referral] /me error:", err?.message || err);
+      res.status(500).json({ message: err?.message || "Ошибка загрузки реферальной программы" });
     }
   });
 

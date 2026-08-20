@@ -4,6 +4,7 @@ import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { Loader2, Sparkles } from "lucide-react";
 import { queryClient } from "@/lib/queryClient";
+import { captureReferralFromUrl, getStoredReferralCode } from "@/lib/referral";
 
 const appleFont = '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif';
 
@@ -269,10 +270,11 @@ export default function AuthPage() {
   const finishTelegramAuth = useCallback(async (user: Record<string, any>) => {
     setIsTelegramLoading(true);
     try {
+      const ref = getStoredReferralCode();
       const res = await fetch("/api/auth/telegram", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(user),
+        body: JSON.stringify({ ...user, ref: ref || undefined }),
         credentials: "include",
       });
       const data = await res.json();
@@ -309,6 +311,7 @@ export default function AuthPage() {
   }, []);
 
   useEffect(() => {
+    captureReferralFromUrl();
     const params = new URLSearchParams(window.location.search);
     if (params.get("yandex_callback") === "1") {
       try {
@@ -322,10 +325,11 @@ export default function AuthPage() {
             setIsYandexLoading(true);
             void (async () => {
               try {
+                const ref = getStoredReferralCode();
                 const res = await fetch("/api/auth/yandex", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ token }),
+                  body: JSON.stringify({ token, ref: ref || undefined }),
                   credentials: "include",
                 });
                 const result = await res.json();

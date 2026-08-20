@@ -19,6 +19,7 @@ import {
   getTelegramBotAuthStatus,
   handleTelegramUpdate,
 } from "./telegram-bot-auth";
+import { extractReferralCode } from "./referral";
 
 const scryptAsync = promisify(scrypt);
 
@@ -179,6 +180,7 @@ export function setupAuth(app: Express) {
         password: hashedPassword,
         displayName,
       });
+      await storage.attachReferral(user.id, extractReferralCode(req));
 
       req.login(user, (err) => {
         if (err) return next(err);
@@ -227,7 +229,8 @@ export function setupAuth(app: Express) {
 
     let user = await storage.getUserByTelegramId(telegramId);
     if (!user) {
-      user = await storage.createTelegramUser({ telegramId, displayName, avatarUrl });
+      user = await storage.createTelegramUser({ telegramId, displayName, avatarUrl: avatarUrl || undefined });
+      await storage.attachReferral(user.id, extractReferralCode(req));
     }
 
     req.login(user, (err: any) => {
@@ -282,7 +285,8 @@ export function setupAuth(app: Express) {
       const avatarUrl = data.photo_url || null;
       let user = await storage.getUserByTelegramId(telegramId);
       if (!user) {
-        user = await storage.createTelegramUser({ telegramId, displayName, avatarUrl });
+        user = await storage.createTelegramUser({ telegramId, displayName, avatarUrl: avatarUrl || undefined });
+        await storage.attachReferral(user.id, extractReferralCode(req));
       }
       req.login(user, (err) => {
         if (err) return next(err);
@@ -334,7 +338,8 @@ export function setupAuth(app: Express) {
 
       let user = await storage.getUserByTelegramId(telegramId);
       if (!user) {
-        user = await storage.createTelegramUser({ telegramId, displayName, avatarUrl });
+        user = await storage.createTelegramUser({ telegramId, displayName, avatarUrl: avatarUrl || undefined });
+        await storage.attachReferral(user.id, extractReferralCode(req));
       }
 
       req.login(user, (err) => {
@@ -403,6 +408,7 @@ export function setupAuth(app: Express) {
 
       if (!user) {
         user = await storage.createYandexUser({ yandexId, displayName, email: email ?? undefined, avatarUrl: avatarUrl ?? undefined });
+        await storage.attachReferral(user.id, extractReferralCode(req));
       }
 
       req.login(user, (err) => {

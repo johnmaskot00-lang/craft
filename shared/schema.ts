@@ -13,6 +13,10 @@ export const users = pgTable("users", {
   telegramId: text("telegram_id").unique(),
   yandexId: text("yandex_id").unique(),
   avatarUrl: text("avatar_url"),
+  /** Public invite code for https://craft-ai.ru/r/<code> (unique when set). */
+  referralCode: text("referral_code").unique(),
+  /** Set once at signup when arriving via a referral link. */
+  referredByUserId: integer("referred_by_user_id"),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 
@@ -200,6 +204,8 @@ export const insertUserSchema = createInsertSchema(users).omit({
   plan: true,
   telegramId: true,
   avatarUrl: true,
+  referralCode: true,
+  referredByUserId: true,
 });
 
 export const insertProjectSchema = createInsertSchema(projects).omit({
@@ -333,6 +339,20 @@ export const promoRedemptions = pgTable("promo_redemptions", {
 }));
 
 export type PromoRedemption = typeof promoRedemptions.$inferSelect;
+
+/** Exactly-once 20% token bonus to referrer for each paid order of a referred user. */
+export const referralRewards = pgTable("referral_rewards", {
+  id: serial("id").primaryKey(),
+  referrerUserId: integer("referrer_user_id").notNull(),
+  referredUserId: integer("referred_user_id").notNull(),
+  paymentOrderId: integer("payment_order_id").notNull(),
+  tokensAwarded: integer("tokens_awarded").notNull(),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+}, (t) => ({
+  orderUniq: uniqueIndex("referral_rewards_order_uniq").on(t.paymentOrderId),
+}));
+
+export type ReferralReward = typeof referralRewards.$inferSelect;
 
 /**
  * express-session / connect-pg-simple store.

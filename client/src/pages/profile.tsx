@@ -4,7 +4,7 @@ import { useLocation } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, Coins, Calendar, Hash, User, Shield, HeadphonesIcon, Gift, LogOut, History, ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
+import { ArrowLeft, Coins, Calendar, Hash, User, Shield, HeadphonesIcon, Gift, LogOut, History, ChevronLeft, ChevronRight, Loader2, Copy, Check, Users, Link2 } from "lucide-react";
 
 const appleFont = '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif';
 const HISTORY_PAGE_SIZE = 20;
@@ -36,11 +36,29 @@ type CreditHistoryPage = {
   totalPages: number;
 };
 
+type ReferralMe = {
+  code: string;
+  link: string;
+  ratePercent: number;
+  referredCount: number;
+  paidReferredCount: number;
+  totalTokensEarned: number;
+  recent: Array<{
+    id: number;
+    referredUserId: number;
+    referredDisplayName: string;
+    paymentOrderId: number;
+    tokensAwarded: number;
+    createdAt: string;
+  }>;
+};
+
 export default function ProfilePage() {
   const { user, logout } = useAuth();
   const [, setLocation] = useLocation();
   const [historyPage, setHistoryPage] = useState(1);
   const [promoCode, setPromoCode] = useState("");
+  const [copiedRef, setCopiedRef] = useState(false);
   const { toast } = useToast();
 
   const { data: historyData, isLoading: historyLoading, isError: historyError, isFetching: historyFetching } = useQuery<CreditHistoryPage>({
@@ -60,6 +78,20 @@ export default function ProfilePage() {
     refetchOnMount: "always",
     refetchOnWindowFocus: true,
     placeholderData: (prev) => prev,
+  });
+
+  const { data: referral, isLoading: referralLoading } = useQuery<ReferralMe>({
+    queryKey: ["/api/referral/me"],
+    queryFn: async () => {
+      const res = await fetch("/api/referral/me", { credentials: "include" });
+      if (!res.ok) {
+        const text = (await res.text()) || res.statusText;
+        throw new Error(`${res.status}: ${text}`);
+      }
+      return res.json();
+    },
+    enabled: !!user,
+    staleTime: 30_000,
   });
 
   const redeemMutation = useMutation({
@@ -190,6 +222,99 @@ export default function ProfilePage() {
               </div>
             </div>
           ))}
+        </div>
+
+        {/* Referral program */}
+        <div style={{ background: "#fff", borderRadius: 20, border: "1px solid rgba(0,0,0,0.06)", boxShadow: "0 2px 12px rgba(0,0,0,0.04)", overflow: "hidden", marginBottom: "1.25rem", padding: "1.1rem 1.25rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.85rem" }}>
+            <div style={{ width: 34, height: 34, borderRadius: 10, background: "rgba(52,199,89,0.12)", display: "flex", alignItems: "center", justifyContent: "center", color: "#34C759" }}>
+              <Users size={16} />
+            </div>
+            <div>
+              <div style={{ fontSize: "0.92rem", fontWeight: 700, color: "#1D1D1F" }}>Реферальная программа</div>
+              <div style={{ fontSize: "0.72rem", color: "#AEAEB2", marginTop: 2 }}>
+                {referral?.ratePercent ?? 20}% токенов с каждой оплаты друга
+              </div>
+            </div>
+          </div>
+
+          {referralLoading && !referral ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#AEAEB2", fontSize: "0.85rem" }}>
+              <Loader2 size={14} className="animate-spin" /> Загрузка…
+            </div>
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 8, alignItems: "stretch", marginBottom: "0.85rem" }}>
+                <div
+                  style={{
+                    flex: 1, padding: "0.7rem 0.9rem", borderRadius: 12, border: "1px solid rgba(0,0,0,0.1)",
+                    fontSize: "0.78rem", fontWeight: 600, background: "rgba(0,0,0,0.02)", color: "#1D1D1F",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: appleFont,
+                  }}
+                  title={referral?.link}
+                  data-testid="text-referral-link"
+                >
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <Link2 size={13} color="#86868B" />
+                    {referral?.link || "—"}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  data-testid="button-copy-referral"
+                  onClick={async () => {
+                    if (!referral?.link) return;
+                    try {
+                      await navigator.clipboard.writeText(referral.link);
+                      setCopiedRef(true);
+                      toast({ title: "Ссылка скопирована" });
+                      window.setTimeout(() => setCopiedRef(false), 2000);
+                    } catch {
+                      toast({ title: "Не удалось скопировать", variant: "destructive" });
+                    }
+                  }}
+                  style={{
+                    padding: "0 1rem", borderRadius: 12, border: "none",
+                    background: "#34C759", color: "#fff",
+                    fontWeight: 700, fontSize: "0.85rem", cursor: "pointer",
+                    display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap",
+                  }}
+                >
+                  {copiedRef ? <Check size={15} /> : <Copy size={15} />}
+                  {copiedRef ? "Готово" : "Копировать"}
+                </button>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: referral?.recent?.length ? "0.85rem" : 0 }}>
+                {[
+                  { label: "Друзей", value: referral?.referredCount ?? 0 },
+                  { label: "С оплатой", value: referral?.paidReferredCount ?? 0 },
+                  { label: "Токенов", value: referral?.totalTokensEarned ?? 0 },
+                ].map((s) => (
+                  <div key={s.label} style={{ background: "rgba(0,0,0,0.025)", borderRadius: 12, padding: "0.65rem 0.5rem", textAlign: "center" }}>
+                    <div style={{ fontSize: "1.05rem", fontWeight: 700, color: "#1D1D1F" }}>{s.value}</div>
+                    <div style={{ fontSize: "0.65rem", fontWeight: 600, color: "#AEAEB2", textTransform: "uppercase", letterSpacing: "0.06em" }}>{s.label}</div>
+                  </div>
+                ))}
+              </div>
+
+              {!!referral?.recent?.length && (
+                <div style={{ borderTop: "1px solid rgba(0,0,0,0.06)", paddingTop: "0.75rem" }}>
+                  <div style={{ fontSize: "0.68rem", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "#AEAEB2", marginBottom: 8 }}>
+                    Последние начисления
+                  </div>
+                  {referral.recent.slice(0, 5).map((r) => (
+                    <div key={r.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "0.35rem 0", fontSize: "0.8rem" }}>
+                      <span style={{ color: "#1D1D1F", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {r.referredDisplayName}
+                      </span>
+                      <span style={{ color: "#34C759", fontWeight: 700, flexShrink: 0 }}>+{r.tokensAwarded}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
         </div>
 
         {/* Promo code redeem */}

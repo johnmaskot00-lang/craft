@@ -1,4 +1,5 @@
-import { Switch, Route, Redirect } from "wouter";
+import { Switch, Route, Redirect, useLocation } from "wouter";
+import { useEffect } from "react";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -17,6 +18,30 @@ import LegalPage from "@/pages/legal";
 import AdminPage from "@/pages/admin";
 import CookieConsent from "@/components/cookie-consent";
 import { Loader2 } from "lucide-react";
+import { captureReferralFromUrl, storeReferralCode } from "@/lib/referral";
+
+function ReferralCapture() {
+  useEffect(() => {
+    captureReferralFromUrl();
+  }, []);
+  return null;
+}
+
+function ReferralLanding({ params }: { params: { code?: string } }) {
+  const [, setLocation] = useLocation();
+  useEffect(() => {
+    const code = storeReferralCode(params.code);
+    if (code) {
+      void fetch(`/api/referral/capture?ref=${encodeURIComponent(code)}`, { credentials: "include" }).catch(() => {});
+    }
+    setLocation(code ? `/auth?ref=${encodeURIComponent(code)}` : "/auth");
+  }, [params.code, setLocation]);
+  return (
+    <div className="min-h-screen flex items-center justify-center">
+      <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+    </div>
+  );
+}
 
 function ProtectedRoute({ component: Component }: { component: React.ComponentType }) {
   const { user, isLoading } = useAuth();
@@ -57,6 +82,7 @@ function AuthRoute() {
 function Router() {
   return (
     <Switch>
+      <Route path="/r/:code" component={ReferralLanding} />
       <Route path="/" component={LandingPage} />
       <Route path="/auth" component={AuthRoute} />
       <Route path="/dashboard">{() => <ProtectedRoute component={DashboardPage} />}</Route>
@@ -79,6 +105,7 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <AuthProvider>
+          <ReferralCapture />
           <Toaster />
           <CookieConsent />
           <Router />
