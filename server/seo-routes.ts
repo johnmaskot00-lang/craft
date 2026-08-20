@@ -144,6 +144,40 @@ async function generateCoverWithRetry(prompt: string): Promise<string> {
   return "";
 }
 
+
+async function resolveInlineArticleImages(html: string, maxInline = 2): Promise<string> {
+  if (!html) return html;
+  const re = /\{\{IMG:([\s\S]*?)\}\}/gi;
+  const markers: Array<{ full: string; prompt: string }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const prompt = String(m[1] || "").replace(/\s+/g, " ").trim().slice(0, 420);
+    if (prompt) markers.push({ full: m[0], prompt });
+  }
+  if (markers.length === 0) return html;
+  const limited = markers.slice(0, Math.max(0, maxInline));
+  let out = html;
+  for (const marker of limited) {
+    let url = "";
+    try {
+      url = await generateCoverWithRetry(
+        `${marker.prompt}. Photorealistic editorial photo, natural lighting, no text, no watermark, no logos.`,
+      );
+    } catch {
+      url = "";
+    }
+    const safe = cssUrl(url);
+    const alt = esc(marker.prompt.replace(/\s+/g, " ").slice(0, 140));
+    const fig = safe
+      ? `<figure class="article-photo"><img src="${safe}" alt="${alt}" loading="lazy" decoding="async" width="1200" height="800"></figure>`
+      : "";
+    out = out.replace(marker.full, fig);
+  }
+  // Drop any leftover markers beyond the cap
+  out = out.replace(/\{\{IMG:[\s\S]*?\}\}/gi, "");
+  return out;
+}
+
 async function generateLogoWithRetry(prompt: string): Promise<string> {
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
@@ -274,6 +308,148 @@ const DENSITIES: NonNullable<SeoTheme["density"]>[] = ["compact", "comfy", "airy
 const LAYOUT_FAMILIES: SeoLayoutFamily[] = ["editorial", "magazine", "knowledge", "visual", "portal", "digest"];
 const RADII = ["2px", "6px", "10px", "14px", "20px", "28px"];
 
+
+function defaultReferralCopy(kw: SeoKeyword, niche: string, slot: "top" | "bottom"): { title: string; desc: string } {
+  const topic = (kw.title || kw.keyword || niche || "этой теме").trim();
+  const nicheLabel = (niche || "вашей нише").trim();
+  if (slot === "top") {
+    return {
+      title: `Практичный следующий шаг по теме «${topic}»`,
+      desc: `Редакция отобрала проверенный вариант для ${nicheLabel}: продолжите прямо отсюда — без лишних поисков и случайных ссылок.`,
+    };
+  }
+  return {
+    title: "Если материал попал в цель — откройте рекомендацию",
+    desc: `Закрепите результат: перейдите по партнёрской ссылке издания и продолжите уже на площадке, которая подходит под «${topic}».`,
+  };
+}
+
+function buildReferralOfferHtml(opts: {
+  url: string;
+  label: string;
+  title: string;
+  desc: string;
+  slot: "top" | "bottom";
+  niche?: string;
+}): string {
+  const url = safeHref(opts.url);
+  if (!url) return "";
+  const label = esc(opts.label || "Перейти →");
+  const title = esc(opts.title.slice(0, 120));
+  const desc = esc(opts.desc.slice(0, 240));
+  const niche = esc((opts.niche || "").slice(0, 80));
+  return `<aside class="ref-offer ref-offer-${opts.slot}" data-ref-offer="${opts.slot}">
+  <div class="ref-offer-glow" aria-hidden="true"></div>
+  <div class="ref-offer-inner">
+    <div class="ref-offer-copy">
+      <span class="ref-offer-eyebrow">Редакция рекомендует${niche ? ` · ${niche}` : ""}</span>
+      <strong class="ref-offer-title">${title}</strong>
+      <p class="ref-offer-desc">${desc}</p>
+      <span class="ref-offer-note">Партнёрская рекомендация издания — ссылка ведёт на проверенный ресурс</span>
+    </div>
+    <a href="${url}" class="ref-offer-btn" target="_blank" rel="noopener sponsored nofollow">
+      <span class="ref-offer-btn-label">${label}</span>
+      <span class="ref-offer-btn-shine" aria-hidden="true"></span>
+    </a>
+  </div>
+</aside>`;
+}
+
+function parseRefCopyMarker(html: string, slot: "top" | "bottom"): { title: string; desc: string } | null {
+  const tag = slot === "top" ? "REF_TOP" : "REF_BOTTOM";
+  const re = new RegExp("\\{\\{" + tag + ":([\\s\\S]*?)\\}\\}", "i");
+  const m = html.match(re);
+  if (!m) return null;
+  const raw = String(m[1] || "").trim();
+  const parts = raw.split("|||").map((s) => s.replace(/\s+/g, " ").trim()).filter(Boolean);
+  if (parts.length === 0) return null;
+  return { title: parts[0].slice(0, 120), desc: (parts[1] || parts[0]).slice(0, 240) };
+}
+
+/** Guarantee two native referral sections near start + end of every article. */
+function ensureArticleReferralOffers(
+  html: string,
+  kw: SeoKeyword,
+  cluster: SeoCluster,
+  cfg: SeoConfig,
+): string {
+  const offer = resolveSeoOffer(kw, cluster, cfg);
+  const url = safeHref(offer.targetUrl);
+  if (!html || !url) return html;
+
+  const topCopy = parseRefCopyMarker(html, "top") || defaultReferralCopy(kw, offer.niche || cfg.niche || cluster.name, "top");
+  const bottomCopy = parseRefCopyMarker(html, "bottom") || defaultReferralCopy(kw, offer.niche || cfg.niche || cluster.name, "bottom");
+
+  let out = html
+    .replace(/\{\{REF_TOP:[\s\S]*?\}\}/gi, "")
+    .replace(/\{\{REF_BOTTOM:[\s\S]*?\}\}/gi, "")
+    .replace(/<aside class="ref-offer[\s\S]*?<\/aside>/gi, "")
+    .replace(/<div class="cta-block"[\s\S]*?<\/div>/gi, "");
+
+  const topHtml = buildReferralOfferHtml({
+    url: offer.targetUrl,
+    label: offer.ctaLabel,
+    title: topCopy.title,
+    desc: topCopy.desc,
+    slot: "top",
+    niche: offer.niche || cfg.niche || cluster.name,
+  });
+  const bottomHtml = buildReferralOfferHtml({
+    url: offer.targetUrl,
+    label: offer.ctaLabel,
+    title: bottomCopy.title,
+    desc: bottomCopy.desc,
+    slot: "bottom",
+    niche: offer.niche || cfg.niche || cluster.name,
+  });
+
+  const leadRe = /(<p class="lead"[\s\S]*?<\/p>)/i;
+  if (leadRe.test(out)) {
+    out = out.replace(leadRe, `$1\n${topHtml}`);
+  } else if (/<div class="key-takeaways"[\s\S]*?<\/div>/i.test(out)) {
+    out = out.replace(/(<div class="key-takeaways"[\s\S]*?<\/div>)/i, `$1\n${topHtml}`);
+  } else if (/<div class="article-body"[^>]*>/i.test(out)) {
+    out = out.replace(/(<div class="article-body"[^>]*>)/i, `$1\n${topHtml}`);
+  } else {
+    out = `${topHtml}\n${out}`;
+  }
+
+  if (/<div class="author-box"/i.test(out)) {
+    out = out.replace(/<div class="author-box"/i, `${bottomHtml}\n<div class="author-box"`);
+  } else if (/<div class="faq-section"/i.test(out)) {
+    out = out.replace(/<div class="faq-section"/i, `${bottomHtml}\n<div class="faq-section"`);
+  } else {
+    out = `${out}\n${bottomHtml}`;
+  }
+
+  out = out.replace(
+    /(<aside class="ref-offer[\s\S]*?<a href=")[^"]+(" class="ref-offer-btn")/gi,
+    `$1${url}$2`,
+  );
+  return out;
+}
+
+async function refreshArticleReferralOffers(storage: IStorage, projectId: number, cfg: SeoConfig): Promise<void> {
+  const hasOffer = !!(
+    safeHref(cfg.targetUrl)
+    || cfg.clusters.some((c) => safeHref(c.targetUrl) || c.keywords.some((k) => safeHref(k.targetUrl)))
+  );
+  if (!hasOffer) return;
+  const files = await storage.getProjectFiles(projectId);
+  for (const f of files) {
+    const m = /^([^/]+)\/([^/]+)\/index\.html$/.exec(f.filename);
+    if (!m || !f.code) continue;
+    const cluster = cfg.clusters.find((c) => c.slug === m[1]);
+    const kw = cluster?.keywords.find((k) => k.slug === m[2]);
+    if (!cluster || !kw || kw.status !== "done") continue;
+    const next = ensureArticleReferralOffers(f.code, kw, cluster, cfg);
+    if (next !== f.code) {
+      await storage.upsertProjectFile({ projectId, filename: f.filename, code: next });
+    }
+  }
+}
+
+
 function hashStr(s: string): number {
   let h = 0;
   for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; }
@@ -329,12 +505,12 @@ function composeUniqueTheme(name: string, niche: string, visual?: Record<string,
     articleVariant: NonNullable<SeoTheme["articleVariant"]>;
     sectionOrder: NonNullable<SeoTheme["sectionOrder"]>;
   }> = {
-    editorial: { headingFont: "Literata", bodyFont: "Manrope", layout: "editorial", navStyle: "line", navVariant: "masthead", cardStyle: "boxed", homeVariant: "single-feature", categoryVariant: "index", articleVariant: "focus", sectionOrder: ["hero", "latest", "topics", "trending", "cta"] },
-    magazine: { headingFont: "Golos Text", bodyFont: "Manrope", layout: "magazine", navStyle: "dark", navVariant: "bar", cardStyle: "boxed", homeVariant: "lead-grid", categoryVariant: "grid", articleVariant: "sidebar-right", sectionOrder: ["hero", "latest", "trending", "topics", "cta"] },
-    knowledge: { headingFont: "Merriweather", bodyFont: "Inter", layout: "stacked", navStyle: "line", navVariant: "index", cardStyle: "row", homeVariant: "topic-first", categoryVariant: "index", articleVariant: "sidebar-left", sectionOrder: ["topics", "hero", "latest", "trending", "cta"] },
-    visual: { headingFont: "Unbounded", bodyFont: "Manrope", layout: "mosaic", navStyle: "dark", navVariant: "bar", cardStyle: "boxed", homeVariant: "lead-grid", categoryVariant: "featured", articleVariant: "wide", sectionOrder: ["hero", "latest", "topics", "trending", "cta"] },
-    portal: { headingFont: "Roboto Slab", bodyFont: "Inter", layout: "newspaper", navStyle: "dark", navVariant: "newswire", cardStyle: "row", homeVariant: "newsroom", categoryVariant: "feed", articleVariant: "sidebar-right", sectionOrder: ["trending", "hero", "latest", "topics", "cta"] },
-    digest: { headingFont: "Golos Text", bodyFont: "Golos Text", layout: "stacked", navStyle: "line", navVariant: "numbered", cardStyle: "row", homeVariant: "compact-feed", categoryVariant: "feed", articleVariant: "focus", sectionOrder: ["hero", "latest", "topics", "trending", "cta"] },
+    editorial: { headingFont: "Literata", bodyFont: "Manrope", layout: "editorial", navStyle: "line", navVariant: "bar", cardStyle: "boxed", homeVariant: "single-feature", categoryVariant: "index", articleVariant: "focus", sectionOrder: ["hero", "latest", "topics", "cta"] },
+    magazine: { headingFont: "Golos Text", bodyFont: "Manrope", layout: "magazine", navStyle: "dark", navVariant: "bar", cardStyle: "boxed", homeVariant: "single-feature", categoryVariant: "grid", articleVariant: "sidebar-right", sectionOrder: ["hero", "latest", "topics", "cta"] },
+    knowledge: { headingFont: "Merriweather", bodyFont: "Inter", layout: "stacked", navStyle: "line", navVariant: "bar", cardStyle: "row", homeVariant: "single-feature", categoryVariant: "index", articleVariant: "sidebar-left", sectionOrder: ["hero", "latest", "topics", "cta"] },
+    visual: { headingFont: "Unbounded", bodyFont: "Manrope", layout: "mosaic", navStyle: "dark", navVariant: "bar", cardStyle: "boxed", homeVariant: "single-feature", categoryVariant: "featured", articleVariant: "wide", sectionOrder: ["hero", "latest", "topics", "cta"] },
+    portal: { headingFont: "Roboto Slab", bodyFont: "Inter", layout: "newspaper", navStyle: "dark", navVariant: "bar", cardStyle: "row", homeVariant: "single-feature", categoryVariant: "feed", articleVariant: "sidebar-right", sectionOrder: ["hero", "latest", "topics", "cta"] },
+    digest: { headingFont: "Golos Text", bodyFont: "Golos Text", layout: "stacked", navStyle: "line", navVariant: "bar", cardStyle: "row", homeVariant: "single-feature", categoryVariant: "feed", articleVariant: "focus", sectionOrder: ["hero", "latest", "topics", "cta"] },
   };
   const p = presets[layoutFamily];
   const accent = hslToHex(hue, 62, 36);
@@ -397,13 +573,30 @@ function bodyClass(cfg: SeoConfig): string {
   ].filter(Boolean).join(" ");
 }
 
-async function upgradeSeoArchitectureV4(
+async function upgradeSeoArchitectureV5(
   storage: IStorage,
   projectId: number,
   cfg: SeoConfig,
 ): Promise<{ config: SeoConfig; upgraded: boolean }> {
-  if (cfg.structuralVersion !== 2 || cfg.architectureVersion === 4) {
+  if (cfg.structuralVersion !== 2) {
     return { config: cfg, upgraded: false };
+  }
+  if ((cfg.architectureVersion ?? 0) >= 5) {
+    // Architecture already v5 — still refresh shell if homepage predates hero-split.
+    const home = await storage.getProjectFile(projectId, "index.html");
+    if (home?.code?.includes("home-hero-split") && home.code.includes("articles-grid-4")) {
+      return { config: cfg, upgraded: false };
+    }
+    await repairSeoSiteLayout(storage, projectId, cfg);
+    const css = await storage.getProjectFile(projectId, "assets/style.css");
+    if (!css?.code?.includes("home-hero-split") || !css.code.includes("structural-guard-v7")) {
+      await storage.upsertProjectFile({
+        projectId,
+        filename: "assets/style.css",
+        code: ensureStructuralGuardCss(buildSiteCss(themeOf(cfg))),
+      });
+    }
+    return { config: cfg, upgraded: true };
   }
   const generated = selectTheme(cfg.projectName || cfg.siteTitle || "", cfg.niche || "");
   const cleanCfg = { ...cfg } as SeoConfig & Record<string, unknown>;
@@ -413,8 +606,13 @@ async function upgradeSeoArchitectureV4(
   delete cleanCfg.adUnitCode;
   const config: SeoConfig = {
     ...cleanCfg,
-    architectureVersion: 4,
-    theme: generated,
+    architectureVersion: 5,
+    theme: {
+      ...generated,
+      homeVariant: "single-feature",
+      sectionOrder: ["hero", "latest", "topics", "cta"],
+      navVariant: "bar",
+    },
   };
   await storage.updateProject(projectId, { seoConfig: config } as any);
   return { config, upgraded: true };
@@ -740,6 +938,7 @@ function prepareSeoPreviewHtml(html: string, css: string): string {
 async function repairSeoSiteLayout(storage: IStorage, projectId: number, cfg: SeoConfig): Promise<void> {
   await repairArticleCovers(storage, projectId, cfg);
   await refreshArticleSeoMetadata(storage, projectId, cfg);
+  await refreshArticleReferralOffers(storage, projectId, cfg);
   await refreshArticleSidebars(storage, projectId, cfg);
   for (const cluster of cfg.clusters) {
     const catHtml = buildCategoryPage(cluster, cfg);
@@ -872,7 +1071,7 @@ function buildSiteCss(t: SeoTheme): string {
 body{font-family:var(--body-font),-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.7;overflow-x:hidden;max-width:100%;min-width:0}
 img,svg,video,iframe,table{max-width:100%}
 .container,.nav-inner,.footer-inner,.article-page,.hero-wrap,.hot-strip,.articles-grid{min-width:0}
-.nav-logo .logo-text,.hero-title,.section-title,.ac-title,.cat-card h2,.cat-header h1,.article-header h1,.article-body h2,.article-body h3,.footer-logo .logo-text,.faq-section>h2,.related-articles>h2,.cta-hero-text h2,.cta-block .cta-text strong,.key-takeaways h3,.pull-quote,.stat-card .stat-num{font-family:var(--heading-font),-apple-system,BlinkMacSystemFont,system-ui,sans-serif}
+.nav-logo .logo-text,.hero-title,.section-title,.ac-title,.cat-card h2,.cat-header h1,.article-header h1,.article-body h2,.article-body h3,.footer-logo .logo-text,.faq-section>h2,.related-articles>h2,.cta-hero-text h2,.ref-offer-title,.key-takeaways h3,.pull-quote,.stat-card .stat-num{font-family:var(--heading-font),-apple-system,BlinkMacSystemFont,system-ui,sans-serif}
 a{color:inherit;text-decoration:none}img{max-width:100%;height:auto;display:block}
 nav{background:var(--nav);height:var(--nh);position:sticky;top:0;z-index:100;box-shadow:0 2px 20px rgba(0,0,0,.4)}
 .nav-inner{max-width:var(--w);margin:0 auto;padding:0 1.5rem;display:flex;align-items:center;gap:1rem;height:100%;min-width:0}
@@ -1053,17 +1252,87 @@ footer{background:var(--nav);color:rgba(255,255,255,.65);padding:2.5rem 1.5rem;m
 @media(max-width:1024px){.article-layout{grid-template-columns:1fr}.sidebar{position:static}.articles-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:768px){.hero-grid{grid-template-columns:1fr}.hero-side{display:none}.footer-inner{grid-template-columns:1fr 1fr}.articles-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:640px){.articles-grid{grid-template-columns:1fr}.footer-inner{grid-template-columns:1fr}.nav-links{display:none}.pros-cons{grid-template-columns:1fr}.step-box{flex-direction:column;gap:.6rem}.comparison-table{font-size:.75rem}.article-page{padding:0 1rem 3.5rem}.article-header h1{font-size:clamp(2rem,11vw,3.15rem)}.article-body{font-size:1.0625rem;line-height:1.72}.article-body h2{margin-top:2.6rem}.article-body .lead::first-letter{font-size:2.8rem}}
-/* ── CTA BLOCK ── */
-.cta-block{background:linear-gradient(135deg,var(--brand) 0%,var(--brand-light) 100%);border-radius:12px;padding:1.4rem 1.75rem;margin:2rem 0;display:flex;align-items:center;gap:1.25rem;flex-wrap:wrap;box-shadow:0 4px 24px rgba(0,0,0,.18)}
-.cta-block .cta-icon{font-size:2rem;flex-shrink:0}
-.cta-block .cta-text{flex:1;min-width:180px}
-.cta-block .cta-text strong{display:block;color:#fff;font-size:1rem;font-weight:800;margin-bottom:.2rem}
-.cta-block .cta-text span{color:rgba(255,255,255,.78);font-size:.84rem;line-height:1.45}
-.cta-btn{display:inline-flex;align-items:center;gap:.4rem;background:#fff;color:var(--brand);font-weight:800;font-size:.875rem;padding:.6rem 1.25rem;border-radius:8px;white-space:nowrap;transition:.18s;text-decoration:none;flex-shrink:0}
-.cta-btn:hover{background:color-mix(in srgb,var(--brand) 12%,#fff);transform:translateY(-1px);box-shadow:0 4px 20px rgba(0,0,0,.25)}
+/* ── REFERRAL OFFER (native CTA) ── */
+.ref-offer{position:relative;margin:2.25rem 0;border-radius:calc(var(--r) + 6px);overflow:hidden;border:1px solid color-mix(in srgb,var(--brand) 28%,var(--border));background:linear-gradient(165deg,color-mix(in srgb,var(--brand) 7%,var(--bg)) 0%,var(--bg) 42%,color-mix(in srgb,var(--brand-light) 8%,var(--bg2)) 100%);box-shadow:0 18px 50px color-mix(in srgb,var(--brand) 12%,transparent),0 1px 0 rgba(255,255,255,.65) inset}
+.ref-offer-glow{position:absolute;inset:-30% auto auto -20%;width:70%;height:80%;background:radial-gradient(circle,color-mix(in srgb,var(--brand) 28%,transparent),transparent 68%);pointer-events:none;filter:blur(8px)}
+.ref-offer-inner{position:relative;z-index:1;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:1.35rem;align-items:center;padding:clamp(1.25rem,2.5vw,1.85rem) clamp(1.2rem,2.4vw,1.9rem)}
+.ref-offer-copy{min-width:0;display:grid;gap:.55rem}
+.ref-offer-eyebrow{display:inline-flex;align-self:flex-start;font-size:.68rem;font-weight:800;letter-spacing:.11em;text-transform:uppercase;color:var(--brand);background:color-mix(in srgb,var(--brand) 12%,#fff);border:1px solid color-mix(in srgb,var(--brand) 22%,var(--border));padding:.28rem .65rem;border-radius:999px}
+.ref-offer-title{font-family:var(--heading-font),system-ui,sans-serif;font-size:clamp(1.15rem,1rem + .7vw,1.45rem);font-weight:800;letter-spacing:-.025em;line-height:1.22;color:var(--text);text-wrap:balance}
+.ref-offer-desc{margin:0;font-size:.95rem;line-height:1.55;color:var(--text2);max-width:52ch}
+.ref-offer-note{font-size:.72rem;color:var(--muted);line-height:1.4}
+.ref-offer-btn{position:relative;isolation:isolate;display:inline-flex;align-items:center;justify-content:center;min-height:52px;padding:.95rem 1.55rem;border-radius:999px;text-decoration:none;font-weight:800;font-size:.92rem;letter-spacing:-.01em;color:#fff!important;background:linear-gradient(135deg,var(--brand) 0%,var(--brand-light) 55%,var(--brand) 100%);background-size:200% 200%;box-shadow:0 12px 28px color-mix(in srgb,var(--brand) 35%,transparent),0 1px 0 rgba(255,255,255,.35) inset;overflow:hidden;white-space:nowrap;transition:transform .2s ease,box-shadow .2s ease;animation:refBtnPulse 4.5s ease-in-out infinite}
+.ref-offer-btn-label{position:relative;z-index:2}
+.ref-offer-btn-shine{position:absolute;inset:0;z-index:1;background:linear-gradient(110deg,transparent 20%,rgba(255,255,255,.55) 48%,transparent 72%);transform:translateX(-130%);animation:refBtnShine 2.6s ease-in-out infinite}
+.ref-offer-btn:hover{transform:translateY(-2px) scale(1.02);box-shadow:0 16px 34px color-mix(in srgb,var(--brand) 42%,transparent)}
+.ref-offer-btn:active{transform:translateY(0) scale(.99)}
+@keyframes refBtnShine{0%,35%{transform:translateX(-130%)}70%,100%{transform:translateX(130%)}}
+@keyframes refBtnPulse{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
+.cta-block{display:none!important}
 .cta-hero{background:linear-gradient(135deg,var(--brand),var(--brand-light));padding:1.75rem;border-radius:12px;margin:1.5rem 0;display:flex;align-items:center;justify-content:space-between;gap:1.5rem;flex-wrap:wrap}
 .cta-hero-text h2{color:#fff;font-size:1.2rem;font-weight:800;margin-bottom:.3rem}
 .cta-hero-text p{color:rgba(255,255,255,.78);font-size:.875rem}
+.cta-btn{display:inline-flex;align-items:center;gap:.4rem;background:#fff;color:var(--brand);font-weight:800;font-size:.875rem;padding:.6rem 1.25rem;border-radius:8px;white-space:nowrap;transition:.18s;text-decoration:none;flex-shrink:0}
+.cta-btn:hover{background:color-mix(in srgb,var(--brand) 12%,#fff);transform:translateY(-1px);box-shadow:0 4px 20px rgba(0,0,0,.25)}
+@media(max-width:720px){.ref-offer-inner{grid-template-columns:1fr}.ref-offer-btn{width:100%}}
+
+
+/* ── NAV DROPDOWN + MOBILE ── */
+.mobile-menu{display:none}
+.nav-dropdown{position:relative}
+.nav-dropdown>summary{list-style:none;cursor:pointer;font-size:.8rem;color:rgba(255,255,255,.65);font-weight:500;padding:.35rem .65rem;border-radius:6px;white-space:nowrap}
+.nav-dropdown>summary::-webkit-details-marker{display:none}
+.nav-dropdown>summary:hover{color:#fff;background:rgba(255,255,255,.1)}
+.nav-dropdown-panel{position:absolute;right:0;top:calc(100% + .35rem);min-width:220px;background:#fff;color:var(--text);border:1px solid var(--border);border-radius:12px;box-shadow:0 18px 40px rgba(0,0,0,.16);padding:.4rem;z-index:140;display:grid;gap:.1rem}
+.nav-dropdown-panel a{color:var(--text)!important;padding:.65rem .75rem!important;border-radius:8px;font-size:.84rem!important;font-weight:600!important}
+.nav-dropdown-panel a:hover{background:var(--bg2)!important;color:var(--brand)!important}
+body.nav-light .nav-dropdown>summary,body.nav-line .nav-dropdown>summary{color:var(--text2)}
+body.nav-light .nav-dropdown>summary:hover,body.nav-line .nav-dropdown>summary:hover{color:var(--text);background:var(--bg3)}
+/* ── HOME HERO SPLIT + SLIDER ── */
+.home-hero-split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:clamp(1.25rem,3vw,2.5rem);align-items:stretch;padding:clamp(1.25rem,3vw,2.25rem) 0 0;min-width:0}
+.hero-copy{display:flex;flex-direction:column;justify-content:center;gap:.85rem;min-width:0;padding:clamp(.5rem,2vw,1rem) 0}
+.hero-kicker{display:inline-flex;align-self:flex-start;font-size:.72rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--brand);background:color-mix(in srgb,var(--brand) 10%,transparent);border:1px solid color-mix(in srgb,var(--brand) 22%,transparent);padding:.28rem .7rem;border-radius:999px}
+.hero-site-title{font-family:var(--heading-font),system-ui,sans-serif;font-size:clamp(2rem,4.6vw,3.4rem);font-weight:900;letter-spacing:-.045em;line-height:1.05;color:var(--text);text-wrap:balance}
+.hero-site-desc{font-size:clamp(1rem,1.5vw,1.15rem);line-height:1.65;color:var(--text2);max-width:36ch}
+.hero-slider-wrap{min-width:0}
+.hero-slider{position:relative;border-radius:calc(var(--r) + 4px);overflow:hidden;border:1px solid var(--border);background:var(--bg2);box-shadow:var(--shadow-lg);min-height:clamp(280px,42vw,420px)}
+.hero-slider-viewport{position:relative;width:100%;height:100%;min-height:inherit}
+.hero-slide{position:absolute;inset:0;display:block;opacity:0;pointer-events:none;transition:opacity .45s ease}
+.hero-slide.is-active{opacity:1;pointer-events:auto;z-index:1}
+.hero-slide .hero-grad{position:absolute;inset:0}
+.hero-slide .hero-overlay{position:absolute;inset:0;background:linear-gradient(to top,rgba(0,0,0,.82) 0%,rgba(0,0,0,.28) 48%,rgba(0,0,0,.12) 100%);z-index:1}
+.hero-slide-content{position:absolute;left:0;right:0;bottom:0;z-index:2;padding:clamp(1rem,2.5vw,1.6rem);display:grid;gap:.55rem}
+.hero-slide-title{font-family:var(--heading-font),system-ui,sans-serif;font-size:clamp(1.15rem,2.2vw,1.65rem);font-weight:800;line-height:1.25;letter-spacing:-.02em;color:#fff}
+.on-media,.cat-chip.on-media{color:#fff!important;text-shadow:0 1px 2px rgba(0,0,0,.45)}
+.cat-chip.on-media{background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.28);backdrop-filter:blur(6px)}
+.hero-slider-controls{position:absolute;left:0;right:0;bottom:0;z-index:3;display:flex;align-items:center;justify-content:space-between;gap:.75rem;padding:.55rem .75rem;background:linear-gradient(to top,rgba(0,0,0,.55),transparent);pointer-events:none}
+.hero-slider-btn,.hero-dot{pointer-events:auto}
+.hero-slider-btn{width:34px;height:34px;border:0;border-radius:999px;background:rgba(255,255,255,.18);color:#fff;font-size:1.25rem;line-height:1;cursor:pointer;backdrop-filter:blur(8px)}
+.hero-slider-btn:hover{background:rgba(255,255,255,.3)}
+.hero-dots{display:flex;gap:.35rem;align-items:center}
+.hero-dot{width:8px;height:8px;border-radius:999px;border:0;background:rgba(255,255,255,.35);cursor:pointer;padding:0}
+.hero-dot.is-active{background:#fff;width:18px}
+.articles-grid-4{grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:1.1rem!important}
+.articles-grid-4 .ac-img-wrap{height:170px}
+.article-photo{margin:1.75rem 0;border-radius:calc(var(--r) + 2px);overflow:hidden;border:1px solid var(--border);background:var(--bg2);box-shadow:var(--shadow)}
+.article-photo img{width:100%;height:auto;aspect-ratio:3/2;object-fit:cover;display:block}
+.article-flourish,.article-svg{display:none!important}
+.article-body .callout,.article-body .stat-grid,.article-body .pull-quote{color:var(--text)}
+.article-body .callout{background:color-mix(in srgb,var(--brand) 8%,var(--bg));border:1px solid color-mix(in srgb,var(--brand) 22%,var(--border));color:var(--text)}
+.article-body .callout-title{color:var(--brand)}
+.article-body .stat-card{background:var(--bg2);border:1px solid var(--border);color:var(--text)}
+.article-body .stat-num{color:var(--brand)}
+.article-body .stat-label{color:var(--text2)}
+.cta-hero-text h2,.cta-hero-text p,.cat-header .container,.cat-header h1,.cat-header p{color:inherit}
+.cta-hero-text h2{color:#fff!important}
+.cta-hero-text p{color:rgba(255,255,255,.82)!important}
+.ref-offer-title{color:var(--text)!important}.ref-offer-desc{color:var(--text2)!important}.ref-offer-note{color:var(--muted)!important}.ref-offer-btn,.ref-offer-btn-label{color:#fff!important}
+.cat-header,.cat-header .container{color:#fff!important}
+body.is-dark .hero-site-title,body.is-dark .ac-title,body.is-dark .section-title{color:var(--text)}
+body.is-dark .hero-site-desc,body.is-dark .ac-meta,body.is-dark .cat-card p{color:var(--text2)}
+@media(max-width:1024px){.home-hero-split{grid-template-columns:1fr}.articles-grid-4{grid-template-columns:repeat(2,minmax(0,1fr))!important}.hero-slider{min-height:320px}}
+@media(max-width:640px){.articles-grid-4{grid-template-columns:1fr!important}.nav-links{display:none}.mobile-menu{display:block;margin-left:auto}.hero-site-title{font-size:clamp(1.75rem,9vw,2.35rem)}}
+
 /* ── UNIQUE LAYOUT SKINS ── */
 body.nav-light nav{background:var(--bg);box-shadow:none;border-bottom:1px solid var(--border)}
 body.nav-light .nav-logo .logo-text,body.nav-light .nav-links a{color:var(--text)}
@@ -1106,7 +1375,7 @@ body.is-dark .sb-block,body.is-dark .faq-item,body.is-dark .toc,body.is-dark .au
 
 function buildStructuralGuardCss(): string {
   return `
-/* structural-guard-v5 — deterministic editorial architecture and readability */
+/* structural-guard-v7 — unified home + referral offers + readable editorial architecture */
 body.structure-legacy .cat-header{display:block!important;width:100%!important;max-width:none!important;padding:2.25rem 0!important;margin:0 0 1.75rem!important;background:linear-gradient(135deg,var(--brand),var(--brand-light))!important;border:none!important}
 body.structure-legacy .hero-grid{display:grid!important;grid-template-columns:2fr 1fr!important;gap:3px!important;width:100%!important}
 body.structure-legacy .hero-main{position:relative!important;height:400px!important;display:block!important;overflow:hidden!important;width:100%!important}
@@ -1288,6 +1557,22 @@ body.structure-v2 .article-body a{text-decoration:underline;text-decoration-colo
 body.structure-v2 .article-body a:hover{color:var(--brand);text-decoration-color:currentColor}
 body.structure-v2 .article-body :focus-visible,body.structure-v2 a:focus-visible{outline:3px solid color-mix(in srgb,var(--brand) 42%,transparent);outline-offset:3px}
 body.structure-v2.family-portal .section-latest .articles-grid{grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:1rem!important}
+body.home-unified .home-hero-split{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr)!important;gap:clamp(1.25rem,3vw,2.5rem)!important}
+body.home-unified .section-latest .articles-grid,body.home-unified .articles-grid-4{grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:1.1rem!important}
+body.home-unified .section-latest .article-card{grid-column:auto!important}
+body.home-unified .hero-slide-title,body.home-unified .on-media{color:#fff!important}
+body.structure-v2 .ref-offer{display:block!important;position:relative!important;margin:2.25rem 0!important;border-radius:calc(var(--r) + 6px)!important;overflow:hidden!important;border:1px solid color-mix(in srgb,var(--brand) 28%,var(--border))!important;background:linear-gradient(165deg,color-mix(in srgb,var(--brand) 7%,var(--bg)) 0%,var(--bg) 42%,color-mix(in srgb,var(--brand-light) 8%,var(--bg2)) 100%)!important}
+body.structure-v2 .ref-offer-inner{display:grid!important;grid-template-columns:minmax(0,1fr) auto!important;gap:1.35rem!important;align-items:center!important;padding:1.4rem 1.6rem!important}
+body.structure-v2 .ref-offer-title{color:var(--text)!important;font-size:clamp(1.15rem,1rem + .7vw,1.45rem)!important;line-height:1.22!important}
+body.structure-v2 .ref-offer-desc{color:var(--text2)!important;margin:0!important}
+body.structure-v2 .ref-offer-btn{position:relative!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;min-height:52px!important;padding:.95rem 1.55rem!important;border-radius:999px!important;color:#fff!important;background:linear-gradient(135deg,var(--brand),var(--brand-light),var(--brand))!important;background-size:200% 200%!important;overflow:hidden!important;text-decoration:none!important;font-weight:850!important}
+body.structure-v2 .ref-offer-btn-shine{position:absolute!important;inset:0!important;background:linear-gradient(110deg,transparent 20%,rgba(255,255,255,.55) 48%,transparent 72%)!important;animation:refBtnShine 2.6s ease-in-out infinite!important}
+body.structure-v2 .cta-block{display:none!important}
+@keyframes refBtnShine{0%,35%{transform:translateX(-130%)}70%,100%{transform:translateX(130%)}}
+@keyframes refBtnPulse{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
+@media(max-width:720px){body.structure-v2 .ref-offer-inner{grid-template-columns:1fr!important}body.structure-v2 .ref-offer-btn{width:100%!important}}
+@media(max-width:1024px){body.home-unified .home-hero-split{grid-template-columns:1fr!important}body.home-unified .section-latest .articles-grid,body.home-unified .articles-grid-4{grid-template-columns:repeat(2,minmax(0,1fr))!important}}
+@media(max-width:640px){body.home-unified .section-latest .articles-grid,body.home-unified .articles-grid-4{grid-template-columns:1fr!important}}
 
 @media(max-width:1024px){
   body.structure-legacy .hero-grid{grid-template-columns:1fr!important}body.structure-legacy .hero-side{display:grid!important;grid-template-columns:repeat(3,1fr)!important}body.structure-legacy .articles-grid{grid-template-columns:repeat(2,1fr)!important}body.structure-legacy .article-layout{grid-template-columns:1fr!important}
@@ -1321,7 +1606,7 @@ body.structure-v2.family-portal .section-latest .articles-grid{grid-template-col
 
 function ensureStructuralGuardCss(css: string): string {
   if (!css) return css;
-  if (css.includes("structural-guard-v5")) return css;
+  if (css.includes("structural-guard-v7")) return css;
   const withoutOldGuard = css.replace(/\n?\/\*\s*structural-guard(?:-v\d+)?[\s\S]*$/i, "").trim();
   return `${withoutOldGuard}\n${buildStructuralGuardCss()}`;
 }
@@ -1339,38 +1624,24 @@ const CARD_GRADS = [
 function buildNav(cfg: SeoConfig, rootPath = "/"): string {
   const name = cfg.siteTitle || cfg.projectName || "Site";
   const t = themeOf(cfg);
-  const clusters = cfg.clusters.slice(0, 6);
-  const links = clusters.map(c =>
-    `<a href="/${c.slug}/">${esc(c.name)}</a>`
-  ).join("");
+  const clusters = cfg.clusters;
   const logo = `<a href="${rootPath}" class="nav-logo" aria-label="${esc(name)}">${logoMark(t, name, "nav", cfg.logoUrl)}<span class="logo-text">${esc(name)}</span></a>`;
-  if (cfg.structuralVersion !== 2) {
-    return `<nav>
+  const MAX_INLINE = 5;
+  const inline = clusters.slice(0, MAX_INLINE);
+  const overflow = clusters.slice(MAX_INLINE);
+  const inlineLinks = inline.map(c => `<a href="/${c.slug}/">${esc(c.name)}</a>`).join("");
+  const overflowLinks = overflow.map(c => `<a href="/${c.slug}/">${esc(c.name)}</a>`).join("");
+  const dropdown = overflow.length > 0
+    ? `<details class="nav-dropdown"><summary>Ещё ${overflow.length}</summary><div class="nav-dropdown-panel">${overflowLinks}</div></details>`
+    : "";
+  const links = `${inlineLinks}${dropdown}`;
+  return `<nav class="site-nav nav-top">
   <div class="nav-inner">
     ${logo}
-    <div class="nav-links">${links}</div>
+    <div class="nav-links">${links || `<a href="/">Главная</a>`}</div>
+    <details class="mobile-menu"><summary>Меню</summary><div class="mobile-menu-links"><a href="/">Главная</a>${clusters.map(c => `<a href="/${c.slug}/">${esc(c.name)}</a>`).join("")}</div></details>
   </div>
 </nav>`;
-  }
-
-  const numbered = clusters.map((c, i) =>
-    `<a href="/${c.slug}/"><span>${String(i + 1).padStart(2, "0")}</span>${esc(c.name)}</a>`
-  ).join("");
-  const mobileMenu = `<details class="mobile-menu"><summary>Разделы</summary><div class="mobile-menu-links"><a href="/">Главная</a>${links}</div></details>`;
-  const variant = t.navVariant || "bar";
-  const navs: Record<NonNullable<SeoTheme["navVariant"]>, string> = {
-    masthead: `<nav class="site-nav nav-masthead">
-  <div class="masthead-meta"><span>${esc(cfg.niche)}</span><span>Независимое издание</span></div>
-  <div class="masthead-brand">${logo}</div>
-  <div class="masthead-sections">${links}</div>
-</nav>`,
-    bar: `<nav class="site-nav nav-bar"><div class="nav-inner">${logo}<div class="nav-links">${links}</div><a class="nav-home-link" href="/">Главная</a></div></nav>`,
-    index: `<nav class="site-nav nav-index"><div class="index-brand">${logo}<span>Тематический индекс</span></div><div class="index-links">${numbered}</div></nav>`,
-    floating: `<nav class="site-nav nav-floating"><div class="floating-shell">${logo}<div class="floating-links">${links}</div><a class="floating-home" href="/" aria-label="Главная">⌂</a></div></nav>`,
-    newswire: `<nav class="site-nav nav-newswire"><div class="newswire-brand">${logo}<span class="newswire-live">● Новые материалы</span></div><div class="newswire-links"><a href="/">Главная</a>${links}</div></nav>`,
-    numbered: `<nav class="site-nav nav-numbered"><div class="numbered-shell">${logo}<div class="numbered-links">${numbered}</div></div></nav>`,
-  };
-  return navs[variant].replace("</nav>", `${mobileMenu}</nav>`);
 }
 
 function buildFooter(cfg: SeoConfig): string {
@@ -1434,7 +1705,6 @@ function buildHomePage(cfg: SeoConfig): string {
   const safeUrl = safeHref(cfg.targetUrl);
   const ctaLabelSafe = esc(cfg.ctaLabel || "Попробовать →");
 
-  // Collect all done articles
   const allDone: Array<{ kw: SeoKeyword; cluster: SeoCluster; idx: number }> = [];
   let gi = 0;
   for (const c of cfg.clusters) {
@@ -1443,56 +1713,65 @@ function buildHomePage(cfg: SeoConfig): string {
     }
   }
 
-  // ── Hero grid (top 4 articles) ──
-  const h = allDone.slice(0, 4);
-  const heroMain = h[0] ? `<a href="/${h[0].cluster.slug}/${h[0].kw.slug}/" class="hero-main">
-    ${heroBg(h[0].kw.image, 0)}
-    <div class="hero-overlay"></div>
-    <div class="hero-content">
-      <span class="cat-chip">${h[0].cluster.name}</span>
-      <div class="hero-title">${h[0].kw.title}</div>
-    </div>
-  </a>` : `<div class="hero-main">${heroBg(undefined, 0)}<div class="hero-overlay"></div><div class="hero-content"><div class="hero-title">${cfg.siteTitle}</div></div></div>`;
+  const sliderItems = (allDone.length > 0 ? allDone : cfg.clusters.slice(0, 6).map((c, i) => ({
+    kw: { title: c.name, slug: "", image: undefined } as SeoKeyword,
+    cluster: c,
+    idx: i,
+  }))).slice(0, 8);
 
-  const heroSideItems = (h.length > 1 ? h.slice(1, 4) : cfg.clusters.slice(0, 3).map((c, i) => ({ kw: null as any, cluster: c, idx: i }))).map((a, i) =>
-    a.kw
-      ? `<a href="/${a.cluster.slug}/${a.kw.slug}/" class="hero-side-item">
-          ${heroBg(a.kw.image, (i+1)%CARD_GRADS.length)}
-          <div class="hero-overlay"></div>
-          <div class="hero-content"><span class="cat-chip">${a.cluster.name}</span><div class="hero-title">${a.kw.title}</div></div>
-        </a>`
-      : `<a href="/${a.cluster.slug}/" class="hero-side-item">
-          <div class="hero-grad" style="background:${CARD_GRADS[(i+1)%CARD_GRADS.length]};position:absolute;inset:0"></div>
-          <div class="hero-overlay"></div>
-          <div class="hero-content"><span class="cat-chip">${a.cluster.name}</span><div class="hero-title">${a.cluster.description}</div></div>
-        </a>`
-  ).join("\n");
+  const sliderSlides = sliderItems.map((a, i) => {
+    const href = a.kw.slug ? `/${a.cluster.slug}/${a.kw.slug}/` : `/${a.cluster.slug}/`;
+    const title = a.kw.slug ? a.kw.title : a.cluster.name;
+    return `<a href="${href}" class="hero-slide${i === 0 ? " is-active" : ""}" data-slide="${i}">
+      ${heroBg(a.kw.image, i)}
+      <div class="hero-overlay"></div>
+      <div class="hero-slide-content">
+        <span class="cat-chip on-media">${esc(a.cluster.name)}</span>
+        <div class="hero-slide-title on-media">${esc(title)}</div>
+      </div>
+    </a>`;
+  }).join("\n");
 
-  // ── Hot strip ──
-  const hotChips = [
-    ...cfg.clusters.slice(0, 5).map(c => `<a href="/${c.slug}/" class="hot-chip">${c.name}</a>`),
-    ...allDone.slice(0, 8).map(a => `<a href="/${a.cluster.slug}/${a.kw.slug}/" class="hot-chip">${a.kw.keyword}</a>`),
-  ].join("\n        ");
+  const sliderDots = sliderItems.map((_, i) =>
+    `<button type="button" class="hero-dot${i === 0 ? " is-active" : ""}" data-dot="${i}" aria-label="Слайд ${i + 1}"></button>`
+  ).join("");
 
-  // ── Recent articles grid ──
-  const recentCards = allDone.slice(4, 16).map((a, i) => `<a href="/${a.cluster.slug}/${a.kw.slug}/" class="article-card">
+  const heroSlider = `<div class="hero-slider" data-hero-slider>
+  <div class="hero-slider-viewport">${sliderSlides}</div>
+  <div class="hero-slider-controls">
+    <button type="button" class="hero-slider-btn" data-prev aria-label="Назад">‹</button>
+    <div class="hero-dots">${sliderDots}</div>
+    <button type="button" class="hero-slider-btn" data-next aria-label="Вперёд">›</button>
+  </div>
+</div>`;
+
+  const heroSplit = `<section class="home-hero-split">
+  <div class="hero-copy">
+    <span class="hero-kicker">${esc(cfg.niche || "Издание")}</span>
+    <h1 class="hero-site-title">${esc(cfg.siteTitle)}</h1>
+    <p class="hero-site-desc">${esc(cfg.siteDescription)}</p>
+  </div>
+  <div class="hero-slider-wrap">${heroSlider}</div>
+</section>`;
+
+  const sliderScript = `<script>(function(){var root=document.querySelector("[data-hero-slider]");if(!root)return;var slides=[].slice.call(root.querySelectorAll(".hero-slide"));var dots=[].slice.call(root.querySelectorAll(".hero-dot"));if(slides.length<2)return;var i=0,timer;function go(n){i=(n+slides.length)%slides.length;slides.forEach(function(s,k){s.classList.toggle("is-active",k===i)});dots.forEach(function(d,k){d.classList.toggle("is-active",k===i)});}function next(){go(i+1);}function prev(){go(i-1);}function arm(){clearInterval(timer);timer=setInterval(next,5200);}root.querySelector("[data-next]")?.addEventListener("click",function(){next();arm();});root.querySelector("[data-prev]")?.addEventListener("click",function(){prev();arm();});dots.forEach(function(d){d.addEventListener("click",function(){go(+d.getAttribute("data-dot")||0);arm();});});arm();})();</script>`;
+
+  const gridCards = allDone.map((a, i) => `<a href="/${a.cluster.slug}/${a.kw.slug}/" class="article-card">
     <div class="ac-img-wrap">
       ${cardBg(a.kw.image, i)}
     </div>
     <div class="ac-body">
-      <span class="ac-cat">${a.cluster.name}</span>
-      <div class="ac-title">${a.kw.title}</div>
-      <div class="ac-meta">⏱ ~5 мин чтения</div>
+      <span class="ac-cat">${esc(a.cluster.name)}</span>
+      <div class="ac-title">${esc(a.kw.title)}</div>
     </div>
   </a>`).join("\n    ");
 
-  // ── Category cards ──
   const catCards = cfg.clusters.map((c, i) => {
     const count = c.keywords.filter(k => k.status === "done").length;
     return `<a href="/${c.slug}/" class="cat-card">
-      <div class="cc-icon" style="width:36px;height:36px;border-radius:8px;background:${CARD_GRADS[i%CARD_GRADS.length]};margin-bottom:.625rem;display:flex;align-items:center;justify-content:center"></div>
-      <h2>${c.name}</h2>
-      <p>${c.description}</p>
+      <div class="cc-icon" style="width:36px;height:36px;border-radius:8px;background:${CARD_GRADS[i % CARD_GRADS.length]};margin-bottom:.625rem"></div>
+      <h2>${esc(c.name)}</h2>
+      <p>${esc(c.description)}</p>
       <div class="cc-count">${count} ${count === 1 ? "статья" : count < 5 ? "статьи" : "статей"}</div>
     </a>`;
   }).join("\n    ");
@@ -1531,48 +1810,24 @@ function buildHomePage(cfg: SeoConfig): string {
   });
   const lang = htmlLang(`${cfg.siteTitle} ${cfg.niche} ${cfg.siteDescription}`);
 
-  if (cfg.structuralVersion === 2) {
-    const theme = themeOf(cfg);
-    const family = theme.layoutFamily || "magazine";
-    const homeVariant = theme.homeVariant || "lead-grid";
-    const heroByVariant: Record<NonNullable<SeoTheme["homeVariant"]>, string> = {
-      "single-feature": `<section class="home-hero feature-editorial">
-  <div class="feature-edition">Независимое издание · ${esc(cfg.niche)}</div>
-  <div class="feature-editorial-grid">${heroMain}<div class="hero-side editorial-notes">${heroSideItems}</div></div>
-</section>`,
-      "lead-grid": `<section class="home-hero hero-wrap"><div class="hero-grid">${heroMain}<div class="hero-side">${heroSideItems}</div></div></section>`,
-      "topic-first": `<section class="home-hero knowledge-intro">
-  <div class="knowledge-copy"><span class="knowledge-label">База знаний</span><h1>${esc(cfg.siteTitle)}</h1><p>${esc(cfg.siteDescription)}</p><strong>${cfg.clusters.length} тематических разделов</strong></div>
-  <div class="knowledge-feature">${heroMain}</div>
-</section>`,
-      "story-mosaic": `<section class="home-hero story-mosaic"><div class="mosaic-heading"><span>Визуальный журнал</span><h1>${esc(cfg.siteTitle)}</h1></div><div class="hero-grid">${heroMain}<div class="hero-side">${heroSideItems}</div></div></section>`,
-      newsroom: `<section class="home-hero newsroom-lead"><div class="newsroom-bar"><span>Главное сегодня</span><strong>${esc(cfg.siteTitle)}</strong></div><div class="hero-grid">${heroMain}<div class="hero-side">${heroSideItems}</div></div></section>`,
-      "compact-feed": `<section class="home-hero digest-cover"><div class="digest-masthead"><span>Кратко и по делу</span><h1>${esc(cfg.siteTitle)}</h1><p>${esc(cfg.siteDescription)}</p></div>${heroMain}</section>`,
-    };
-    const trendingSection = `<section class="home-section section-trending"><div class="hot-strip"><div class="container"><div class="hot-inner"><span class="hot-label">Сейчас читают</span>${hotChips}</div></div></div></section>`;
-    const latestSection = recentCards ? `<section class="home-section section-latest container">
-  <div class="section-header"><span class="section-title">${family === "digest" ? "Свежий выпуск" : "Новые статьи"}</span></div>
-  <div class="articles-grid">${recentCards}</div>
+  const latestSection = gridCards ? `<section class="home-section section-latest container">
+  <div class="section-header"><span class="section-title">Статьи</span></div>
+  <div class="articles-grid articles-grid-4">${gridCards}</div>
 </section>` : "";
-    const topicsSection = `<section class="home-section section-topics container">
-  <div class="section-header"><span class="section-title">${family === "knowledge" ? "Навигатор по темам" : "Все разделы"}</span></div>
+  const topicsSection = `<section class="home-section section-topics container">
+  <div class="section-header"><span class="section-title">Разделы</span></div>
   <div class="cats-grid">${catCards}</div>
 </section>`;
-    const ctaSection = safeUrl ? `<section class="home-section section-cta container">
+  const ctaSection = safeUrl ? `<section class="home-section section-cta container">
   <div class="cta-hero"><div class="cta-hero-text"><h2>${esc(cfg.siteTitle)} — попробуйте прямо сейчас</h2><p>${esc(cfg.siteDescription)}</p></div>
   <a href="${safeUrl}" class="cta-btn" target="_blank" rel="noopener sponsored">${ctaLabelSafe}</a></div>
 </section>` : "";
-    const sections: Record<NonNullable<SeoTheme["sectionOrder"]>[number], string> = {
-      hero: `<div class="container">${heroByVariant[homeVariant]}</div>`,
-      trending: trendingSection,
-      latest: latestSection,
-      topics: topicsSection,
-      cta: ctaSection,
-    };
-    const order = theme.sectionOrder || ["hero", "trending", "latest", "cta", "topics"];
-    const composed = order.map((key) => sections[key] || "").join("\n");
+  const composed = `<div class="container">${heroSplit}</div>
+${latestSection}
+${topicsSection}
+${ctaSection}`;
 
-    return `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="${lang}">
 <head>
 <meta charset="UTF-8">
@@ -1589,74 +1844,11 @@ ${cfg.logoUrl ? `<meta property="og:image" content="${esc(seoAssetUrl(cfg, cfg.l
 ${geoHead(cfg)}
 <script type="application/ld+json">${schema}</script>
 </head>
-<body class="${bodyClass(cfg)}">
+<body class="${bodyClass(cfg)} home-unified">
 ${nav}
 <main class="home-composition">${composed}</main>
 ${footer}
-</body>
-</html>`;
-  }
-
-  return `<!DOCTYPE html>
-<html lang="${lang}">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(cfg.siteTitle)}</title>
-<meta name="description" content="${esc(cfg.siteDescription)}">
-<meta property="og:title" content="${esc(cfg.siteTitle)}">
-<meta property="og:description" content="${esc(cfg.siteDescription)}">
-<meta property="og:type" content="website">
-<meta property="og:url" content="${esc(seoUrl(cfg, "/"))}">
-<link rel="canonical" href="${esc(seoUrl(cfg, "/"))}">
-<link rel="stylesheet" href="/assets/style.css">
-${geoHead(cfg)}
-<script type="application/ld+json">${schema}</script>
-</head>
-<body class="${bodyClass(cfg)}">
-${nav}
-<div class="container">
-  <div class="hero-wrap">
-    <div class="hero-grid">
-      ${heroMain}
-      <div class="hero-side">${heroSideItems}</div>
-    </div>
-  </div>
-</div>
-<div class="hot-strip">
-  <div class="container">
-    <div class="hot-inner">
-      <span class="hot-label">🔥 Горячее</span>
-      ${hotChips}
-    </div>
-  </div>
-</div>
-${recentCards ? `<div class="container">
-  <div class="section-header">
-    <span class="section-title">Новые статьи</span>
-  </div>
-  <div class="articles-grid">
-    ${recentCards}
-  </div>
-</div>` : ""}
-${safeUrl ? `<div class="container">
-  <div class="cta-hero">
-    <div class="cta-hero-text">
-      <h2>${esc(cfg.siteTitle)} — попробуйте прямо сейчас</h2>
-      <p>${esc(cfg.siteDescription)}</p>
-    </div>
-    <a href="${safeUrl}" class="cta-btn" target="_blank" rel="noopener sponsored">${ctaLabelSafe}</a>
-  </div>
-</div>` : ""}
-<div class="container">
-  <div class="section-header">
-    <span class="section-title">Все разделы</span>
-  </div>
-  <div class="cats-grid">
-    ${catCards}
-  </div>
-</div>
-${footer}
+${sliderScript}
 </body>
 </html>`;
 }
@@ -1945,16 +2137,8 @@ async function generateArticleHtml(
 
   const offer = resolveSeoOffer(kw, cluster, cfg);
   const safeUrl = safeHref(offer.targetUrl);
-  const ctaLabelSafe = esc(offer.ctaLabel);
   const offerNiche = offer.niche || cfg.niche;
-  const ctaHtml = safeUrl ? `<div class="cta-block">
-  <div class="cta-icon">🚀</div>
-  <div class="cta-text">
-    <strong>[Write a compelling 8-12 word hook about ${offerNiche} related to "${kw.keyword}"]</strong>
-    <span>[One sentence: what the user gets by clicking — make it relevant to the article topic and this product/niche]</span>
-  </div>
-  <a href="${safeUrl}" class="cta-btn" target="_blank" rel="noopener sponsored">${ctaLabelSafe}</a>
-</div>` : "";
+  const hasReferral = !!safeUrl;
 
   const prompt = `You are a world-class editorial designer + SEO writer creating a PREMIUM WEB MAGAZINE article. Write ONLY the inner article HTML fragment — NO <!DOCTYPE>, NO <html>, NO <head>, NO <nav>, NO <footer>, NO <body>.
 
@@ -1985,26 +2169,41 @@ GEO / AI CITATION (ChatGPT, Perplexity, Gemini, Claude, YandexGPT, Alice):
 - FAQ questions should match how people actually ask AI assistants, not stuffed keywords
 - Author box: publication name "${cfg.siteTitle}", not "Editorial Team"
 
-VISUAL RHYTHM — THIS IS A MAGAZINE, NOT A WALL OF TEXT (CRITICAL):
-- The VERY FIRST paragraph MUST be <p class="lead">…</p> (a bold, larger intro paragraph with a drop-cap).
-- Break up the text. After every 2-3 paragraphs, insert ONE rich visual element. Choose from:
+VISUAL RHYTHM — RICH MAGAZINE LAYOUT WITHOUT SVG (CRITICAL):
+- The VERY FIRST paragraph MUST be <p class="lead">…</p> (bold larger intro with drop-cap).
+- After every 2-3 paragraphs, insert ONE rich visual element. Choose from:
   • Pull quote: <blockquote class="pull-quote">Memorable insight in 10-18 words.</blockquote>
-  • Callout box: <div class="callout"><div class="callout-title">💡 Совет</div><p>Actionable tip.</p></div> (also use ⚠️ Важно / 📌 Запомните variants)
-  • Stat grid (2-4 cards of real numbers): <div class="stat-grid"><div class="stat-card"><div class="stat-num">73%</div><div class="stat-label">short description</div></div>…</div>
-  • Inline SVG illustration for a concept — small, decorative, theme-neutral strokes using currentColor, e.g.:
-    <figure class="article-svg"><svg viewBox="0 0 320 160" role="img" aria-label="[what it shows]"><!-- simple geometric/line illustration, stroke="currentColor" fill="none" or subtle fills --></svg><figcaption>[1-line caption]</figcaption></figure>
-- Use these elements at least 4 times total across the article (mix of types). Never put two of the same type back-to-back.
-- DO NOT output any <img> tags. The hero cover image is added automatically — never write <img>, never reference IMG_PLACEHOLDER.
-- 5-6 H2 sections; vary paragraph length; use <ul>/<ol> and <table> where they genuinely help.
+  • Callout box: <div class="callout"><div class="callout-title">💡 Совет</div><p>Actionable tip.</p></div> (also ⚠️ Важно / 📌 Запомните)
+  • Stat grid (2-4 cards): <div class="stat-grid"><div class="stat-card"><div class="stat-num">73%</div><div class="stat-label">short description</div></div>…</div>
+  • Comparison table, numbered steps, pros/cons — when they genuinely help
+- Use these elements at least 4 times. Never put two of the same type back-to-back.
+- NO SVG, NO CSS animations, NO decorative flourish lines, NO Lottie. Typography + photos + callouts only.
+- DO NOT output any <img> tags yourself. Cover is {{COVER}}. For in-article photos use ONLY markers:
+  {{IMG:English photo prompt describing EXACTLY what this section needs}}
+  Rules for {{IMG:...}}:
+  • You may place 0, 1, or 2 markers total (agent decides based on article needs; max 2). Cover counts separately as photo #1 of up to 3.
+  • Prompt must match the surrounding section content and niche. Example: article about borscht, section about ingredients → {{IMG:Fresh raw ingredients for Ukrainian borscht arranged on a rustic table: beets, cabbage, potatoes, carrots, garlic, dill, beef bones — photorealistic food photography}}
+  • Another example: section comparing two tools → show both products side by side in a clean studio scene relevant to the niche.
+  • Prompts in English, concrete, no text/watermarks/logos in the image description.
+  • Place the marker BETWEEN paragraphs where the photo would illustrate that section — never inside a heading.
+- 5-6 H2 sections; vary paragraph length; use <ul>/<ol> and <table> where helpful.
+- Keep text readable: never put body copy on busy photo backgrounds without a solid overlay block.
 
 INTERNAL LINKS (use naturally in body text):
 ${relatedLinks || "(none yet)"}
-${ctaHtml ? `
-CTA BLOCK — insert this EXACTLY TWICE:
-  1) Right after the opening lead paragraph (before first H2)
-  2) Right before the [author-box]
-Use this exact HTML (fill in the bracketed placeholders with compelling copy):
-${ctaHtml}` : ""}
+${hasReferral ? `
+REFERRAL / TRAFFIC OFFER (CRITICAL — monetization of SEO traffic):
+The site owner configured a partner referral URL. You MUST place TWO copy markers (server wraps them into a beautiful branded section with a shimmer button — do NOT invent your own gradient CTA boxes, do NOT output <div class="cta-block">, do NOT style a plain button):
+  1) Right after the opening <p class="lead">…</p> (before first H2):
+     {{REF_TOP:Native 8-14 word editorial hook tied to this article|||One concrete sentence: what the reader gains by clicking, relevant to "${kw.keyword}" and niche "${offerNiche}"}}
+  2) Right before the author-box:
+     {{REF_BOTTOM:Closing editorial nudge (different wording from top)|||One sentence that feels like a staff recommendation, not spam}}
+Rules for the copy:
+- Sound like magazine staff recommending a next step, not an ad banner
+- Same language as the article
+- Never change the referral URL — the server injects it
+- Never invent a different product than niche "${offerNiche}"
+Button label will be: "${offer.ctaLabel}"` : ""}
 
 OUTPUT EXACTLY THIS STRUCTURE (no outer wrappers, no page-level tags):
 <div class="article-header">
@@ -2021,9 +2220,9 @@ OUTPUT EXACTLY THIS STRUCTURE (no outer wrappers, no page-level tags):
 [toc if guide/tutorial/listicle]
 <div class="article-body">
   <p class="lead">[opening lead paragraph — bold, sets the stakes, answers the query in 2 sentences]</p>
-  ${ctaHtml ? "[CTA BLOCK #1 — see above]" : ""}
-  [h2 sections with full content; rich visual elements (pull-quote / callout / stat-grid / inline SVG) interleaved every 2-3 paragraphs; internal links where relevant]
-  ${ctaHtml ? "[CTA BLOCK #2 — see above]" : ""}
+  ${hasReferral ? "{{REF_TOP:...}} marker here" : ""}
+  [h2 sections with full content; rich visual elements (pull-quote / callout / stat-grid) and optional {{IMG:...}} markers interleaved; internal links where relevant]
+  ${hasReferral ? "{{REF_BOTTOM:...}} marker here" : ""}
 </div>
 <div class="author-box"><div class="author-avatar">${esc((cfg.siteTitle || "R").slice(0, 1))}</div><div class="author-info"><div class="author-name">${esc(cfg.siteTitle)}</div><div class="author-bio">Редакция издания. Тема: ${esc(cfg.niche || cluster.name)}. Обновлено: ${today}.</div></div></div>
 <div class="faq-section">
@@ -2058,8 +2257,7 @@ Output ONLY the HTML fragment above — no markdown, no explanations, no page-le
   const coverImg = coverUrl
     ? `<img class="hero-article-img" src="${coverUrl}" alt="${esc(kw.title)}" loading="lazy">`
     : `<div class="hero-cover-fallback" style="background:${CARD_GRADS[idx % CARD_GRADS.length]}"><span>${esc(cluster.name)}</span></div>`;
-  const flourish = `<div class="article-flourish" aria-hidden="true"><svg viewBox="0 0 200 16"><path class="af-line" d="M2 8 C 50 2,80 14,110 8 S 170 2,198 8"/><circle class="af-dot" cx="2" cy="8" r="4"/></svg></div>`;
-  const coverBlock = `${coverImg}\n${flourish}`;
+  const coverBlock = coverImg;
   // Strip any stray <img> the model may have emitted despite instructions
   articleContent = articleContent.replace(/<img\b[^>]*>/gi, "");
   if (articleContent.includes("{{COVER}}")) {
@@ -2073,6 +2271,14 @@ Output ONLY the HTML fragment above — no markdown, no explanations, no page-le
       articleContent = coverBlock + "\n" + articleContent;
     }
   }
+
+  articleContent = await resolveInlineArticleImages(articleContent, 2);
+  // Strip decorative SVG / flourish the model may still emit
+  articleContent = articleContent
+    .replace(/<div class="article-flourish"[\s\S]*?<\/div>/gi, "")
+    .replace(/<figure class="article-svg"[\s\S]*?<\/figure>/gi, "")
+    .replace(/<svg\b[\s\S]*?<\/svg>/gi, "");
+  articleContent = ensureArticleReferralOffers(articleContent, kw, cluster, cfg);
 
   // ── Schema.org + GEO ──
   const schema = JSON.stringify(articleJsonLd(kw, cluster, cfg, articleContent, coverUrl || undefined));
@@ -2166,7 +2372,7 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
     let cfg = proj.seoConfig as SeoConfig | undefined;
     if (cfg?.clusters?.length) {
       if (!cfg.theme?.layout) cfg = await persistUniqueSkin(storage, proj.id, cfg);
-      const architecture = await upgradeSeoArchitectureV4(storage, proj.id, cfg);
+      const architecture = await upgradeSeoArchitectureV5(storage, proj.id, cfg);
       cfg = architecture.config;
       if (architecture.upgraded && cfg.pagesGenerated > 0) {
         await storage.upsertProjectFile({
@@ -2179,11 +2385,11 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
         await storage.updateProject(proj.id, { seoConfig: cfg, generatedCode: home?.code || proj.generatedCode } as any);
       }
       const cssFile = await storage.getProjectFile(proj.id, "assets/style.css");
-      if (cssFile?.code && !cssFile.code.includes("structural-guard-v5")) {
+      if (cssFile?.code && (!cssFile.code.includes("structural-guard-v7") || !cssFile.code.includes("home-hero-split"))) {
         await storage.upsertProjectFile({
           projectId: proj.id,
           filename: "assets/style.css",
-          code: ensureStructuralGuardCss(cssFile.code),
+          code: ensureStructuralGuardCss(buildSiteCss(themeOf(cfg))),
         });
       }
       (proj as any).seoConfig = cfg;
@@ -2358,7 +2564,7 @@ Respond with ONLY valid JSON, no explanation:
         ctaLabel: siteCtaLabel,
         theme,
         structuralVersion: 2,
-        architectureVersion: 4,
+        architectureVersion: 5,
         logoStatus: "pending",
         faviconDataUrl: prevCfg.faviconDataUrl,
         faviconMime: prevCfg.faviconMime,
@@ -2865,7 +3071,10 @@ ${brief}
 - GEO: не выкидывай FAQ, .key-takeaways, JSON-LD, canonical, llms.txt, robots.txt, sitemap.xml.
 - Если правишь статью — сохрани «Короткий ответ» (key-takeaways) и FAQ с самодостаточными ответами, которые нейросеть может процитировать.
 - Основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст не ниже WCAG AA. Текст поверх фото — только с устойчивым затемнением.
-- Сохраняй маркеры editorial-system-v4 и structural-guard-v5. Запрещены горизонтальный скролл, микротекст, кислотные фоны и эффекты, мешающие чтению.
+- Главная v5: меню сверху → Hero (слева title/desc, справа слайдер статей) → статьи 4 в ряд. Не возвращай старый hero-grid.
+- Статьи: без SVG-анимаций; до 3 фото; две секции `.ref-offer` с реф-ссылкой (начало и конец) — не превращай в плоский `.cta-block`.
+- Текст на подложках читаемый: в ref-offer title/desc тёмные, кнопка белая на brand.
+- Сохраняй маркеры editorial-system-v4 и structural-guard-v7. Запрещены горизонтальный скролл, микротекст, кислотные фоны и эффекты, мешающие чтению.
 - Для фото используй ТОЧНЫЕ URL из вложений как src у <img>. Не выдумывай стоковые CDN.
 - Не выводи огромный HTML в чат — краткий итог после патчей.
 - Пользователь сейчас смотрит файл «${safeActive}».`;

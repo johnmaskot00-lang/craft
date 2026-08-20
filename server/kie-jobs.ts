@@ -216,14 +216,56 @@ export function registerKieCallbackRoute(app: Express): void {
   });
 }
 
-/** Extract first result URL from KIE task data.resultJson */
-export function kieResultUrl(data: KieTaskData | null | undefined): string | null {
-  if (!data) return null;
-  let result: any = {};
+function collectKieUrls(value: unknown, out: string[], seen: Set<string>, depth = 0): void {
+  if (depth > 4 || value == null) return;
+  if (typeof value === "string") {
+    const url = value.trim();
+    if (/^https?:\/\//i.test(url) && !seen.has(url)) {
+      seen.add(url);
+      out.push(url);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectKieUrls(item, out, seen, depth + 1);
+    return;
+  }
+  if (typeof value !== "object") return;
+  const obj = value as Record<string, unknown>;
+  const priorityKeys = [
+    "resultUrls",
+    "urls",
+    "images",
+    "imageUrls",
+    "output",
+    "outputs",
+    "result",
+    "data",
+    "url",
+    "imageUrl",
+  ];
+  for (const key of priorityKeys) {
+    if (key in obj) collectKieUrls(obj[key], out, seen, depth + 1);
+  }
+}
+
+/** Extract all result URLs from KIE task data across known response shapes. */
+export function kieResultUrls(data: KieTaskData | null | undefined): string[] {
+  if (!data) return [];
+  let result: unknown = {};
   try {
     result = typeof data.resultJson === "string" ? JSON.parse(data.resultJson) : (data.resultJson || {});
   } catch {
-    return null;
+    result = data.resultJson || {};
   }
-  return (result.resultUrls || [])[0] || null;
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  collectKieUrls(result, urls, seen);
+  if (urls.length === 0) collectKieUrls(data, urls, seen);
+  return urls;
+}
+
+/** Extract first result URL from KIE task data. */
+export function kieResultUrl(data: KieTaskData | null | undefined): string | null {
+  return kieResultUrls(data)[0] || null;
 }

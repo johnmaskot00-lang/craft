@@ -98,7 +98,7 @@ export interface SeoConfig {
   /** Set only for newly analyzed projects; missing means preserve the legacy skeleton. */
   structuralVersion?: 2;
   /** Curated architecture/navigation generation version for safe in-place upgrades of v2 sites. */
-  architectureVersion?: 4;
+  architectureVersion?: 4 | 5;
   /** One generated square brand mark reused across every page and deployment. */
   logoUrl?: string;
   logoStatus?: "pending" | "generating" | "ready" | "fallback";

@@ -75,6 +75,7 @@ import {
   setKieTerminalHandler,
   getCachedKieResult,
   kieResultUrl,
+  kieResultUrls,
   type KieTaskData,
   type KieTerminalResult,
 } from "./kie-jobs";
@@ -7691,10 +7692,7 @@ ${designAnalysis}
       const state = body.data?.state;
       if (state === "success") {
         pendingImageCharges.delete(taskId);
-        const result = typeof body.data.resultJson === "string"
-          ? JSON.parse(body.data.resultJson)
-          : (body.data.resultJson || {});
-        const externalUrls = result.resultUrls || [];
+        const externalUrls = kieResultUrls(body.data);
         const localUrls: string[] = [];
         const projectIdParam = parseInt(req.query.projectId as string) || 0;
         const promptParam = (req.query.prompt as string) || "";
@@ -7719,7 +7717,8 @@ ${designAnalysis}
             localUrls.push(extUrl);
           }
         }
-        return res.json({ state: "success", urls: localUrls });
+        const urls = localUrls.length > 0 ? localUrls : externalUrls;
+        return res.json({ state: "success", urls });
       }
       if (state === "fail") {
         const failMsg = body.data.failMsg || "Ошибка генерации";
