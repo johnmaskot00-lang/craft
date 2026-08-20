@@ -114,6 +114,14 @@ import {
   kieHttpError,
   nestedErrorCode,
 } from "./kie-errors";
+import {
+  KIE_GEMINI_ATTEMPTS,
+  KIE_GEMINI_MODEL,
+  KIE_GEMINI_STREAM_URL,
+  KIE_GEMINI_SYNC_URL,
+  isRetryableKieGeminiError,
+  withKieGeminiRetry,
+} from "./kie-gemini";
 
 /** Refund only when billed AND we are 100% sure KIE API failed. */
 async function refundIfConfirmedKie(
@@ -352,10 +360,8 @@ const KIE_API_KEY = process.env.KIE_API_KEY;
 const NANO_BANANA_CREATE_URL = "https://api.kie.ai/api/v1/jobs/createTask";
 const NANO_BANANA_STATUS_URL = "https://api.kie.ai/api/v1/jobs/recordInfo";
 // Agent V1 (Claude) → Anthropic SDK → router.cheap (see ./anthropic.ts).
-// Agent V2 (Gemini) still streams via KIE below.
-const KIE_GEMINI_URL = "https://api.kie.ai/gemini/v1/models/gemini-3-5-flash:streamGenerateContent";
-/** Non-streaming Gemini for short sync jobs (AI enhance) — must hit api.kie.ai, not router.cheap. */
-const KIE_GEMINI_SYNC_URL = "https://api.kie.ai/gemini/v1/models/gemini-3-5-flash:generateContent";
+// Agent V2 (Gemini) streams via KIE Gemini 3 Flash v1beta (see ./kie-gemini.ts).
+const KIE_GEMINI_URL = KIE_GEMINI_STREAM_URL;
 const ENHANCE_PROMPT_TIMEOUT_MS = 90_000;
 
 const AUTO_IMAGE_COST = 15;
@@ -3490,69 +3496,93 @@ async function* geminiGenerateStream(
     body.systemInstruction = { parts: [{ text: systemPrompt }] };
   }
 
-  // Hard cap: hung KIE streams must not pin generate slots forever.
-  const streamAc = new AbortController();
-  const streamKill = setTimeout(() => streamAc.abort(), 10 * 60 * 1000);
-  streamKill.unref?.();
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= KIE_GEMINI_ATTEMPTS; attempt++) {
+    // Hard cap: hung KIE streams must not pin generate slots forever.
+    const streamAc = new AbortController();
+    const streamKill = setTimeout(() => streamAc.abort(), 10 * 60 * 1000);
+    streamKill.unref?.();
+    let yielded = false;
 
-  let resp: Response;
-  try {
     try {
-      resp = await fetch(KIE_GEMINI_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${KIE_API_KEY}`,
-        },
-        body: JSON.stringify(body),
-        signal: streamAc.signal,
-      });
-    } catch (err: any) {
-      throw new KieApiError(`Gemini KIE transport error (${nestedErrorCode(err) || "TRANSPORT_ERROR"}): ${err?.message || err}`, {
-        source: "network",
-        cause: err,
-      });
-    }
-
-    if (!resp.ok) {
-      const errText = await resp.text();
-      throw kieHttpError(resp.status, errText.slice(0, 400), "Gemini KIE");
-    }
-
-    const ct = String(resp.headers.get("content-type") || "").toLowerCase();
-    if (ct.includes("application/json") && !ct.includes("event-stream") && !ct.includes("text/event-stream")) {
-      const data = await resp.json();
-      throwIfKieErrorBody(data, "Gemini KIE");
-      for (const part of data?.candidates?.[0]?.content?.parts ?? []) {
-        if (part.text) yield part.text as string;
+      let resp: Response;
+      try {
+        resp = await fetch(KIE_GEMINI_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${KIE_API_KEY}`,
+          },
+          body: JSON.stringify(body),
+          signal: streamAc.signal,
+        });
+      } catch (err: any) {
+        throw new KieApiError(`Gemini KIE transport error (${nestedErrorCode(err) || "TRANSPORT_ERROR"}): ${err?.message || err}`, {
+          source: "network",
+          cause: err,
+        });
       }
-      return;
-    }
 
-    const reader = (resp.body as any).getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let sawCandidate = false;
-    while (true) {
-      if (streamAc.signal.aborted) {
-        throw new KieApiError("Gemini KIE stream timed out after 10 minutes", { source: "network" });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        throw kieHttpError(resp.status, errText.slice(0, 400), "Gemini KIE");
       }
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        const jsonStr = trimmed.startsWith("data: ") ? trimmed.slice(6) : trimmed;
-        if (!jsonStr || jsonStr === "[DONE]") continue;
+
+      const ct = String(resp.headers.get("content-type") || "").toLowerCase();
+      if (ct.includes("application/json") && !ct.includes("event-stream") && !ct.includes("text/event-stream")) {
+        const data = await resp.json();
+        throwIfKieErrorBody(data, "Gemini KIE");
+        for (const part of data?.candidates?.[0]?.content?.parts ?? []) {
+          if (part.text) {
+            yielded = true;
+            yield part.text as string;
+          }
+        }
+        return;
+      }
+
+      const reader = (resp.body as any).getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let sawCandidate = false;
+      while (true) {
+        if (streamAc.signal.aborted) {
+          throw new KieApiError("Gemini KIE stream timed out after 10 minutes", { source: "network" });
+        }
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          const jsonStr = trimmed.startsWith("data: ") ? trimmed.slice(6) : trimmed;
+          if (!jsonStr || jsonStr === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(jsonStr);
+            throwIfKieErrorBody(parsed, "Gemini KIE");
+            for (const part of parsed?.candidates?.[0]?.content?.parts ?? []) {
+              if (part.text) {
+                sawCandidate = true;
+                yielded = true;
+                yield part.text as string;
+              }
+            }
+          } catch (e) {
+            if (e instanceof KieApiError) throw e;
+          }
+        }
+      }
+      if (buffer.trim()) {
+        const jsonStr = buffer.trim().startsWith("data: ") ? buffer.trim().slice(6) : buffer.trim();
         try {
           const parsed = JSON.parse(jsonStr);
           throwIfKieErrorBody(parsed, "Gemini KIE");
           for (const part of parsed?.candidates?.[0]?.content?.parts ?? []) {
             if (part.text) {
               sawCandidate = true;
+              yielded = true;
               yield part.text as string;
             }
           }
@@ -3560,32 +3590,30 @@ async function* geminiGenerateStream(
           if (e instanceof KieApiError) throw e;
         }
       }
-    }
-    if (buffer.trim()) {
-      const jsonStr = buffer.trim().startsWith("data: ") ? buffer.trim().slice(6) : buffer.trim();
-      try {
-        const parsed = JSON.parse(jsonStr);
-        throwIfKieErrorBody(parsed, "Gemini KIE");
-        for (const part of parsed?.candidates?.[0]?.content?.parts ?? []) {
-          if (part.text) {
-            sawCandidate = true;
-            yield part.text as string;
-          }
+      if (!sawCandidate && buffer.trim().length > 0) {
+        try {
+          throwIfKieErrorBody(JSON.parse(buffer.trim()), "Gemini KIE");
+        } catch (e) {
+          if (e instanceof KieApiError) throw e;
         }
-      } catch (e) {
-        if (e instanceof KieApiError) throw e;
       }
-    }
-    if (!sawCandidate && buffer.trim().length > 0) {
-      try {
-        throwIfKieErrorBody(JSON.parse(buffer.trim()), "Gemini KIE");
-      } catch (e) {
-        if (e instanceof KieApiError) throw e;
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (yielded || attempt >= KIE_GEMINI_ATTEMPTS || !isRetryableKieGeminiError(err)) {
+        throw err;
       }
+      const delay = attempt * 1200;
+      console.warn(
+        `[Gemini stream/${KIE_GEMINI_MODEL}] attempt ${attempt}/${KIE_GEMINI_ATTEMPTS} failed, retry in ${delay}ms:`,
+        String((err as any)?.message || err).slice(0, 220),
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    } finally {
+      clearTimeout(streamKill);
     }
-  } finally {
-    clearTimeout(streamKill);
   }
+  throw lastErr;
 }
 
 const WAVESPEED_API_KEY = process.env.WAVESPEED_API_KEY;
@@ -4018,54 +4046,56 @@ async function kieGeminiGenerateSync(
     body.systemInstruction = { parts: [{ text: systemPrompt }] };
   }
 
-  const ac = new AbortController();
-  const kill = setTimeout(() => ac.abort(), timeoutMs);
-  kill.unref?.();
+  return withKieGeminiRetry(`ENHANCE/${KIE_GEMINI_MODEL}`, async () => {
+    const ac = new AbortController();
+    const kill = setTimeout(() => ac.abort(), timeoutMs);
+    kill.unref?.();
 
-  try {
-    console.log(`[ENHANCE] POST ${KIE_GEMINI_SYNC_URL} (timeout ${timeoutMs}ms)`);
-    let resp: Response;
     try {
-      resp = await fetch(KIE_GEMINI_SYNC_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${KIE_API_KEY}`,
-        },
-        body: JSON.stringify(body),
-        signal: ac.signal,
-      });
-    } catch (err: any) {
-      if (ac.signal.aborted) {
+      console.log(`[ENHANCE] POST ${KIE_GEMINI_SYNC_URL} (timeout ${timeoutMs}ms)`);
+      let resp: Response;
+      try {
+        resp = await fetch(KIE_GEMINI_SYNC_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${KIE_API_KEY}`,
+          },
+          body: JSON.stringify(body),
+          signal: ac.signal,
+        });
+      } catch (err: any) {
+        if (ac.signal.aborted) {
+          throw new KieApiError(
+            `Gemini KIE enhance timed out after ${Math.round(timeoutMs / 1000)}s`,
+            { source: "network", cause: err },
+          );
+        }
         throw new KieApiError(
-          `Gemini KIE enhance timed out after ${Math.round(timeoutMs / 1000)}s`,
+          `Gemini KIE transport error (${nestedErrorCode(err) || "TRANSPORT_ERROR"}): ${err?.message || err}`,
           { source: "network", cause: err },
         );
       }
-      throw new KieApiError(
-        `Gemini KIE transport error (${nestedErrorCode(err) || "TRANSPORT_ERROR"}): ${err?.message || err}`,
-        { source: "network", cause: err },
-      );
-    }
 
-    if (!resp.ok) {
-      const errText = await resp.text();
-      throw kieHttpError(resp.status, errText.slice(0, 400), "Gemini KIE");
-    }
+      if (!resp.ok) {
+        const errText = await resp.text();
+        throw kieHttpError(resp.status, errText.slice(0, 400), "Gemini KIE");
+      }
 
-    const data = (await resp.json()) as any;
-    throwIfKieErrorBody(data, "Gemini KIE");
-    let text = "";
-    for (const part of data?.candidates?.[0]?.content?.parts ?? []) {
-      if (part.text) text += part.text as string;
+      const data = (await resp.json()) as any;
+      throwIfKieErrorBody(data, "Gemini KIE");
+      let text = "";
+      for (const part of data?.candidates?.[0]?.content?.parts ?? []) {
+        if (part.text) text += part.text as string;
+      }
+      if (!text.trim()) {
+        throw new KieApiError("Empty Gemini KIE enhance response", { source: "body" });
+      }
+      return text;
+    } finally {
+      clearTimeout(kill);
     }
-    if (!text.trim()) {
-      throw new KieApiError("Empty Gemini KIE enhance response", { source: "body" });
-    }
-    return text;
-  } finally {
-    clearTimeout(kill);
-  }
+  });
 }
 
 async function enhancePromptOnly(query: string): Promise<{ enhancedPrompt: string; success: boolean; confirmedKieFailure?: boolean }> {

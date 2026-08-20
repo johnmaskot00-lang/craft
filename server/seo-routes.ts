@@ -16,11 +16,10 @@ import {
   type SitePage,
 } from "./agent-runtime";
 import { bundleSeoMediaForDeploy, normalizeSeoMediaUrls, persistSeoCoverFromUrl } from "./seo-media";
+import { KIE_GEMINI_MODEL, KIE_GEMINI_SYNC_URL, withKieGeminiRetry } from "./kie-gemini";
 
-const KIE_API_KEY = process.env.KIE_API_KEY || "";
-const KIE_GEMINI_MODEL = "gemini-3-5-flash";
-const KIE_GEMINI_URL = `https://api.kie.ai/gemini/v1/models/${KIE_GEMINI_MODEL}:generateContent`;
-// GPT Image-2 job endpoints (same shape used in server/routes.ts for {{GENIMG}})
+const KIE_API_KEY = process.env.KIE_API_KEY;
+const KIE_GEMINI_URL = KIE_GEMINI_SYNC_URL;
 const KIE_JOBS_CREATE = "https://api.kie.ai/api/v1/jobs/createTask";
 const KIE_JOBS_STATUS = "https://api.kie.ai/api/v1/jobs/recordInfo";
 
@@ -50,46 +49,58 @@ function slugify(text: string): string {
     .slice(0, 60) || "page";
 }
 
-// Uses KIE Gemini flash via the non-streaming generateContent endpoint.
+// Uses KIE Gemini 3 Flash via the non-streaming generateContent endpoint.
 // Non-streaming avoids stream-accumulation overhead and returns a single JSON
 // response — much faster for large keyword clusters and long articles.
 async function kieSync(messages: { role: string; content: string }[], timeout = 90000): Promise<string> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeout);
-  try {
-    const contents: any[] = [];
-    let systemPrompt = "";
-    for (const m of messages) {
-      if (m.role === "system" || m.role === "developer") {
-        systemPrompt += (systemPrompt ? "\n\n" : "") + m.content;
-        continue;
-      }
-      contents.push({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] });
+  const contents: any[] = [];
+  let systemPrompt = "";
+  for (const m of messages) {
+    if (m.role === "system" || m.role === "developer") {
+      systemPrompt += (systemPrompt ? "\n\n" : "") + m.content;
+      continue;
     }
-    const body: any = { contents };
-    if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
-
-    const resp = await fetch(KIE_GEMINI_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${KIE_API_KEY}` },
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => "");
-      throw new Error(`KIE Gemini ${resp.status}${errText ? `: ${errText.slice(0, 300)}` : ""}`);
-    }
-
-    const data = await resp.json() as any;
-    let text = "";
-    for (const part of data?.candidates?.[0]?.content?.parts ?? []) {
-      if (part.text) text += part.text as string;
-    }
-    if (!text) throw new Error("Empty KIE response");
-    return text;
-  } finally {
-    clearTimeout(timer);
+    contents.push({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] });
   }
+  const body: any = { contents };
+  if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
+
+  return withKieGeminiRetry(`SEO/${KIE_GEMINI_MODEL}`, async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeout);
+    try {
+      const resp = await fetch(KIE_GEMINI_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${KIE_API_KEY}` },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => "");
+        throw new Error(`KIE Gemini ${resp.status}${errText ? `: ${errText.slice(0, 300)}` : ""}`);
+      }
+
+      const data = await resp.json() as any;
+      // KIE may return HTTP 200 with {code,msg} provider errors.
+      const kieCode = Number((data as any)?.code);
+      if (
+        Number.isFinite(kieCode) &&
+        kieCode !== 200 &&
+        kieCode !== 0 &&
+        !(data as any)?.candidates
+      ) {
+        throw new Error(`KIE Gemini body error ${kieCode}: ${String((data as any)?.msg || (data as any)?.message || "error").slice(0, 300)}`);
+      }
+      let text = "";
+      for (const part of data?.candidates?.[0]?.content?.parts ?? []) {
+        if (part.text) text += part.text as string;
+      }
+      if (!text) throw new Error("Empty KIE response");
+      return text;
+    } finally {
+      clearTimeout(timer);
+    }
+  });
 }
 
 // One article cover via GPT Image-2 (text-to-image) at 1K, 16:9. Returns the raw
@@ -3072,7 +3083,7 @@ ${brief}
 - Если правишь статью — сохрани «Короткий ответ» (key-takeaways) и FAQ с самодостаточными ответами, которые нейросеть может процитировать.
 - Основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст не ниже WCAG AA. Текст поверх фото — только с устойчивым затемнением.
 - Главная v5: меню сверху → Hero (слева title/desc, справа слайдер статей) → статьи 4 в ряд. Не возвращай старый hero-grid.
-- Статьи: без SVG-анимаций; до 3 фото; две секции `.ref-offer` с реф-ссылкой (начало и конец) — не превращай в плоский `.cta-block`.
+- Статьи: без SVG-анимаций; до 3 фото; две секции .ref-offer с реф-ссылкой (начало и конец) — не превращай в плоский .cta-block.
 - Текст на подложках читаемый: в ref-offer title/desc тёмные, кнопка белая на brand.
 - Сохраняй маркеры editorial-system-v4 и structural-guard-v7. Запрещены горизонтальный скролл, микротекст, кислотные фоны и эффекты, мешающие чтению.
 - Для фото используй ТОЧНЫЕ URL из вложений как src у <img>. Не выдумывай стоковые CDN.

@@ -11,20 +11,23 @@
 
 import { storage } from "./storage";
 import { KieApiError, kieHttpError, nestedErrorCode } from "./kie-errors";
+import {
+  KIE_GEMINI_ATTEMPTS,
+  KIE_GEMINI_SYNC_URL,
+  isRetryableKieGeminiError,
+} from "./kie-gemini";
 import { routerCheapToolsRound, isRouterCheapConfigured } from "./anthropic";
 
 export const CRAFT_MD_FILENAME = "craft.md";
 
 const KIE_API_KEY = process.env.KIE_API_KEY;
-// Gemini V2 still uses KIE; Claude V1 tools go through Anthropic SDK → router.cheap.
-const KIE_GEMINI_MODEL = "gemini-3-5-flash";
-const KIE_GEMINI_GENERATE_URL = `https://api.kie.ai/gemini/v1/models/${KIE_GEMINI_MODEL}:generateContent`;
+// Gemini V2 uses KIE Gemini 3 Flash v1beta; Claude V1 tools go through Anthropic SDK → router.cheap.
+const KIE_GEMINI_GENERATE_URL = KIE_GEMINI_SYNC_URL;
 /**
- * Never replay the same tool round: after a transport disconnect KIE may still
- * be running the original task. Cross-model fallback is orchestrated by routes
- * only after KIE returned an explicit completed error response.
+ * One automatic retry on flaky KIE errors (~5%). Do not raise further:
+ * after a transport disconnect KIE may still be running the original task.
  */
-const KIE_TOOL_ROUND_RETRIES = 1;
+const KIE_TOOL_ROUND_RETRIES = KIE_GEMINI_ATTEMPTS;
 /** Hard cap per Gemini tools round — hung sync generateContent must not pin the UI forever. */
 const KIE_GEMINI_TOOLS_TIMEOUT_MS = Number(process.env.CRAFT_GEMINI_TOOLS_TIMEOUT_MS) || 4 * 60 * 1000;
 
@@ -377,8 +380,8 @@ ${"═".repeat(43)}
 7. Не удаляй canonical, Open Graph, JSON-LD, FAQ, key-takeaways, breadcrumbs, внутренние ссылки и логотип из общего shell.
 8. На главной: одно меню сверху (nav-top), затем Hero-split — слева название+описание, справа слайдер новых статей. После Hero — сетка статей 4 в ряд (.articles-grid-4). Не ломай .home-hero-split / .hero-slider / .articles-grid-4.
 9. В статьях запрещены SVG-анимации и декоративные SVG. Живость — через фото, callout, pull-quote, таблицы. До 3 фото на статью (обложка + до 2 inline).
-9b. Реф-оффер: в каждой статье две секции `.ref-offer` (начало и конец) с партнёрской ссылкой владельца. Не заменяй их на градиентный `.cta-block`. Кнопка `.ref-offer-btn` со shine — часть дизайна издания.
-10. ЧИТАЕМОСТЬ НЕПРИКОСНОВЕННА: основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст текста не ниже WCAG AA; текст поверх фото только с классом .on-media и тёмным overlay. В `.ref-offer` заголовок/описание — тёмные цвета темы, на кнопке — белый текст.
+9b. Реф-оффер: в каждой статье две секции .ref-offer (начало и конец) с партнёрской ссылкой владельца. Не заменяй их на градиентный .cta-block. Кнопка .ref-offer-btn со shine — часть дизайна издания.
+10. ЧИТАЕМОСТЬ НЕПРИКОСНОВЕННА: основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст текста не ниже WCAG AA; текст поверх фото только с классом .on-media и тёмным overlay. В .ref-offer заголовок/описание — тёмные цвета темы, на кнопке — белый текст.
 11. Не удаляй маркеры editorial-system-v4 и structural-guard-v6 из assets/style.css. Не делай горизонтальный скролл, микротекст или кислотные фоны.
 
 ${manifest}
@@ -885,6 +888,7 @@ async function kieGeminiToolsRound(
       }
       const transient =
         (e as any)?.confirmedKieFailure === true ||
+        isRetryableKieGeminiError(e) ||
         /fetch failed|network|econnreset|etimedout|socket/i.test(msg);
       if (transient && attempt < KIE_TOOL_ROUND_RETRIES - 1) {
         const delay = (attempt + 1) * 1500;
