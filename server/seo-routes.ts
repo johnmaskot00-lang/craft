@@ -350,24 +350,36 @@ function defaultReferralCopy(
   const topic = (kw.title || kw.keyword || niche || "этой теме").trim();
   const nicheLabel = (niche || "вашей нише").trim();
   const brand = (productName || "сервис").trim() || "сервис";
+  const topicLower = `${topic} ${nicheLabel}`.toLowerCase();
+  let angle = `инструменты под «${topic}»`;
+  if (/видео|veo|kling|avatar|авата|motion|lip.?sync/.test(topicLower)) {
+    angle = "генерацию видео и аватаров без лимитов";
+  } else if (/голос|voice|eleven|suno|аудио|звук|tts/.test(topicLower)) {
+    angle = "синтез голоса и аудио в одном месте";
+  } else if (/текст|llm|chatgpt|claude|gpt|копирайт/.test(topicLower)) {
+    angle = "текстовые модели и рабочие сценарии";
+  } else if (/изображ|image|арт|график|фото|e-?com|карточ/.test(topicLower)) {
+    angle = "генерацию изображений и коммерческий визуал";
+  }
   if (slot === "top") {
     return {
-      title: `${brand}: решение под «${topic}»`,
-      desc: `Редакция рекомендует ${brand} для ниши «${nicheLabel}» — нативный следующий шаг после этой статьи, без поиска сторонних площадок.`,
+      title: `${angle.charAt(0).toUpperCase()}${angle.slice(1)} — на ${brand}`,
+      desc: `Перейдите на платформу ${brand} для доступа к ведущим моделям по теме «${topic}» без ограничений и без ухода к конкурентам.`,
     };
   }
   return {
-    title: `Закрепите результат в ${brand}`,
-    desc: `Если материал по «${topic}» был полезен — продолжите практику в ${brand}: платформа под эту нишу, которую рекомендует издание.`,
+    title: `Продолжите на ${brand}`,
+    desc: `Редакция рекомендует ${brand} как следующий шаг после материала о «${topic}»: одна платформа под нишу «${nicheLabel}».`,
   };
 }
 
-/** Recover owner CTA URL from art-directed homepage header when seoConfig.targetUrl was never saved. */
+/** Recover owner CTA URL from art-directed chrome when seoConfig.targetUrl was never saved. */
 function extractOfferUrlFromHomeHtml(html: string): string {
   if (!html) return "";
   const patterns = [
-    /<a\b[^>]*\b(?:btn-header-cta|cta-btn|header-cta)\b[^>]*\bhref=["'](https?:\/\/[^"']+)["']/i,
-    /<a\b[^>]*\bhref=["'](https?:\/\/[^"']+)["'][^>]*\b(?:btn-header-cta|cta-btn|header-cta|rel=["'][^"']*sponsored)/i,
+    /<a\b[^>]*\b(?:btn-header-cta|cta-btn|header-cta|offer-btn|cta-hero|btn-cta)\b[^>]*\bhref=["'](https?:\/\/[^"']+)["']/i,
+    /<a\b[^>]*\bhref=["'](https?:\/\/[^"']+)["'][^>]*\b(?:btn-header-cta|cta-btn|header-cta|offer-btn|cta-hero|btn-cta|rel=["'][^"']*sponsored)/i,
+    /<a\b[^>]*\bhref=["'](https?:\/\/(?!craft-ai\.|yandexcloud\.|localhost)[^"']+)["'][^>]*>[\s\S]{0,80}?(?:Попробовать|Открыть|Перейти|Dremia)/i,
   ];
   for (const re of patterns) {
     const m = html.match(re);
@@ -424,15 +436,15 @@ function buildReferralOfferHtml(opts: {
 }): string {
   const url = safeHref(opts.url);
   if (!url) return "";
-  const label = esc(opts.label || "Попробовать →");
+  const labelRaw = String(opts.label || "Попробовать →").trim() || "Попробовать →";
+  const label = esc(labelRaw);
   const title = esc(opts.title.slice(0, 120));
   const desc = esc(opts.desc.slice(0, 240));
-  const niche = esc((opts.niche || "").slice(0, 80));
   return `<aside class="ref-offer ref-offer-${opts.slot}" data-ref-offer="${opts.slot}">
   <div class="ref-offer-glow" aria-hidden="true"></div>
   <div class="ref-offer-inner">
     <div class="ref-offer-copy">
-      <span class="ref-offer-eyebrow">Редакция рекомендует${niche ? ` · ${niche}` : ""}</span>
+      <span class="ref-offer-eyebrow">// Рекомендация редакции</span>
       <strong class="ref-offer-title">${title}</strong>
       <p class="ref-offer-desc">${desc}</p>
     </div>
@@ -468,6 +480,11 @@ function ensureArticleReferralOffers(
 
   const product = seoOfferProductName(offer.niche || cfg.niche || cluster.name, offer.targetUrl);
   const nicheForCopy = offer.niche || cfg.niche || cluster.name;
+  const ctaLabel = /[a-zа-я0-9]/i.test(offer.ctaLabel) && offer.ctaLabel.length > 2
+    ? (/\b(попробовать|открыть|перейти)\b/i.test(offer.ctaLabel) && !new RegExp(product, "i").test(offer.ctaLabel)
+      ? `${offer.ctaLabel.replace(/→\s*$/, "").trim()} ${product} →`
+      : offer.ctaLabel)
+    : `Попробовать ${product} →`;
   const topCopy = parseRefCopyMarker(html, "top") || defaultReferralCopy(kw, nicheForCopy, "top", product);
   const bottomCopy = parseRefCopyMarker(html, "bottom") || defaultReferralCopy(kw, nicheForCopy, "bottom", product);
 
@@ -480,7 +497,7 @@ function ensureArticleReferralOffers(
 
   const topHtml = buildReferralOfferHtml({
     url: offer.targetUrl,
-    label: offer.ctaLabel,
+    label: ctaLabel,
     title: topCopy.title,
     desc: topCopy.desc,
     slot: "top",
@@ -488,7 +505,7 @@ function ensureArticleReferralOffers(
   });
   const bottomHtml = buildReferralOfferHtml({
     url: offer.targetUrl,
-    label: offer.ctaLabel,
+    label: ctaLabel,
     title: bottomCopy.title,
     desc: bottomCopy.desc,
     slot: "bottom",
@@ -530,7 +547,19 @@ function ensureArticleReferralOffers(
 
 async function refreshArticleReferralOffers(storage: IStorage, projectId: number, cfg: SeoConfig): Promise<void> {
   const home = await storage.getProjectFile(projectId, "index.html");
-  const effectiveCfg = cfgWithOfferFallback(cfg, home?.code);
+  let effectiveCfg = cfgWithOfferFallback(cfg, home?.code);
+  if (!safeHref(effectiveCfg.targetUrl)) {
+    // Also scan article chrome (offer-btn in header) when home extract failed.
+    const filesProbe = await storage.getProjectFiles(projectId);
+    for (const f of filesProbe) {
+      if (!f.code || !/\/index\.html$/i.test(f.filename)) continue;
+      const recovered = extractOfferUrlFromHomeHtml(f.code);
+      if (recovered) {
+        effectiveCfg = { ...effectiveCfg, targetUrl: recovered, ctaLabel: effectiveCfg.ctaLabel || "Попробовать →" };
+        break;
+      }
+    }
+  }
   const hasOffer = !!(
     safeHref(effectiveCfg.targetUrl)
     || effectiveCfg.clusters.some((c) => safeHref(c.targetUrl) || c.keywords.some((k) => safeHref(k.targetUrl)))
@@ -1085,6 +1114,21 @@ async function repairSeoSiteLayout(storage: IStorage, projectId: number, cfg: Se
   await refreshArticleSeoMetadata(storage, projectId, cfg);
   await refreshArticleReferralOffers(storage, projectId, cfg);
   await refreshArticleSidebars(storage, projectId, cfg);
+
+  // Remove broken agent pagination pages (/page/2/ etc.) — feed uses client-side pager only.
+  const allFiles = await storage.getProjectFiles(projectId);
+  for (const f of allFiles) {
+    if (!/^page\/\d+/i.test(f.filename)) continue;
+    try {
+      await storage.deleteProjectFile(f.id);
+    } catch {
+      await storage.upsertProjectFile({
+        projectId,
+        filename: f.filename,
+        code: `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta http-equiv="refresh" content="0;url=/"><link rel="canonical" href="/"><title>Redirect</title></head><body><p><a href="/">На главную</a></p></body></html>`,
+      });
+    }
+  }
 
   if (isArtDirectedSeo(cfg)) {
     // Agent owns homepage + CSS — only soft-refresh feeds / categories / guard.
@@ -2514,7 +2558,7 @@ Never invent article titles or URLs. Do not add a "Читайте также" bl
 ${hasReferral ? `
 NATIVE PRODUCT RECOMMENDATION (CRITICAL — adapt to THIS article’s keyword):
 The site owner’s platform is "${productName}" (${safeUrl}), niche "${offerNiche}".
-1) In the ARTICLE BODY, weave 2–3 natural editorial tips that recommend "${productName}" as the practical next step for readers of THIS specific topic (e.g. if the article is about AI art freelancing → recommend the marketplace/platform to sell or commission; if about a model → where to run/buy related work). Different wording each time — never spam.
+1) In the ARTICLE BODY, weave 2–3 natural editorial tips that recommend "${productName}" as the practical next step for readers of THIS specific topic (adapt angle to the keyword: video → generate on ${productName}; voice → synthesize on ${productName}; images → create/sell on ${productName}).
 2) At least TWO of those body mentions MUST be real HTML links:
    <a href="${safeUrl}" target="_blank" rel="noopener sponsored">${productName}</a>
 3) Also place TWO copy markers (server wraps them into branded .ref-offer sections with CTA "${offer.ctaLabel}" — do NOT invent <div class="cta-block">):
@@ -2522,6 +2566,9 @@ The site owner’s platform is "${productName}" (${safeUrl}), niche "${offerNich
       {{REF_TOP:8-14 word native staff tip naming ${productName} for this article|||One concrete sentence: what the reader gets on ${productName}, tied to "${kw.keyword}"}}
    b) Right before the author-box:
       {{REF_BOTTOM:Closing staff nudge naming ${productName} (different wording)|||One sentence recommendation, not spam}}
+FORBIDDEN:
+- Do NOT add CTA / «попробовать» / «купить» / «перейти» links to competitors (Midjourney, Kling, Runway, ElevenLabs, Suno, ChatGPT, Adobe Stock, etc.).
+- Named tools may appear as market context only — the ONLY sponsored/action link is ${safeUrl} (${productName}).
 Rules: same language as the article; never change the referral URL; never invent another primary product than "${productName}".
 ` : ""}
 

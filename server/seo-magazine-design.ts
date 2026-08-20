@@ -111,7 +111,8 @@ CREATIVE MANDATE
    - Exactly ONE wrapper: <div data-seo-article-feed data-page-size="12" class="articles-grid">...</div>
    - Put article-cards ONLY inside that wrapper — never duplicate cards outside it
    - COMPACT GRID ONLY: 4 equal cards per row (photo on top + title below). NO full-bleed mega-cards, NO featured span-8/12, NO single huge cover card in the feed.
-   - Include up to 12 sample compact cards now; server replaces with ALL articles + pager (12/page, 4 columns)
+   - Include up to 12 sample compact cards now; server replaces with ALL articles + client-side pager (12/page, 4 columns)
+   - FORBIDDEN: invent /page/2/ URLs or separate pagination HTML files — pager is in-place buttons only
    - Each card: <a class="article-card" href="..."> with .ac-img-wrap (16:10 photo) / .ac-title / optional short .ac-cat — keep cards equal height, modest image height (~140–180px)
 6. Sticky top chrome MUST be <header class="site-header"> with brand + <nav> category links + optional CTA.
    Server COPIES this entire <header> onto category/article pages — it must look finished on every page.
@@ -327,25 +328,85 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+/** Find start index of the matching '</div>' for a div that opened ending at openTagEnd. */
+export function findMatchingDivClose(html: string, openTagEnd: number): number {
+  let depth = 1;
+  let i = openTagEnd;
+  while (i < html.length) {
+    const nextLt = html.indexOf("<", i);
+    if (nextLt < 0) return -1;
+    const rest = html.slice(nextLt);
+    if (/^<\/div\b/i.test(rest) || /^<\/\s*div\s*>/i.test(rest)) {
+      depth -= 1;
+      if (depth === 0) return nextLt;
+      const gt = html.indexOf(">", nextLt);
+      i = gt < 0 ? html.length : gt + 1;
+      continue;
+    }
+    // Match opening <div ...> (not </div>)
+    if (rest.length >= 4 && rest.slice(0, 4).toLowerCase() === "<div" && (rest[4] === " " || rest[4] === ">" || rest[4] === "\t" || rest[4] === "\n" || rest[4] === "\r")) {
+      depth += 1;
+      const gt = html.indexOf(">", nextLt);
+      i = gt < 0 ? html.length : gt + 1;
+      continue;
+    }
+    i = nextLt + 1;
+  }
+  return -1;
+}
+
+/** Replace inner HTML of the first data-seo-article-feed wrapper (handles nested divs). */
+export function replaceSeoArticleFeedInner(homeHtml: string, newInner: string): string | null {
+  if (!homeHtml) return null;
+  const openRe = /<([^>]*\bdata-seo-article-feed\b[^>]*)>/i;
+  const m = openRe.exec(homeHtml);
+  if (!m) return null;
+  const openEnd = m.index + m[0].length;
+  const closeStart = findMatchingDivClose(homeHtml, openEnd);
+  if (closeStart < 0) return null;
+  return `${homeHtml.slice(0, openEnd)}\n${newInner}\n${homeHtml.slice(closeStart)}`;
+}
+
+/** Extract full outer HTML of the first data-seo-article-feed block. */
+export function extractSeoArticleFeedBlock(homeHtml: string): { block: string; start: number; end: number } | null {
+  const openRe = /<([^>]*\bdata-seo-article-feed\b[^>]*)>/i;
+  const m = openRe.exec(homeHtml);
+  if (!m) return null;
+  const openEnd = m.index + m[0].length;
+  const closeStart = findMatchingDivClose(homeHtml, openEnd);
+  if (closeStart < 0) return null;
+  const closeMatch = homeHtml.slice(closeStart).match(/^<\/\s*div\s*>/i);
+  if (!closeMatch) return null;
+  const end = closeStart + closeMatch[0].length;
+  return { block: homeHtml.slice(m.index, end), start: m.index, end };
+}
+
 /** Remove duplicate article-card dumps outside the single data-seo-article-feed region. */
 export function stripOrphanHomeArticleCards(homeHtml: string): string {
   if (!homeHtml) return homeHtml;
-  const feeds: string[] = [];
-  let html = homeHtml.replace(/<[^>]*\bdata-seo-article-feed\b[^>]*>[\s\S]*?<\/div>/gi, (m) => {
-    feeds.push(m);
-    return `<!--SEO_FEED_SLOT_${feeds.length - 1}-->`;
-  });
+  const extracted = extractSeoArticleFeedBlock(homeHtml);
+  let html = homeHtml;
+  let slot = "";
+  if (extracted) {
+    slot = "<!--SEO_FEED_SLOT_0-->";
+    html = homeHtml.slice(0, extracted.start) + slot + homeHtml.slice(extracted.end);
+  }
   html = html.replace(/<!--\s*Main Editorial Feed[\s\S]*?-->/gi, "");
+  // Drop agent-made /page/N/ pagination shells (we use client-side pager only).
+  html = html.replace(/<a\b[^>]*\bhref=["']\/page\/\d+\/?["'][^>]*>[\s\S]*?<\/a>/gi, "");
+  html = html.replace(/<nav\b[^>]*\bclass=["'][^"']*\b(?:pagination|pager|pages)\b[^"']*["'][^>]*>[\s\S]*?<\/nav>/gi, "");
   html = html.replace(/<a\b[^>]*\bclass=["'][^"']*\barticle-card\b[^"']*["'][^>]*>[\s\S]*?<\/a>/gi, "");
-  feeds.forEach((feed, i) => {
-    html = html.replace(`<!--SEO_FEED_SLOT_${i}-->`, feed);
-  });
+  // Also catch cards with class before other attrs
+  html = html.replace(/<a\b[^>]*\barticle-card\b[^>]*>[\s\S]*?<\/a>/gi, "");
+  if (extracted) {
+    html = html.replace(slot, extracted.block);
+  }
   return html;
 }
 
 export function buildHomeFeedPagerBlock(pageSize = SEO_HOME_FEED_PAGE_SIZE): string {
   return `<nav class="seo-feed-pager" data-seo-feed-pager hidden aria-label="Страницы материалов"></nav>
-<script>
+<script data-seo-feed-pager-script>
 (function(){
   var size=${Math.max(1, pageSize|0)};
   var feed=document.querySelector('[data-seo-article-feed]');
@@ -355,14 +416,18 @@ export function buildHomeFeedPagerBlock(pageSize = SEO_HOME_FEED_PAGE_SIZE): str
   var cards=[].slice.call(feed.children).filter(function(el){
     return el.matches && (el.matches('a.article-card') || el.matches('.article-card') || (el.tagName==='A' && (el.className||'').indexOf('article-card')>=0));
   });
-  if(cards.length<=size)return;
+  if(cards.length<=size){
+    var idle=document.querySelector('[data-seo-feed-pager]');
+    if(idle)idle.hidden=true;
+    return;
+  }
   var pager=document.querySelector('[data-seo-feed-pager]');
   if(!pager){
     pager=document.createElement('nav');
     pager.className='seo-feed-pager';
     pager.setAttribute('data-seo-feed-pager','');
     pager.setAttribute('aria-label','Страницы материалов');
-    feed.parentNode.insertBefore(pager, feed.nextSibling);
+    if(feed.parentNode)feed.parentNode.insertBefore(pager, feed.nextSibling);
   }
   var page=1;
   var pages=Math.ceil(cards.length/size)||1;
@@ -399,13 +464,14 @@ export function ensureHomeFeedPager(homeHtml: string, pageSize = SEO_HOME_FEED_P
   );
   // Drop previous pager+script so refresh stays idempotent
   html = html.replace(/<nav[^>]*\bdata-seo-feed-pager\b[^>]*>[\s\S]*?<\/nav>\s*/gi, "");
-  html = html.replace(/<script>\s*\(function\(\)\{\s*var size=\d+;[\s\S]*?data-seo-article-feed[\s\S]*?<\/script>/gi, "");
+  html = html.replace(/<script[^>]*\bdata-seo-feed-pager-script\b[^>]*>[\s\S]*?<\/script>\s*/gi, "");
+  html = html.replace(/<script>\s*\(function\(\)\{\s*var size=\d+;[\s\S]*?data-seo-article-feed[\s\S]*?<\/script>\s*/gi, "");
+  // Kill broken agent /page/N/ navigations
+  html = html.replace(/<a\b[^>]*\bhref=["']\/page\/\d+\/?["'][^>]*>[\s\S]*?<\/a>/gi, "");
   const pager = buildHomeFeedPagerBlock(pageSize);
-  if (/data-seo-article-feed/i.test(html)) {
-    html = html.replace(
-      /(<[^>]*\bdata-seo-article-feed\b[^>]*>[\s\S]*?<\/div>)/i,
-      `$1\n${pager}`,
-    );
+  const feedBlock = extractSeoArticleFeedBlock(html);
+  if (feedBlock) {
+    html = html.slice(0, feedBlock.end) + `\n${pager}\n` + html.slice(feedBlock.end);
   }
   return html;
 }
@@ -432,10 +498,8 @@ export function patchHomeArticleFeed(homeHtml: string, articles: SeoArticleBrief
         return `<${attrs}>`;
       },
     );
-    html = html.replace(
-      /(<[^>]*\bdata-seo-article-feed\b[^>]*>)([\s\S]*?)(<\/[^>]+>)/i,
-      `$1\n${feed}\n$3`,
-    );
+    const next = replaceSeoArticleFeedInner(html, feed);
+    if (next) html = next;
   } else {
     const section = `<section class="container section-latest"><div class="section-headline-bar"><h2 class="section-title">Материалы</h2></div><div data-seo-article-feed data-page-size="${SEO_HOME_FEED_PAGE_SIZE}" class="articles-grid">\n${feed}\n</div></section>`;
     if (/<footer[\s\S]*?<\/footer>/i.test(html)) {
@@ -444,6 +508,7 @@ export function patchHomeArticleFeed(homeHtml: string, articles: SeoArticleBrief
       html = `${html}\n${section}`;
     }
   }
+  html = stripOrphanHomeArticleCards(html);
   return ensureHomeFeedPager(html, SEO_HOME_FEED_PAGE_SIZE);
 }
 
