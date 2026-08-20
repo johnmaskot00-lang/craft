@@ -31,6 +31,7 @@ import {
   pickHeroVariant,
   type SeoHeroVariant,
 } from "./seo-magazine-design";
+import { loadProfessionalTastePack, truncateSkillsForStudy } from "./taste-skill-loader";
 
 const KIE_API_KEY = process.env.KIE_API_KEY;
 const KIE_GEMINI_URL = KIE_GEMINI_SYNC_URL;
@@ -927,7 +928,7 @@ async function syncSeoShellAcrossPages(storage: IStorage, projectId: number, cfg
   if (isArtDirectedSeo(cfg)) {
     const home = files.find((f) => f.filename === "index.html");
     const shell = extractHomeShell(home?.code);
-    // Full <header> (brand + nav + CTA) — not bare <nav>, which made article/category menus look broken
+    // Full <header class="site-header"> — never replace category <header class="cat-header">
     if (shell.header) header = demoteHeaderBrandH1(shell.header);
     else if (shell.nav) nav = shell.nav;
     if (shell.footer) footer = shell.footer;
@@ -937,12 +938,11 @@ async function syncSeoShellAcrossPages(storage: IStorage, projectId: number, cfg
   let updated = 0;
   for (const f of files) {
     if (!f.filename.toLowerCase().endsWith(".html") || !f.code) continue;
-    // Never overwrite the art-directed homepage shell with itself inconsistently
     if (isArtDirectedSeo(cfg) && f.filename === "index.html") continue;
     let next = f.code;
     if (header) {
-      if (/<header\b[\s\S]*?<\/header>/i.test(next)) {
-        next = next.replace(/<header\b[\s\S]*?<\/header>/i, header);
+      if (/<header\b[^>]*\bsite-header\b[^>]*>[\s\S]*?<\/header>/i.test(next)) {
+        next = next.replace(/<header\b[^>]*\bsite-header\b[^>]*>[\s\S]*?<\/header>/i, header);
       } else if (/<nav\b[\s\S]*?<\/nav>/i.test(next)) {
         next = next.replace(/<nav\b[\s\S]*?<\/nav>/i, header);
       } else {
@@ -957,7 +957,6 @@ async function syncSeoShellAcrossPages(storage: IStorage, projectId: number, cfg
     if (!isArtDirectedSeo(cfg)) {
       next = next.replace(/<body[^>]*>/i, `<body class="${cls}">`);
     } else if (cls && /<body[^>]*>/i.test(next)) {
-      // Keep article structure classes but don't force home hero classes onto articles
       next = next.replace(/<body([^>]*)>/i, (full, attrs) => {
         if (/structure-v2/.test(attrs) || /article-/.test(attrs)) return full;
         return `<body class="${esc(cls)}">`;
@@ -1061,7 +1060,7 @@ async function repairSeoSiteLayout(storage: IStorage, projectId: number, cfg: Se
 
 /**
  * Gemini art-director pass: invents magazine CSS + interactive hero homepage.
- * Replaces the old fixed server-assembled home template for architectureVersion 6.
+ * Same ownership idea as multipage «по описанию»: agent owns unique chrome.
  */
 async function designSeoMagazineSite(
   storage: IStorage,
@@ -1074,45 +1073,50 @@ async function designSeoMagazineSite(
   const articles = collectSeoArticleBriefs(cfg);
   onStatus?.(`Арт-директор: hero «${heroVariant}»`);
 
+  let tasteBrief = "";
+  try {
+    onStatus?.("Арт-директор: загружаю design taste…");
+    const pack = await loadProfessionalTastePack({ withImageToCode: false });
+    tasteBrief = truncateSkillsForStudy(pack.combinedMarkdown, 16_000);
+  } catch (e: any) {
+    console.warn("[SEO] taste pack for magazine design skipped:", e?.message || e);
+  }
+
   const prompt = buildMagazineDesignPrompt({
     cfg,
     heroVariant,
     articles,
     logoUrl: cfg.logoUrl,
+    tasteBrief: tasteBrief || undefined,
   });
 
-  let raw = "";
+  const runDesignOnce = async (): Promise<{ css?: string; html?: string }> => {
+    const raw = await kieSync(
+      [
+        {
+          role: "system",
+          content:
+            "You are a world-class digital magazine art director. Invent a UNIQUE masthead/menu/visual system for this niche — never a shared SEO template. Output only the two FILE blocks requested. No preamble.",
+        },
+        { role: "user", content: prompt },
+      ],
+      180000,
+    );
+    return parseMagazineDesignFiles(raw);
+  };
+
+  let parsed: { css?: string; html?: string } = {};
   try {
-    raw = await kieSync([
-      {
-        role: "system",
-        content:
-          "You are a world-class digital magazine art director and front-end designer. Output only the two FILE blocks requested. No preamble.",
-      },
-      { role: "user", content: prompt },
-    ], 180000);
+    parsed = await runDesignOnce();
+    if (!parsed.css || !parsed.html || parsed.html.length < 400 || parsed.css.length < 200) {
+      onStatus?.("Арт-директор: повторная попытка уникального дизайна…");
+      parsed = await runDesignOnce();
+    }
   } catch (err: any) {
     console.warn("[SEO] magazine design agent failed:", err?.message || err);
-    // Fallback: keep readable server home so generate never blanks the site.
-    const fallbackCfg: SeoConfig = {
-      ...cfg,
-      architectureVersion: 6,
-      theme: applyHeroVariantToTheme(themeOf(cfg), "slider-split"),
-    };
-    await storage.upsertProjectFile({
-      projectId,
-      filename: "assets/style.css",
-      code: ensureStructuralGuardCss(buildSiteCss(themeOf(fallbackCfg)), fallbackCfg),
-    });
-    await storage.upsertProjectFile({
-      projectId,
-      filename: "index.html",
-      code: buildHomePage(fallbackCfg).replace("home-unified", `structure-v2 art-directed hero-slider-split`),
-    });
-    return fallbackCfg;
+    parsed = {};
   }
 
-  const parsed = parseMagazineDesignFiles(raw);
   if (!parsed.css || !parsed.html || parsed.html.length < 400 || parsed.css.length < 200) {
     console.warn("[SEO] magazine design parse incomplete — using fallback shell");
     const fallbackCfg: SeoConfig = {
@@ -1128,9 +1132,12 @@ async function designSeoMagazineSite(
     await storage.upsertProjectFile({
       projectId,
       filename: "index.html",
-      code: buildHomePage(fallbackCfg).replace(
-        "home-unified",
-        `structure-v2 art-directed hero-${heroVariant}`,
+      code: patchHomeArticleFeed(
+        buildHomePage(fallbackCfg).replace(
+          "home-unified",
+          `structure-v2 art-directed hero-${heroVariant}`,
+        ),
+        articles,
       ),
     });
     return fallbackCfg;
@@ -1220,7 +1227,8 @@ async function persistUniqueSkin(
     !!existing?.code &&
     (existing.code.includes("magazine-art-v6") ||
       existing.code.includes("structural-guard-v8") ||
-      existing.code.includes("structural-guard-v9"));
+      existing.code.includes("structural-guard-v9") ||
+      existing.code.includes("structural-guard-v10"));
   if (isArtDirectedSeo(next) && hasAgentCss && existing?.code) {
     const guarded = ensureStructuralGuardCss(existing.code, next);
     if (guarded !== existing.code) {
@@ -1826,7 +1834,7 @@ function ensureStructuralGuardCss(css: string, cfg?: SeoConfig): string {
   if (cfg && isArtDirectedSeo(cfg)) {
     return ensureSoftMagazineGuardCss(css);
   }
-  if (css.includes("structural-guard-v8") || css.includes("structural-guard-v9") || css.includes("magazine-art-v6")) {
+  if (css.includes("structural-guard-v8") || css.includes("structural-guard-v9") || css.includes("structural-guard-v10") || css.includes("magazine-art-v6")) {
     return ensureSoftMagazineGuardCss(css);
   }
   if (css.includes("structural-guard-v7")) return css;
@@ -2077,8 +2085,13 @@ ${sliderScript}
 }
 
 function buildCategoryPage(cluster: SeoCluster, cfg: SeoConfig): string {
-  const nav = buildNav(cfg);
-  const footer = buildFooter(cfg);
+  const art = isArtDirectedSeo(cfg);
+  // Art-directed: empty site-header stub — syncSeoShellAcrossPages fills unique agent chrome from home.
+  // Never bake templated buildNav when agent owns the magazine.
+  const nav = art
+    ? `<header class="site-header" data-seo-shell="1" aria-label="${esc(cfg.siteTitle || "Menu")}"></header>`
+    : buildNav(cfg);
+  const footer = art ? `<footer data-seo-shell="1"></footer>` : buildFooter(cfg);
   const done = cluster.keywords.filter(k => k.status === "done");
 
   const cards = done.map((k, i) => `<a href="/${cluster.slug}/${k.slug}/" class="article-card">
@@ -2501,8 +2514,11 @@ Output ONLY the HTML fragment above — no markdown, no explanations, no page-le
 
   // ── Schema.org + GEO ──
   const schema = JSON.stringify(articleJsonLd(kw, cluster, cfg, articleContent, coverUrl || undefined));
-  const nav = buildNav(cfg);
-  const footer = buildFooter(cfg);
+  const art = isArtDirectedSeo(cfg);
+  const nav = art
+    ? `<header class="site-header" data-seo-shell="1" aria-label="${esc(cfg.siteTitle || "Menu")}"></header>`
+    : buildNav(cfg);
+  const footer = art ? `<footer data-seo-shell="1"></footer>` : buildFooter(cfg);
   const lang = htmlLang(`${kw.keyword} ${kw.title} ${cfg.niche} ${cfg.siteTitle}`);
   const metaDesc = esc(`${kw.title}: ${cfg.siteDescription}`.slice(0, 160));
   const ogImageUrl = seoAssetUrl(cfg, coverUrl);
@@ -3381,7 +3397,7 @@ ${brief}
 - Основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст WCAG AA. Текст на фото — .on-media + overlay.
 - Сохраняй data-seo-article-feed и .article-card на главной (сервер обновляет карточки).
 - Статьи: без SVG-анимаций; до 3 фото; две секции .ref-offer. Не превращай в .cta-block.
-- Маркеры magazine-art-v6 / structural-guard-v9 не удаляй. Запрещены горизонтальный скролл и микротекст.
+- Маркеры magazine-art-v6 / structural-guard-v10 не удаляй. Запрещены горизонтальный скролл и микротекст.
 - Для фото — точные URL из вложений. Не выдумывай стоки.
 - Краткий итог после патчей, без огромного HTML в чат.
 - Пользователь смотрит файл «${safeActive}».`;
