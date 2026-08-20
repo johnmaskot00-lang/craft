@@ -360,7 +360,7 @@ const KIE_API_KEY = process.env.KIE_API_KEY;
 const NANO_BANANA_CREATE_URL = "https://api.kie.ai/api/v1/jobs/createTask";
 const NANO_BANANA_STATUS_URL = "https://api.kie.ai/api/v1/jobs/recordInfo";
 // Agent V1 (Claude) → Anthropic SDK → router.cheap (see ./anthropic.ts).
-// Agent V2 (Gemini) streams via KIE Gemini 3 Flash v1beta (see ./kie-gemini.ts).
+// Agent V2 (Gemini) streams via KIE Gemini 3.7 Flash (see ./kie-gemini.ts).
 const KIE_GEMINI_URL = KIE_GEMINI_STREAM_URL;
 const ENHANCE_PROMPT_TIMEOUT_MS = 90_000;
 
@@ -7783,6 +7783,41 @@ ${designAnalysis}
     try {
       const { url } = req.body;
       if (!url || typeof url !== "string") return res.status(400).json({ message: "URL обязателен" });
+
+      // Status endpoint often returns already-persisted /objects/... paths.
+      // Those are same-origin storage keys, not public http URLs — read them locally.
+      let objectPath = "";
+      if (url.startsWith("/objects/")) {
+        objectPath = url.split("?")[0];
+      } else if (/^https?:\/\//i.test(url)) {
+        try {
+          const abs = new URL(url);
+          if (abs.pathname.startsWith("/objects/")) objectPath = abs.pathname;
+        } catch {
+          /* fall through to public URL path */
+        }
+      }
+
+      if (objectPath) {
+        try {
+          const file = await objectStorage.getObjectEntityFile(objectPath);
+          const [buffer] = await file.download();
+          const ext = objectPath.split(".").pop()?.toLowerCase() || "jpg";
+          const mimeType =
+            ext === "png" ? "image/png"
+            : ext === "webp" ? "image/webp"
+            : ext === "gif" ? "image/gif"
+            : "image/jpeg";
+          if (buffer.length > 15 * 1024 * 1024) {
+            return res.status(413).json({ message: "Изображение слишком большое" });
+          }
+          return res.json({ base64: buffer.toString("base64"), mimeType });
+        } catch (objErr: any) {
+          console.warn("[proxy-base64] local object read failed:", objectPath, objErr?.message || objErr);
+          return res.status(404).json({ message: "Файл макета не найден в хранилище" });
+        }
+      }
+
       try {
         await assertPublicHttpUrl(url);
       } catch (e: any) {
@@ -7812,7 +7847,7 @@ ${designAnalysis}
       res.json({ base64, mimeType });
     } catch (err: any) {
       console.error("Proxy base64 error:", err);
-      res.status(500).json({ message: "Ошибка загрузки изображения" });
+      res.status(500).json({ message: err?.message || "Ошибка загрузки изображения" });
     }
   });
 

@@ -1,14 +1,13 @@
 /**
  * Shared KIE Gemini endpoints + one automatic retry on flaky provider errors.
  *
- * Model: Gemini 3 Flash (v1beta) — https://docs.kie.ai/market/gemini/gemini-3-flash-v1beta
- * Path shape matches existing Craft usage:
- *   https://api.kie.ai/gemini/v1/models/<model>:generateContent
- *   https://api.kie.ai/gemini/v1/models/<model>:streamGenerateContent
+ * Model: Gemini 3.7 Flash — https://docs.kie.ai/market/gemini/gemini-3-7-flash
+ *   POST https://api.kie.ai/gemini/v1/models/gemini-3-7-flash:streamGenerateContent
+ *   POST https://api.kie.ai/gemini/v1/models/gemini-3-7-flash:generateContent
  */
 
 export const KIE_GEMINI_MODEL =
-  (process.env.CRAFT_GEMINI_MODEL || "gemini-3-flash-v1beta").trim() || "gemini-3-flash-v1beta";
+  (process.env.CRAFT_GEMINI_MODEL || "gemini-3-7-flash").trim() || "gemini-3-7-flash";
 
 /** Total attempts for a single Gemini call (1 primary + 1 retry by default). */
 export const KIE_GEMINI_ATTEMPTS = Math.max(
@@ -35,22 +34,32 @@ function sleep(ms: number): Promise<void> {
 export function isRetryableKieGeminiError(err: unknown): boolean {
   const e = err as any;
   const status = Number(e?.status || e?.statusCode || 0);
-  if (status === 400 || status === 401 || status === 403 || status === 404 || status === 422) {
+  if (status === 400 || status === 401 || status === 403 || status === 422) {
     return false;
   }
-  if (status === 429 || status >= 500) return true;
+  // 404 can be a transient gateway miss on a newly published model path.
+  if (status === 429 || status >= 500 || status === 404) return true;
 
   const msg = String(e?.message || e || "");
-  if (/invalid api key|unauthorized|forbidden|not found|validation|tool|function/i.test(msg) && status > 0 && status < 500) {
+  if (
+    /invalid api key|unauthorized|forbidden|validation|tool|function/i.test(msg) &&
+    status > 0 &&
+    status < 500 &&
+    status !== 404
+  ) {
     return false;
   }
   if (/aborted|AbortError|timed out|timeout/i.test(msg)) return true;
   if (/fetch failed|network|econnreset|etimedout|econnrefused|socket|UND_ERR/i.test(msg)) return true;
-  if (/Empty (?:KIE|Gemini)|provider error|internal error|bad gateway|service unavailable|rate limit/i.test(msg)) {
+  if (
+    /Empty (?:KIE|Gemini)|provider error|internal error|bad gateway|service unavailable|rate limit|not found/i.test(
+      msg,
+    )
+  ) {
     return true;
   }
-  if (/\b5\d\d\b|\b429\b/i.test(msg)) return true;
-  if (e?.confirmedKieFailure === true && !(status >= 400 && status < 500 && status !== 429)) {
+  if (/\b5\d\d\b|\b429\b|\b404\b/i.test(msg)) return true;
+  if (e?.confirmedKieFailure === true && !(status >= 400 && status < 500 && status !== 429 && status !== 404)) {
     return true;
   }
   return false;
