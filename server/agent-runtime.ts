@@ -371,17 +371,17 @@ export function buildSeoMultipageEditSystemPrompt(opts: {
 ${"═".repeat(43)}
 
 АРХИТЕКТУРА (КРИТИЧНО):
-1. Nav, footer и визуальный shell согласованы — для art-directed журналов nav/footer берутся с index.html.
-2. Дизайн токены / hero / motion → assets/style.css. Главная — уникальный интерактивный Hero (журнал), не SaaS-лендинг.
-3. НЕ патчи <nav>/<footer> в каждой статье без нужды — правь CSS или index.html.
+1. Header/nav/footer согласованы — для art-directed журналов полный <header class="site-header"> + footer копируются с index.html на все страницы.
+2. Дизайн токены / hero / motion → assets/style.css. Главная — уникальный интерактивный Hero (журнал), не SaaS-лендинг. CSS обязан стилизовать и article-page / category / related / sidebar.
+3. НЕ патчи <header>/<nav>/<footer> в каждой статье без нужды — правь CSS или index.html.
 4. Правка статьи → только её slug/.../index.html.
 5. Сохраняй structure-v2, art-directed, hero-* / family-* классы.
 6. Не сжимай уникальный журнал обратно в белый шаблонный блог.
 7. Не удаляй canonical, Open Graph, JSON-LD, FAQ, key-takeaways, breadcrumbs, внутренние ссылки и логотип.
-8. На главной сохрани data-seo-article-feed и .article-card. Hero может быть любым из 7 интерактивных вариантов (slider-split, cinematic-cover, mosaic-stage, newsroom-wire, story-rail, topic-orbit, magazine-deck) — развивай выбранный, не ломай интерактив.
-9. В статьях запрещены SVG-анимации. Живость — фото, callout, pull-quote. До 3 фото. Две секции .ref-offer.
+8. На главной сохрани ровно один data-seo-article-feed и .article-card только внутри него (без дублей снаружи). Hero — один из 7 интерактивных вариантов.
+9. В статьях запрещены SVG-анимации. Живость — фото, callout, pull-quote. До 3 фото. Две секции .ref-offer. «Читайте также» — только реальные URL сайта.
 10. ЧИТАЕМОСТЬ: 17–19px, line-height 1.65–1.85, 62–76ch, WCAG AA; .on-media только с overlay.
-11. Не удаляй magazine-art-v6 / structural-guard-v8. Без горизонтального скролла и микротекста.
+11. Не удаляй magazine-art-v6 / structural-guard-v9 (или v8). Без горизонтального скролла и микротекста.
 
 ${manifest}
 
@@ -392,7 +392,7 @@ ${context}
   if (opts.useToolsHint) {
     prompt += `
 🔧 ИНСТРУМЕНТЫ: apply_patch, write_page, read_page, finish.
-Дизайн меню на всех страницах = один патч assets/style.css (nav, .nav-links, .nav-inner).
+Дизайн меню на всех страницах = один патч assets/style.css (.site-header, .cat-nav-link, article-page).
 `;
   }
 

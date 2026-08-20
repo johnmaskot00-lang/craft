@@ -21,7 +21,10 @@ import {
   applyHeroVariantToTheme,
   buildMagazineDesignPrompt,
   collectSeoArticleBriefs,
+  demoteHeaderBrandH1,
+  ensureRealRelatedArticles,
   ensureSoftMagazineGuardCss,
+  extractHomeShell,
   isArtDirectedSeo,
   parseMagazineDesignFiles,
   patchHomeArticleFeed,
@@ -917,18 +920,18 @@ function buildArticleSidebar(kw: SeoKeyword, cluster: SeoCluster, cfg: SeoConfig
 async function syncSeoShellAcrossPages(storage: IStorage, projectId: number, cfg: SeoConfig): Promise<number> {
   const files = await storage.getProjectFiles(projectId);
   let nav = buildNav(cfg);
+  let header = "";
   let footer = buildFooter(cfg);
   let cls = bodyClass(cfg);
 
   if (isArtDirectedSeo(cfg)) {
     const home = files.find((f) => f.filename === "index.html");
-    const homeNav = home?.code?.match(/<nav[\s\S]*?<\/nav>/i)?.[0];
-    const homeFooter = home?.code?.match(/<footer[\s\S]*?<\/footer>/i)?.[0];
-    const homeBody = home?.code?.match(/<body([^>]*)>/i)?.[1] || "";
-    const homeClass = /class=["']([^"']+)["']/i.exec(homeBody)?.[1];
-    if (homeNav) nav = homeNav;
-    if (homeFooter) footer = homeFooter;
-    if (homeClass) cls = homeClass;
+    const shell = extractHomeShell(home?.code);
+    // Full <header> (brand + nav + CTA) — not bare <nav>, which made article/category menus look broken
+    if (shell.header) header = demoteHeaderBrandH1(shell.header);
+    else if (shell.nav) nav = shell.nav;
+    if (shell.footer) footer = shell.footer;
+    if (shell.bodyClass) cls = shell.bodyClass;
   }
 
   let updated = 0;
@@ -937,11 +940,19 @@ async function syncSeoShellAcrossPages(storage: IStorage, projectId: number, cfg
     // Never overwrite the art-directed homepage shell with itself inconsistently
     if (isArtDirectedSeo(cfg) && f.filename === "index.html") continue;
     let next = f.code;
-    if (/<nav[\s\S]*?<\/nav>/i.test(next)) {
-      next = next.replace(/<nav[\s\S]*?<\/nav>/i, nav);
+    if (header) {
+      if (/<header\b[\s\S]*?<\/header>/i.test(next)) {
+        next = next.replace(/<header\b[\s\S]*?<\/header>/i, header);
+      } else if (/<nav\b[\s\S]*?<\/nav>/i.test(next)) {
+        next = next.replace(/<nav\b[\s\S]*?<\/nav>/i, header);
+      } else {
+        next = next.replace(/<body([^>]*)>/i, `<body$1>\n${header}\n`);
+      }
+    } else if (/<nav\b[\s\S]*?<\/nav>/i.test(next)) {
+      next = next.replace(/<nav\b[\s\S]*?<\/nav>/i, nav);
     }
-    if (/<footer[\s\S]*?<\/footer>/i.test(next)) {
-      next = next.replace(/<footer[\s\S]*?<\/footer>/i, footer);
+    if (/<footer\b[\s\S]*?<\/footer>/i.test(next)) {
+      next = next.replace(/<footer\b[\s\S]*?<\/footer>/i, footer);
     }
     if (!isArtDirectedSeo(cfg)) {
       next = next.replace(/<body[^>]*>/i, `<body class="${cls}">`);
@@ -1187,7 +1198,8 @@ async function refreshArticleSidebars(storage: IStorage, projectId: number, cfg:
     const kw = cluster?.keywords.find(k => k.slug === m[2]);
     if (!cluster || !kw) continue;
     const sidebar = buildArticleSidebar(kw, cluster, cfg);
-    const next = f.code.replace(/<aside class="sidebar">[\s\S]*?<\/aside>/, sidebar);
+    let next = f.code.replace(/<aside class="sidebar">[\s\S]*?<\/aside>/, sidebar);
+    next = ensureRealRelatedArticles(next, kw, cluster, cfg);
     if (next !== f.code) {
       await storage.upsertProjectFile({ projectId, filename: f.filename, code: next });
     }
@@ -1206,8 +1218,14 @@ async function persistUniqueSkin(
   const existing = await storage.getProjectFile(projectId, "assets/style.css");
   const hasAgentCss =
     !!existing?.code &&
-    (existing.code.includes("magazine-art-v6") || existing.code.includes("structural-guard-v8"));
-  if (isArtDirectedSeo(next) && hasAgentCss) {
+    (existing.code.includes("magazine-art-v6") ||
+      existing.code.includes("structural-guard-v8") ||
+      existing.code.includes("structural-guard-v9"));
+  if (isArtDirectedSeo(next) && hasAgentCss && existing?.code) {
+    const guarded = ensureStructuralGuardCss(existing.code, next);
+    if (guarded !== existing.code) {
+      await storage.upsertProjectFile({ projectId, filename: "assets/style.css", code: guarded });
+    }
     return next;
   }
 
@@ -1808,7 +1826,7 @@ function ensureStructuralGuardCss(css: string, cfg?: SeoConfig): string {
   if (cfg && isArtDirectedSeo(cfg)) {
     return ensureSoftMagazineGuardCss(css);
   }
-  if (css.includes("structural-guard-v8") || css.includes("magazine-art-v6")) {
+  if (css.includes("structural-guard-v8") || css.includes("structural-guard-v9") || css.includes("magazine-art-v6")) {
     return ensureSoftMagazineGuardCss(css);
   }
   if (css.includes("structural-guard-v7")) return css;
@@ -2394,8 +2412,9 @@ VISUAL RHYTHM — RICH MAGAZINE LAYOUT WITHOUT SVG (CRITICAL):
 - 5-6 H2 sections; vary paragraph length; use <ul>/<ol> and <table> where helpful.
 - Keep text readable: never put body copy on busy photo backgrounds without a solid overlay block.
 
-INTERNAL LINKS (use naturally in body text):
+INTERNAL LINKS (use naturally in body text as real <a href="..."> — ONLY URLs from this list):
 ${relatedLinks || "(none yet)"}
+Never invent article titles or URLs. Do not add a "Читайте также" block with fake cards — the server injects real related links.
 ${hasReferral ? `
 REFERRAL / TRAFFIC OFFER (CRITICAL — monetization of SEO traffic):
 The site owner configured a partner referral URL. You MUST place TWO copy markers (server wraps them into a beautiful branded section with a shimmer button — do NOT invent your own gradient CTA boxes, do NOT output <div class="cta-block">, do NOT style a plain button):
@@ -2434,14 +2453,8 @@ OUTPUT EXACTLY THIS STRUCTURE (no outer wrappers, no page-level tags):
   <h2>Часто задаваемые вопросы</h2>
   [5 faq-items: <div class="faq-item"><div class="faq-question">Question<span>+</span></div><div class="faq-answer">Answer text</div></div>]
 </div>
-<div class="related-articles">
-  <h2>Читайте также</h2>
-  <div class="related-grid">
-    [3-4 related-card divs using internal links above]
-  </div>
-</div>
 
-Output ONLY the HTML fragment above — no markdown, no explanations, no page-level tags. Keep the literal text {{COVER}} exactly where shown — it will be replaced automatically.`;
+Output ONLY the HTML fragment above — no markdown, no explanations, no page-level tags. Keep the literal text {{COVER}} exactly where shown — it will be replaced automatically. Do NOT invent a related-articles / "Читайте также" section — the server adds real links.`;
 
   let articleContent = "";
   try {
@@ -2484,6 +2497,7 @@ Output ONLY the HTML fragment above — no markdown, no explanations, no page-le
     .replace(/<figure class="article-svg"[\s\S]*?<\/figure>/gi, "")
     .replace(/<svg\b[\s\S]*?<\/svg>/gi, "");
   articleContent = ensureArticleReferralOffers(articleContent, kw, cluster, cfg);
+  articleContent = ensureRealRelatedArticles(articleContent, kw, cluster, cfgAll);
 
   // ── Schema.org + GEO ──
   const schema = JSON.stringify(articleJsonLd(kw, cluster, cfg, articleContent, coverUrl || undefined));
@@ -3367,7 +3381,7 @@ ${brief}
 - Основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст WCAG AA. Текст на фото — .on-media + overlay.
 - Сохраняй data-seo-article-feed и .article-card на главной (сервер обновляет карточки).
 - Статьи: без SVG-анимаций; до 3 фото; две секции .ref-offer. Не превращай в .cta-block.
-- Маркеры magazine-art-v6 / structural-guard-v8 не удаляй. Запрещены горизонтальный скролл и микротекст.
+- Маркеры magazine-art-v6 / structural-guard-v9 не удаляй. Запрещены горизонтальный скролл и микротекст.
 - Для фото — точные URL из вложений. Не выдумывай стоки.
 - Краткий итог после патчей, без огромного HTML в чат.
 - Пользователь смотрит файл «${safeActive}».`;
