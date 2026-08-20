@@ -608,43 +608,6 @@ export default function SeoEditorPage() {
   }, [chatMessages, isChatting, chatStatus]);
 
   /* ── add keywords (optional niche + referral for this pack) ── */
-  const [isSavingOffer, setIsSavingOffer] = useState(false);
-
-  async function handleSaveOffer() {
-    const url = targetUrl.trim();
-    if (url && !/^https?:\/\//i.test(url)) {
-      toast({ title: "Ссылка должна начинаться с http:// или https://", variant: "destructive" });
-      return;
-    }
-    setIsSavingOffer(true);
-    try {
-      const res = await fetch(`/api/seo/${id}/offer`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          targetUrl: url,
-          ctaLabel: ctaLabel.trim() || "Попробовать →",
-          niche: niche.trim() || undefined,
-        }),
-      });
-      if (!res.ok) throw new Error((await res.json()).message || "Ошибка");
-      const d = await res.json();
-      await refetch();
-      if (selectedFile) await loadPreview(selectedFile);
-      toast({
-        title: "Оффер сохранён",
-        description: d.offer?.product
-          ? `«${d.offer.product}» добавлен в рекомендации всех статей. Обновите сайт, чтобы выложить.`
-          : "Ссылка обновлена. Обновите сайт после проверки превью.",
-      });
-    } catch (e: any) {
-      toast({ title: "Ошибка", description: e.message, variant: "destructive" });
-    } finally {
-      setIsSavingOffer(false);
-    }
-  }
-
   async function handleAddKeywords() {
     const keywords = addKwText.split(/[\n,]+/).map(k => k.trim()).filter(Boolean);
     if (!keywords.length) { toast({ title: "Введите ключевые слова", variant: "destructive" }); return; }
@@ -1027,30 +990,6 @@ export default function SeoEditorPage() {
                     <button title="Изменить ключевые слова" onClick={() => { setPhase("setup"); setKeywordsText(cfg.rawKeywords.join("\n")); setNiche(cfg.niche || ""); setTargetUrl(cfg.targetUrl || ""); setCtaLabel(cfg.ctaLabel || "Попробовать →"); }} className="px-2.5 rounded-xl border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-50">
                       <RefreshCw className="w-3.5 h-3.5" />
                     </button>
-                  </div>
-                  <div className="mx-4 mb-2 p-3 rounded-xl border border-indigo-100 bg-indigo-50/60 space-y-2">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-600">Оффер в статьях</div>
-                    <input
-                      value={targetUrl}
-                      onChange={e => setTargetUrl(e.target.value)}
-                      placeholder="https://ваш-продукт.ru"
-                      className="w-full px-2.5 py-1.5 rounded-lg border border-indigo-100 bg-white text-[12px] text-slate-800 outline-none focus:border-indigo-400"
-                    />
-                    <input
-                      value={ctaLabel}
-                      onChange={e => setCtaLabel(e.target.value)}
-                      placeholder="Попробовать →"
-                      className="w-full px-2.5 py-1.5 rounded-lg border border-indigo-100 bg-white text-[12px] text-slate-800 outline-none focus:border-indigo-400"
-                    />
-                    <button
-                      type="button"
-                      disabled={isSavingOffer}
-                      onClick={() => void handleSaveOffer()}
-                      className="w-full py-1.5 rounded-lg text-[11px] font-semibold text-white bg-indigo-500 hover:bg-indigo-600 disabled:opacity-60"
-                    >
-                      {isSavingOffer ? "Сохраняю…" : "Применить ко всем статьям"}
-                    </button>
-                    <p className="text-[10px] text-indigo-700/80 leading-snug">Сервер вставит блоки «Редакция рекомендует» и ссылку на продукт в каждую статью. Затем нажмите «Обновить сайт».</p>
                   </div>
                   <div className="flex-1 overflow-y-auto pb-2">
                     <TreeRow icon={<Globe className="w-3 h-3 text-indigo-500 shrink-0" />} label="Главная" bold active={selectedFile === "index.html"} done={!!files.find(f => f.filename === "index.html")} indent={0} onClick={() => loadPreview("index.html")} />
