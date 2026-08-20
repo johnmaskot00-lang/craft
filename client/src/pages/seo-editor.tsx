@@ -117,6 +117,8 @@ export default function SeoEditorPage() {
   const [isPublishing, setIsPublishing] = useState(false);
   const [analyzeElapsed, setAnalyzeElapsed] = useState(0);
   const analyzeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const genAutoResumeRef = useRef(0);
+  const genActiveRef = useRef(false);
 
   const [targetUrl, setTargetUrl]     = useState("");
   const [ctaLabel, setCtaLabel]       = useState("Попробовать →");
@@ -241,13 +243,18 @@ export default function SeoEditorPage() {
     }
   }
 
-  /* ── generate (SSE) ── */
-  function startGeneration() {
-    if (isGenerating) return;
+  /* ── generate (SSE) — auto-resumes until all articles are done ── */
+  function startGeneration(opts?: { auto?: boolean }) {
+    if (genActiveRef.current) return;
+    if (isGenerating && !opts?.auto) return;
+    genActiveRef.current = true;
     setIsGenerating(true);
     setPhase("generating");
-    setGenLog([]);
-    setGenProgress({ done: 0, total: cfg?.pagesTotal || 0 });
+    if (!opts?.auto) {
+      setGenLog([]);
+      genAutoResumeRef.current = 0;
+    }
+    setGenProgress({ done: cfg?.pagesGenerated || 0, total: cfg?.pagesTotal || 0 });
 
     fetch(`/api/seo/${id}/generate`, {
       method: "POST",
@@ -259,6 +266,10 @@ export default function SeoEditorPage() {
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = "";
+      let sawDone = false;
+      let partial = false;
+      let lastGenerated = cfg?.pagesGenerated || 0;
+      let lastTotal = cfg?.pagesTotal || 0;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -269,30 +280,100 @@ export default function SeoEditorPage() {
           if (!line.startsWith("data: ")) continue;
           try {
             const evt = JSON.parse(line.slice(6));
-            if (evt.type === "start")     setGenProgress(p => ({ ...p, total: evt.total }));
-            if (evt.type === "progress")  setGenLog(l => [...l.slice(-99), `⏳ ${evt.keyword}`]);
+            if (evt.type === "start") {
+              lastTotal = evt.total || lastTotal;
+              setGenProgress(p => ({ ...p, total: evt.total }));
+              if (evt.resumed) setGenLog(l => [...l.slice(-99), "↻ Подключение к текущей генерации…"]);
+            }
+            if (evt.type === "heartbeat") {
+              if (typeof evt.generated === "number") {
+                lastGenerated = evt.generated;
+                lastTotal = evt.total || lastTotal;
+                setGenProgress({ done: evt.generated, total: evt.total || lastTotal });
+              }
+            }
+            if (evt.type === "progress") {
+              setGenLog(l => [...l.slice(-99), `⏳ ${evt.keyword}`]);
+              if (typeof evt.generated === "number") {
+                lastGenerated = evt.generated;
+                lastTotal = evt.total || lastTotal;
+                setGenProgress({ done: evt.generated, total: evt.total || lastTotal });
+              }
+            }
             if (evt.type === "brand")     setGenLog(l => [...l.slice(-99), `${evt.status === "ready" ? "✅" : evt.status === "fallback" ? "↪" : "🎨"} ${evt.label}`]);
             if (evt.type === "page_done") {
               setGenLog(l => [...l.slice(-99), `${evt.status === "done" ? "✅" : "❌"} ${evt.keyword}`]);
+              lastGenerated = evt.generated;
+              lastTotal = evt.total || lastTotal;
               setGenProgress({ done: evt.generated, total: evt.total });
             }
             if (evt.type === "done") {
-              setPhase("done");
+              sawDone = true;
+              partial = !!evt.partial;
+              lastGenerated = evt.generated ?? lastGenerated;
+              lastTotal = evt.total || lastTotal;
+              setGenProgress({ done: lastGenerated, total: lastTotal });
               await refetch();
-              await loadPreview("index.html");
-              if (evt.partial) toast({ title: "Токены закончились", description: "Пополните баланс и нажмите «Продолжить»", variant: "destructive" });
+              if (!partial) {
+                setPhase("done");
+                await loadPreview("index.html");
+              }
+              if (partial) toast({ title: "Токены закончились", description: "Пополните баланс и нажмите «Продолжить»", variant: "destructive" });
             }
             if (evt.type === "error") toast({ title: evt.message, variant: "destructive" });
           } catch {}
         }
       }
-    }).catch(e => {
+
+      const result = await refetch();
+      const latest =
+        result.data?.project?.seoConfig ||
+        (await fetch(`/api/seo/${id}`, { credentials: "include" })
+          .then((r) => r.json())
+          .then((d) => d.project?.seoConfig)
+          .catch(() => null));
+      const pagesGenerated = latest?.pagesGenerated ?? lastGenerated;
+      const pagesTotal = latest?.pagesTotal ?? lastTotal;
+      const status = latest?.status;
+      const incomplete = pagesTotal > 0 && pagesGenerated < pagesTotal;
+      const stillRunning = status === "generating";
+      if (!partial && (incomplete || stillRunning || !sawDone) && genAutoResumeRef.current < 40) {
+        genAutoResumeRef.current += 1;
+        setGenLog((l) => [...l.slice(-99), `↻ Автопродолжение ${genAutoResumeRef.current}… (${pagesGenerated}/${pagesTotal})`]);
+        genActiveRef.current = false;
+        setIsGenerating(false);
+        window.setTimeout(() => startGeneration({ auto: true }), 1500);
+        return;
+      }
+      genAutoResumeRef.current = 0;
+      if (!incomplete) {
+        setPhase("done");
+        await loadPreview("index.html");
+      }
+    }).catch((e) => {
       if (e.name !== "AbortError") toast({ title: "Ошибка генерации", description: e.message, variant: "destructive" });
+      if (genAutoResumeRef.current < 40) {
+        genAutoResumeRef.current += 1;
+        genActiveRef.current = false;
+        setIsGenerating(false);
+        window.setTimeout(() => startGeneration({ auto: true }), 2000);
+        return;
+      }
     }).finally(() => {
+      genActiveRef.current = false;
       setIsGenerating(false);
-      refetch();
+      void refetch();
     });
   }
+
+  // If page reloads while server is still generating — reconnect automatically.
+  useEffect(() => {
+    if (!cfg || isGenerating || genActiveRef.current) return;
+    if (cfg.status === "generating" && (cfg.pagesGenerated || 0) < (cfg.pagesTotal || 0)) {
+      startGeneration({ auto: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfg?.status, cfg?.pagesGenerated, cfg?.pagesTotal]);
 
   /* ── publish ── */
   async function handlePublish() {

@@ -44,6 +44,12 @@ const SEO_ARTICLE_STAGGER_MS = 2000;
 /** Cover image retries if KIE returns empty / error. */
 const SEO_COVER_RETRIES = 3;
 
+/** In-flight SEO generate jobs — survive SSE disconnects so all articles finish. */
+const seoGenerateInFlight = new Map<number, {
+  startedAt: number;
+  total: number;
+}>();
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -2799,43 +2805,99 @@ Respond with ONLY valid JSON, no explanation:
     }
   });
 
-  // POST /api/seo/:id/generate — SSE batch generation
+  // POST /api/seo/:id/generate — SSE batch generation (runs to completion even if the
+  // browser/proxy drops the stream — client can reconnect and watch progress).
   app.post("/api/seo/:id/generate", async (req, res) => {
     const userId = requireAuth(req, res);
     if (!userId) return;
-    const proj = await storage.getProject(parseInt(req.params.id));
+    const projectId = parseInt(req.params.id);
+    const proj = await storage.getProject(projectId);
     if (!proj || proj.userId !== userId) return res.status(404).json({ message: "Not found" });
 
     let cfg = proj.seoConfig as SeoConfig;
     if (!cfg || cfg.clusters.length === 0) return res.status(400).json({ message: "Run analyze first" });
-
-    const releaseGenerate = tryAcquireGenerate();
-    if (!releaseGenerate) {
-      return res.status(503).json({
-        message: "Сервер сейчас обрабатывает много генераций. Подождите 1–2 минуты и повторите.",
-        overloaded: true,
-      });
-    }
 
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
 
+    let clientAlive = true;
+    req.on("close", () => { clientAlive = false; });
+
     const send = (data: object) => {
-      try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
+      if (!clientAlive) return;
+      try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch { clientAlive = false; }
     };
 
-    let aborted = false;
+    // Another request already generating this project — attach as spectator until done.
+    if (seoGenerateInFlight.has(projectId)) {
+      send({ type: "start", total: cfg.pagesTotal, resumed: true });
+      send({
+        type: "progress",
+        keyword: "Генерация уже идёт на сервере — подключаюсь…",
+        status: "generating",
+        generated: cfg.pagesGenerated || 0,
+        total: cfg.pagesTotal,
+      });
+      const poll = setInterval(async () => {
+        try {
+          const fresh = await storage.getProject(projectId);
+          const c = (fresh?.seoConfig || {}) as SeoConfig;
+          const done = c.pagesGenerated || 0;
+          const total = c.pagesTotal || cfg.pagesTotal;
+          send({
+            type: "progress",
+            keyword: seoGenerateInFlight.has(projectId)
+              ? `Генерирую статьи… (${done}/${total})`
+              : "Завершаю…",
+            status: "generating",
+            generated: done,
+            total,
+          });
+          if (!seoGenerateInFlight.has(projectId)) {
+            clearInterval(poll);
+            const partial = done < total;
+            send({ type: "done", generated: done, total, partial });
+            try { res.end(); } catch {}
+          }
+        } catch {
+          /* keep polling */
+        }
+      }, 2500);
+      poll.unref?.();
+      req.on("close", () => clearInterval(poll));
+      return;
+    }
+
+    const releaseGenerate = tryAcquireGenerate();
+    if (!releaseGenerate) {
+      send({ type: "error", message: "Сервер сейчас обрабатывает много генераций. Подождите 1–2 минуты и повторите." });
+      try { res.end(); } catch {}
+      return;
+    }
+
+    seoGenerateInFlight.set(projectId, { startedAt: Date.now(), total: cfg.pagesTotal });
+
     let creditsDepleted = false;
-    req.on("close", () => { aborted = true; });
+    let generated = 0;
+    const heartbeat = setInterval(() => {
+      send({
+        type: "heartbeat",
+        generated,
+        total: cfg.pagesTotal,
+        ts: Date.now(),
+      });
+    }, 8000);
+    heartbeat.unref?.();
 
     try {
     send({ type: "start", total: cfg.pagesTotal });
     send({ type: "progress", keyword: "Подготовка издания", status: "generating" });
-    cfg = await persistUniqueSkin(storage, proj.id, { ...cfg, architectureVersion: 6 }, "fast");
+    cfg = await persistUniqueSkin(storage, proj.id, { ...cfg, architectureVersion: 6, status: "generating" }, "fast");
+    await storage.updateProject(proj.id, { seoConfig: cfg } as any);
 
-    if (cfg.structuralVersion === 2 && !cfg.logoUrl && cfg.logoStatus !== "fallback" && !aborted) {
+    if (cfg.structuralVersion === 2 && !cfg.logoUrl && cfg.logoStatus !== "fallback") {
       send({ type: "brand", status: "generating", label: "Создаю логотип 1:1" });
       const logoIkey = `seo-logo-${proj.id}`;
       const logoCharge = await storage.deductCredits(userId, SEO_LOGO_COST, "image", logoIkey);
@@ -2862,7 +2924,6 @@ Respond with ONLY valid JSON, no explanation:
       }
     }
 
-    let generated = 0;
     let articleIdx = 0;
     const allClusters = cfg.clusters;
     const jobs: Array<{ kw: SeoKeyword; cluster: SeoCluster; idx: number; filename: string }> = [];
@@ -2878,7 +2939,12 @@ Respond with ONLY valid JSON, no explanation:
     const persistProgress = () => {
       persistChain = persistChain
         .then(async () => {
-          const progressCfg: SeoConfig = { ...cfg, clusters: allClusters, pagesGenerated: generated };
+          const progressCfg: SeoConfig = {
+            ...cfg,
+            clusters: allClusters,
+            pagesGenerated: generated,
+            status: "generating",
+          };
           await storage.updateProject(proj.id, { seoConfig: progressCfg } as any);
         })
         .catch((e) => console.warn("[SEO] persist progress failed:", e?.message || e));
@@ -2888,9 +2954,10 @@ Respond with ONLY valid JSON, no explanation:
     await runStaggeredPool(jobs, {
       concurrency: SEO_ARTICLE_CONCURRENCY,
       staggerMs: SEO_ARTICLE_STAGGER_MS,
-      shouldStop: () => aborted || creditsDepleted,
+      // Never stop because the browser disconnected — only when credits run out.
+      shouldStop: () => creditsDepleted,
       worker: async ({ kw, cluster, idx, filename }) => {
-        if (aborted || creditsDepleted) return;
+        if (creditsDepleted) return;
         send({ type: "progress", keyword: kw.keyword, status: "generating", generated, total: cfg.pagesTotal });
 
         const ikey = `seo-article-${proj.id}-${kw.id}`;
@@ -2902,11 +2969,9 @@ Respond with ONLY valid JSON, no explanation:
         }
 
         const coverPrompt = `Premium editorial magazine cover image for the article "${kw.title}" about ${cluster.name}, ${cfg.niche}. Cinematic, photorealistic, high-end, 16:9, no text, no watermark.`;
-        const coverPromise = aborted ? Promise.resolve("") : generateCoverWithRetry(coverPrompt);
-
         let cover = "";
-        try { cover = await coverPromise; } catch { cover = ""; }
-        if (!cover && !aborted) {
+        try { cover = await generateCoverWithRetry(coverPrompt); } catch { cover = ""; }
+        if (!cover) {
           send({ type: "progress", keyword: `${kw.keyword} — повтор обложки`, status: "generating", generated, total: cfg.pagesTotal });
           try {
             const raw = (await withImageSlot(() => generateImage(coverPrompt), 130_000)) || "";
@@ -2916,7 +2981,6 @@ Respond with ONLY valid JSON, no explanation:
 
         let html = "";
         for (let attempt = 1; attempt <= 2; attempt++) {
-          if (aborted) break;
           try {
             html = await generateArticleHtml(kw, cluster, cfg, allClusters, cover, idx);
             if (html) break;
@@ -2951,12 +3015,10 @@ Respond with ONLY valid JSON, no explanation:
 
     await persistChain.catch(() => {});
 
-    if (!aborted) {
-      await repairArticleCovers(storage, proj.id, { ...cfg, clusters: allClusters });
-    }
+    await repairArticleCovers(storage, proj.id, { ...cfg, clusters: allClusters });
 
     // Articles keep SEO writing quality; homepage/CSS are invented by the magazine art-director agent.
-    if (!aborted) {
+    {
       const doneStatus = creditsDepleted ? "idle" : "done";
       let finalCfg: SeoConfig = {
         ...cfg,
@@ -2984,8 +3046,10 @@ Respond with ONLY valid JSON, no explanation:
       }
     }
 
-    res.end();
+    try { res.end(); } catch {}
     } finally {
+      clearInterval(heartbeat);
+      seoGenerateInFlight.delete(projectId);
       releaseGenerate();
     }
   });
