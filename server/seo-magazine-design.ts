@@ -84,9 +84,8 @@ PUBLICATION
 - Niche: ${JSON.stringify(cfg.niche)}
 - Description: ${JSON.stringify(cfg.siteDescription)}
 - Logo URL (optional <img>): ${logoUrl ? JSON.stringify(logoUrl) : "(text mark OK)"}
-- OWNER OFFER URL (header CTA + every article recommends this — never invent another): ${cfg.targetUrl ? JSON.stringify(cfg.targetUrl) : "(none — omit partner CTA)"}
-- CTA label: ${JSON.stringify(cfg.ctaLabel || "Подробнее")}
-- Niche / product to promote in chrome: ${JSON.stringify(cfg.niche || "")}
+- Header CTA button only (optional): URL ${cfg.targetUrl ? JSON.stringify(cfg.targetUrl) : "(none)"} · label ${JSON.stringify(cfg.ctaLabel || "Подробнее")}
+- DO NOT stuff the partner brand into hero headline, badges, deck, category names, or footer essays — the magazine brand is ${JSON.stringify(cfg.siteTitle)}. Native product recommendations live in ARTICLES (server/writer), not as homepage spam.
 
 ASSIGNED HERO ARCHETYPE (build THIS interactive hero — invent the visual language):
 ${heroVariantDescription(heroVariant)}

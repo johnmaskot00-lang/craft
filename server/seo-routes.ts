@@ -342,35 +342,30 @@ const LAYOUT_FAMILIES: SeoLayoutFamily[] = ["editorial", "magazine", "knowledge"
 const RADII = ["2px", "6px", "10px", "14px", "20px", "28px"];
 
 
+/** Soft fallback when the writer omitted REF markers — never paste the article title into a template. */
 function defaultReferralCopy(
   kw: SeoKeyword,
   niche: string,
   slot: "top" | "bottom",
   productName?: string,
 ): { title: string; desc: string } {
-  const topic = (kw.title || kw.keyword || niche || "этой теме").trim();
-  const nicheLabel = (niche || "вашей нише").trim();
   const brand = (productName || "сервис").trim() || "сервис";
-  const topicLower = `${topic} ${nicheLabel}`.toLowerCase();
-  let angle = `инструменты под «${topic}»`;
-  if (/видео|veo|kling|avatar|авата|motion|lip.?sync/.test(topicLower)) {
-    angle = "генерацию видео и аватаров без лимитов";
-  } else if (/голос|voice|eleven|suno|аудио|звук|tts/.test(topicLower)) {
-    angle = "синтез голоса и аудио в одном месте";
-  } else if (/текст|llm|chatgpt|claude|gpt|копирайт/.test(topicLower)) {
-    angle = "текстовые модели и рабочие сценарии";
-  } else if (/изображ|image|арт|график|фото|e-?com|карточ/.test(topicLower)) {
-    angle = "генерацию изображений и коммерческий визуал";
-  }
+  const nicheLabel = (niche || "").trim();
+  const essence = nicheLabel
+    ? nicheLabel.replace(new RegExp(brand, "ig"), "").replace(/^[·\-–—,\s]+|[·\-–—,\s]+$/g, "").trim() || nicheLabel
+    : "AI-инструменты и рабочие сценарии";
+  const keyword = (kw.keyword || "").trim();
   if (slot === "top") {
     return {
-      title: `${angle.charAt(0).toUpperCase()}${angle.slice(1)} — на ${brand}`,
-      desc: `Перейдите на платформу ${brand} для доступа к ведущим моделям по теме «${topic}» без ограничений и без ухода к конкурентам.`,
+      title: `${brand}: ${essence.slice(0, 72)}`,
+      desc: keyword
+        ? `Если разбираете «${keyword.slice(0, 60)}» на практике — в ${brand} как раз собраны модели и сценарии под эту задачу, без сборки пайплайна с нуля.`
+        : `В ${brand} собраны модели и сценарии под «${essence.slice(0, 80)}» — удобный следующий шаг после теории.`,
     };
   }
   return {
-    title: `Продолжите на ${brand}`,
-    desc: `Редакция рекомендует ${brand} как следующий шаг после материала о «${topic}»: одна платформа под нишу «${nicheLabel}».`,
+    title: `Закрепить практику в ${brand}`,
+    desc: `Короткий путь: открыть ${brand} и сразу взять готовый сценарий под вашу задачу — в духе ниши «${essence.slice(0, 70)}».`,
   };
 }
 
@@ -417,7 +412,8 @@ function ensureInlineOfferMention(
   }
   if (/offer-inline-tip/i.test(html)) return html;
   const product = seoOfferProductName(offer.niche, offer.targetUrl);
-  const tip = `<p class="offer-inline-tip">Практика по теме материала: редакция рекомендует <a href="${url}" target="_blank" rel="noopener sponsored">${esc(product)}</a> — платформу под нишу «${esc(offer.niche || product)}».</p>`;
+  const nicheBit = (offer.niche || product).slice(0, 80);
+  const tip = `<p class="offer-inline-tip">На практике удобнее не собирать стек вручную: <a href="${url}" target="_blank" rel="noopener sponsored">${esc(product)}</a>${nicheBit && nicheBit.toLowerCase() !== product.toLowerCase() ? ` (${esc(nicheBit)})` : ""} даёт готовый доступ к нужным моделям и сценариям по теме материала.</p>`;
   if (/<p class="lead"[\s\S]*?<\/p>/i.test(html)) {
     return html.replace(/(<p class="lead"[\s\S]*?<\/p>)/i, `$1\n${tip}`);
   }
@@ -445,7 +441,7 @@ function buildReferralOfferHtml(opts: {
   <div class="ref-offer-glow" aria-hidden="true"></div>
   <div class="ref-offer-inner">
     <div class="ref-offer-copy">
-      <span class="ref-offer-eyebrow">// Рекомендация редакции</span>
+      <span class="ref-offer-eyebrow">Редакция советует</span>
       <strong class="ref-offer-title">${title}</strong>
       <p class="ref-offer-desc">${desc}</p>
     </div>
@@ -468,7 +464,7 @@ function parseRefCopyMarker(html: string, slot: "top" | "bottom"): { title: stri
   return { title: parts[0].slice(0, 120), desc: (parts[1] || parts[0]).slice(0, 240) };
 }
 
-/** Guarantee two native referral sections near start + end of every article. */
+/** Guarantee native in-article offer mentions; branded boxes only when writer supplied REF markers. */
 function ensureArticleReferralOffers(
   html: string,
   kw: SeoKeyword,
@@ -483,11 +479,16 @@ function ensureArticleReferralOffers(
   const nicheForCopy = offer.niche || cfg.niche || cluster.name;
   const ctaLabel = /[a-zа-я0-9]/i.test(offer.ctaLabel) && offer.ctaLabel.length > 2
     ? (/\b(попробовать|открыть|перейти)\b/i.test(offer.ctaLabel) && !new RegExp(product, "i").test(offer.ctaLabel)
-      ? `${offer.ctaLabel.replace(/→\s*$/, "").trim()} ${product} →`
+      ? `${offer.ctaLabel.replace(/→\s*$/, "").trim()} ${product}`
       : offer.ctaLabel)
-    : `Попробовать ${product} →`;
-  const topCopy = parseRefCopyMarker(html, "top") || defaultReferralCopy(kw, nicheForCopy, "top", product);
-  const bottomCopy = parseRefCopyMarker(html, "bottom") || defaultReferralCopy(kw, nicheForCopy, "bottom", product);
+    : `Открыть ${product}`;
+
+  const topFromAi = parseRefCopyMarker(html, "top");
+  const bottomFromAi = parseRefCopyMarker(html, "bottom");
+  // Branded .ref-offer boxes ONLY when the article writer supplied REF markers (native copy).
+  // No server title-stuffing templates. Monetization fallback = in-body native link.
+  const topCopy = topFromAi;
+  const bottomCopy = bottomFromAi;
 
   let out = html
     .replace(/\{\{REF_TOP:[\s\S]*?\}\}/gi, "")
@@ -496,52 +497,52 @@ function ensureArticleReferralOffers(
     .replace(/<div class="cta-block"[\s\S]*?<\/div>/gi, "")
     .replace(/<p class="offer-inline-tip"[\s\S]*?<\/p>/gi, "");
 
-  const topHtml = buildReferralOfferHtml({
-    url: offer.targetUrl,
-    label: ctaLabel,
-    title: topCopy.title,
-    desc: topCopy.desc,
-    slot: "top",
-    niche: nicheForCopy,
-  });
-  const bottomHtml = buildReferralOfferHtml({
-    url: offer.targetUrl,
-    label: ctaLabel,
-    title: bottomCopy.title,
-    desc: bottomCopy.desc,
-    slot: "bottom",
-    niche: nicheForCopy,
-  });
-
-  const leadRe = /(<p class="lead"[\s\S]*?<\/p>)/i;
-  // Prefer native offer at the very start of the article (after cover), then after lead.
-  if (/<img class="hero-article-img"[\s\S]*?>/i.test(out) || /<div class="hero-cover-fallback"[\s\S]*?<\/div>/i.test(out)) {
-    out = out.replace(
-      /(<img class="hero-article-img"[\s\S]*?>|<div class="hero-cover-fallback"[\s\S]*?<\/div>)/i,
-      `$1\n${topHtml}`,
-    );
-  } else if (leadRe.test(out)) {
-    out = out.replace(leadRe, `$1\n${topHtml}`);
-  } else if (/<div class="key-takeaways"[\s\S]*?<\/div>/i.test(out)) {
-    out = out.replace(/(<div class="key-takeaways"[\s\S]*?<\/div>)/i, `${topHtml}\n$1`);
-  } else if (/<div class="article-body"[^>]*>/i.test(out)) {
-    out = out.replace(/(<div class="article-body"[^>]*>)/i, `$1\n${topHtml}`);
-  } else {
-    out = `${topHtml}\n${out}`;
+  if (topCopy) {
+    const topHtml = buildReferralOfferHtml({
+      url: offer.targetUrl,
+      label: ctaLabel,
+      title: topCopy.title,
+      desc: topCopy.desc,
+      slot: "top",
+      niche: nicheForCopy,
+    });
+    if (/<img class="hero-article-img"[\s\S]*?>/i.test(out) || /<div class="hero-cover-fallback"[\s\S]*?<\/div>/i.test(out)) {
+      out = out.replace(
+        /(<img class="hero-article-img"[\s\S]*?>|<div class="hero-cover-fallback"[\s\S]*?<\/div>)/i,
+        `$1\n${topHtml}`,
+      );
+    } else if (/<div class="key-takeaways"[\s\S]*?<\/div>/i.test(out)) {
+      out = out.replace(/(<div class="key-takeaways"[\s\S]*?<\/div>)/i, `$1\n${topHtml}`);
+    } else if (/<div class="article-body"[^>]*>/i.test(out)) {
+      out = out.replace(/(<div class="article-body"[^>]*>)/i, `$1\n${topHtml}`);
+    } else {
+      out = `${topHtml}\n${out}`;
+    }
   }
 
-  if (/<div class="author-box"/i.test(out)) {
-    out = out.replace(/<div class="author-box"/i, `${bottomHtml}\n<div class="author-box"`);
-  } else if (/<div class="faq-section"/i.test(out)) {
-    out = out.replace(/<div class="faq-section"/i, `${bottomHtml}\n<div class="faq-section"`);
-  } else {
-    out = `${out}\n${bottomHtml}`;
+  if (bottomCopy) {
+    const bottomHtml = buildReferralOfferHtml({
+      url: offer.targetUrl,
+      label: ctaLabel,
+      title: bottomCopy.title,
+      desc: bottomCopy.desc,
+      slot: "bottom",
+      niche: nicheForCopy,
+    });
+    if (/<div class="author-box"/i.test(out)) {
+      out = out.replace(/<div class="author-box"/i, `${bottomHtml}\n<div class="author-box"`);
+    } else if (/<div class="faq-section"/i.test(out)) {
+      out = out.replace(/<div class="faq-section"/i, `${bottomHtml}\n<div class="faq-section"`);
+    } else {
+      out = `${out}\n${bottomHtml}`;
+    }
   }
 
   out = out.replace(
     /(<aside class="ref-offer[\s\S]*?<a href=")[^"]+(" class="ref-offer-btn")/gi,
     `$1${url}$2`,
   );
+  // Primary monetization path: native in-body link that explains the offer essence.
   out = ensureInlineOfferMention(out, offer);
   return out;
 }
@@ -2511,11 +2512,12 @@ PUBLICATION DESIGN BRIEF:
 ${(cfg.theme?.designBrief || `${cfg.theme?.name || ""} · ${cfg.theme?.headingFont || ""} / ${cfg.theme?.bodyFont || ""}`).slice(0, 900)}
 Write as this magazine's staff writer — tone and typography rhythm should match the brief, not a generic blog.
 ARTICLE NICHE / PRODUCT: "${offerNiche}"
-${safeUrl ? `OWNER OFFER (monetization — MANDATORY):
-- Product brand: "${productName}"
-- Referral URL: ${safeUrl}
-- CTA button text: "${offer.ctaLabel}"
-Promote ONLY this product/platform. Do not substitute Midjourney/Adobe Stock/etc. as the primary place to "try or buy" — those may be mentioned as market context, but the reader’s practical next step is always "${productName}".` : ""}
+${safeUrl ? `OWNER OFFER (in-article only — do NOT turn the whole magazine into an ad):
+- Product: "${productName}"
+- What it is (essence): "${offerNiche || productName}"
+- URL: ${safeUrl}
+- CTA label: "${offer.ctaLabel}"
+Explain the VALUE of this offer inside the article prose — what the reader gets (marketplace / models / prompts / workflows). Do not spam the brand on every paragraph.` : ""}
 
 ${contentTypeBlock}
 
@@ -2557,20 +2559,18 @@ INTERNAL LINKS (use naturally in body text as real <a href="..."> — ONLY URLs 
 ${relatedLinks || "(none yet)"}
 Never invent article titles or URLs. Do not add a "Читайте также" block with fake cards — the server injects real related links.
 ${hasReferral ? `
-NATIVE PRODUCT RECOMMENDATION (CRITICAL — adapt to THIS article’s keyword):
-The site owner’s platform is "${productName}" (${safeUrl}), niche "${offerNiche}".
-1) In the ARTICLE BODY, weave 2–3 natural editorial tips that recommend "${productName}" as the practical next step for readers of THIS specific topic (adapt angle to the keyword: video → generate on ${productName}; voice → synthesize on ${productName}; images → create/sell on ${productName}).
-2) At least TWO of those body mentions MUST be real HTML links:
+NATIVE PRODUCT RECOMMENDATION (CRITICAL — only inside this article, not as spam chrome):
+Owner platform: "${productName}" (${safeUrl}). Essence / niche: "${offerNiche}".
+1) PRIMARY: In the ARTICLE BODY weave 2–3 natural staff tips that explain WHAT "${productName}" is and WHY it helps THIS keyword (e.g. marketplace of ready prompts/models, one place to run the workflow you just described). Different wording each time.
+2) At least TWO body mentions MUST be real links:
    <a href="${safeUrl}" target="_blank" rel="noopener sponsored">${productName}</a>
-3) Also place TWO copy markers (server wraps them into branded .ref-offer sections with CTA "${offer.ctaLabel}" — do NOT invent <div class="cta-block">):
-   a) RIGHT AFTER {{COVER}} (before key-takeaways):
-      {{REF_TOP:8-14 word native staff tip naming ${productName} for this article|||One concrete sentence: what the reader gets on ${productName}, tied to "${kw.keyword}"}}
-   b) Right before the author-box:
-      {{REF_BOTTOM:Closing staff nudge naming ${productName} (different wording)|||One sentence recommendation, not spam}}
+3) OPTIONAL soft boxes — only if you can write NON-TEMPLATE copy that reveals offer essence (never paste the article H1 into the tip):
+   {{REF_TOP:benefit headline about ${productName} / ${offerNiche}|||1–2 sentences: what reader unlocks on ${productName} for this topic}}
+   {{REF_BOTTOM:different closing tip about using ${productName}|||1 sentence, practical}}
 FORBIDDEN:
-- Do NOT add CTA / «попробовать» / «купить» / «перейти» links to competitors (Midjourney, Kling, Runway, ElevenLabs, Suno, ChatGPT, Adobe Stock, etc.).
-- Named tools may appear as market context only — the ONLY sponsored/action link is ${safeUrl} (${productName}).
-Rules: same language as the article; never change the referral URL; never invent another primary product than "${productName}".
+- Do not write «Инструменты под «{title статьи}»» or «без ухода к конкурентам» — that is spam template.
+- Do not add CTA links to Midjourney / Kling / Runway / ElevenLabs / Suno / ChatGPT / Adobe Stock etc.
+- Named tools OK as market context; the ONLY sponsored/action URL is ${safeUrl}.
 ` : ""}
 
 OUTPUT EXACTLY THIS STRUCTURE (no outer wrappers, no page-level tags):
@@ -3581,13 +3581,14 @@ Respond ONLY with valid JSON (no markdown):
         ? seoOfferProductName(offerCfg.niche || "", offerCfg.targetUrl || "")
         : "";
       const offerBlock = offerUrl
-        ? `МОНЕТИЗАЦИЯ / ОФФЕР ВЛАДЕЛЬЦА (КРИТИЧНО — ты ОБЯЗАН это знать и использовать):
-- Продукт: «${offerProduct}»
-- Ниша: ${offerCfg.niche || "—"}
-- Ссылка (не меняй): ${offerUrl}
-- Текст кнопки: ${offerCfg.ctaLabel || "Попробовать →"}
-В КАЖДОЙ статье: две секции .ref-offer с этой ссылкой + нативные рекомендации «${offerProduct}» в тексте (адаптируй угол под тему статьи). Не подменяй чужими маркетплейсами/сервисами. Если оффера нет в статье — добавь.`
-        : `МОНЕТИЗАЦИЯ: ссылка оффера не задана в настройках. Если пользователь присылает URL продукта — сохрани его в CTA шапки и в .ref-offer всех статей.`;
+        ? `ОФФЕР ВЛАДЕЛЬЦА (только точечно):
+- Продукт: «${offerProduct}» · ниша: ${offerCfg.niche || "—"}
+- Ссылка: ${offerUrl} · кнопка шапки: ${offerCfg.ctaLabel || "Попробовать →"}
+Где использовать:
+- Шапка: максимум одна CTA-кнопка с этой ссылкой.
+- Статьи: нативные абзацы + ссылки, которые раскрывают СУТЬ оффера (что это за платформа и зачем она читателю темы статьи). Не лепи бренд в hero/бейджи/подзаголовки главной.
+- Не превращай весь сайт в рекламу «${offerProduct}». Не подменяй конкурентами.`
+        : `Оффер не задан. Не выдумывай чужие партнёрские ссылки.`;
 
       const baseSystem = `Ты — арт-директор премиального цифрового веб-журнала Craft AI («SEO-машина»). Не шаблонный верстальщик.
 Издание: «${cfg.siteTitle || proj.title}». Ниша: ${cfg.niche || "—"}.
@@ -3612,7 +3613,7 @@ ${offerBlock}
 - Если правишь статью — сохрани «Короткий ответ» (key-takeaways) и FAQ.
 - Основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст WCAG AA. Текст на фото — .on-media + overlay.
 - Сохраняй data-seo-article-feed и .article-card на главной (сервер обновляет карточки).
-- Статьи: без SVG-анимаций; до 3 фото; две секции .ref-offer с оффером владельца. Не превращай в .cta-block.
+- Статьи: без SVG-анимаций; до 3 фото; нативные ссылки на оффер владельца в тексте статьи (раскрывай суть продукта). Не засоряй главную оффером. Не превращай в .cta-block.
 - Маркеры magazine-art-v6 / structural-guard-v11 не удаляй. Запрещены горизонтальный скролл и микротекст.
 - Для фото — точные URL из вложений. Не выдумывай стоки.
 - Краткий итог после патчей, без огромного HTML в чат.
