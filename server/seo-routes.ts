@@ -27,6 +27,7 @@ import {
   extractHomeShell,
   homeFeedNeedsRepair,
   isArtDirectedSeo,
+  magazineDesignQualityIssues,
   parseMagazineDesignFiles,
   patchHomeArticleFeed,
   pickHeroVariant,
@@ -1206,25 +1207,25 @@ async function designSeoMagazineSite(
     console.warn("[SEO] taste pack for magazine design skipped:", e?.message || e);
   }
 
-  const prompt = buildMagazineDesignPrompt({
+  const promptBase = {
     cfg,
     heroVariant,
     articles,
     logoUrl: cfg.logoUrl,
     tasteBrief: tasteBrief || undefined,
-  });
+  };
 
-  const runDesignOnce = async (): Promise<{ css?: string; html?: string }> => {
+  const runDesignOnce = async (critique?: string): Promise<{ css?: string; html?: string }> => {
     const raw = await kieSync(
       [
         {
           role: "system",
           content:
-            "You are a world-class digital magazine art director. Invent a UNIQUE masthead/menu/visual system for this niche — never a shared SEO template. Output only the two FILE blocks requested. No preamble.",
+            "You are a world-class digital magazine art director. Invent a UNIQUE premium masthead/menu/hero/visual system for this niche — never a shared SEO template. Beauty first. Output only the two FILE blocks requested. No preamble.",
         },
-        { role: "user", content: prompt },
+        { role: "user", content: buildMagazineDesignPrompt({ ...promptBase, critique }) },
       ],
-      180000,
+      210000,
     );
     return parseMagazineDesignFiles(raw);
   };
@@ -1232,9 +1233,14 @@ async function designSeoMagazineSite(
   let parsed: { css?: string; html?: string } = {};
   try {
     parsed = await runDesignOnce();
-    if (!parsed.css || !parsed.html || parsed.html.length < 400 || parsed.css.length < 200) {
-      onStatus?.("Арт-директор: повторная попытка уникального дизайна…");
-      parsed = await runDesignOnce();
+    let issues = magazineDesignQualityIssues(parsed.css || "", parsed.html || "", articles.length);
+    if (issues.length) {
+      onStatus?.("Арт-директор: усиливаю уникальность дизайна…");
+      parsed = await runDesignOnce(issues.join("\n"));
+      issues = magazineDesignQualityIssues(parsed.css || "", parsed.html || "", articles.length);
+      if (issues.length) {
+        console.warn("[SEO] magazine design still weak after retry:", issues.join("; "));
+      }
     }
   } catch (err: any) {
     console.warn("[SEO] magazine design agent failed:", err?.message || err);
@@ -3243,6 +3249,44 @@ Respond with ONLY valid JSON, no explanation:
       clearInterval(heartbeat);
       seoGenerateInFlight.delete(projectId);
       releaseGenerate();
+    }
+  });
+
+  // POST /api/seo/:id/redesign-home — re-run magazine art director (keeps articles).
+  app.post("/api/seo/:id/redesign-home", async (req, res) => {
+    const userId = requireAuth(req, res);
+    if (!userId) return;
+    const projectId = parseInt(req.params.id);
+    const proj = await storage.getProject(projectId);
+    if (!proj || proj.userId !== userId) return res.status(404).json({ message: "Not found" });
+
+    const cfg = proj.seoConfig as SeoConfig;
+    if (!cfg?.clusters?.length) return res.status(400).json({ message: "Run analyze first" });
+    const articles = collectSeoArticleBriefs(cfg);
+    if (articles.length === 0) return res.status(400).json({ message: "Generate articles first" });
+    if (seoGenerateInFlight.has(projectId)) {
+      return res.status(409).json({ message: "Генерация уже идёт — дождитесь завершения" });
+    }
+
+    seoGenerateInFlight.set(projectId, { startedAt: Date.now(), total: cfg.pagesTotal || articles.length });
+    try {
+      let next = await designSeoMagazineSite(storage, proj.id, { ...cfg, architectureVersion: 6 }, undefined);
+      await finalizeSeoSite(storage, proj.id, next);
+      await persistGeoSurfaces(storage, proj.id, next, projectOrigin(proj));
+      const homeFile = await storage.getProjectFile(proj.id, "index.html");
+      await storage.updateProject(proj.id, { seoConfig: next, generatedCode: homeFile?.code || "" } as any);
+      const files = await storage.getProjectFiles(proj.id);
+      return res.json({
+        ok: true,
+        seoConfig: next,
+        files: files.map((f) => ({ filename: f.filename, size: f.code?.length || 0 })),
+        generatedCode: homeFile?.code || "",
+      });
+    } catch (e: any) {
+      console.warn("[SEO] redesign-home failed:", e?.message || e);
+      return res.status(500).json({ message: e?.message || "Redesign failed" });
+    } finally {
+      seoGenerateInFlight.delete(projectId);
     }
   });
 

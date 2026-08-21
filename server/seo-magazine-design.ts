@@ -58,8 +58,9 @@ export function buildMagazineDesignPrompt(opts: {
   articles: SeoArticleBrief[];
   logoUrl?: string;
   tasteBrief?: string;
+  critique?: string;
 }): string {
-  const { cfg, heroVariant, articles, logoUrl, tasteBrief } = opts;
+  const { cfg, heroVariant, articles, logoUrl, tasteBrief, critique } = opts;
   const cats = cfg.clusters.map((c) => ({
     name: c.name,
     slug: c.slug,
@@ -67,84 +68,100 @@ export function buildMagazineDesignPrompt(opts: {
     description: c.description,
     count: c.keywords.filter((k) => k.status === "done").length,
   }));
-  const feedPreview = articles.slice(0, 16);
+  const feedPreview = articles.slice(0, 12);
 
-  return `You are a principal UI/UX art director for a premium digital WEB MAGAZINE (Russian language UI).
-Create a COMPLETE unique homepage + stylesheet — the same ownership model as a custom multipage site:
-YOU invent the menu, fonts, colors, density and chrome. The server must NOT look like a shared template.
+  return `You are a world-class digital magazine art director (Russian UI).
+Build ONE complete, breathtakingly original homepage + stylesheet — the same bar as Craft multipage «по описанию».
+Beauty and uniqueness come FIRST. Technical contracts are short and at the end.
 
-CRITICAL UNIQUENESS (like Craft multipage «по описанию»):
-- Invent a DISTINCT visual system for THIS niche only — custom masthead/menu treatment, not a generic sticky dark bar with cyan pills.
-- Forbidden sameness: identical glass sticky header, identical 3-column dark cards, identical cyan round CTA — if it could belong to another SEO site after swapping the logo, redesign it.
-- Menu may be: editorial masthead, underline tabs, numbered index, side rail, stacked brand+links, oversized type nav — YOUR choice matching the niche.
-- Typography must be expressive Cyrillic Google Fonts pair unique to this brief (avoid Inter/Roboto/Arial; avoid repeating Onest+same cyan every time).
+════════════════════════════════════
+1) CREATIVE NORTH STAR (non-negotiable)
+════════════════════════════════════
+- Invent a visual system that could ONLY belong to THIS niche after removing the logo.
+- Custom masthead/menu (editorial, numbered, side rail, oversized type, underline tabs — YOUR call). Forbidden: generic sticky dark glass bar + cyan pills + identical dark cards.
+- Expressive Cyrillic Google Fonts pair unique to this brief (never Inter/Roboto/Arial/Onest+cyan default).
+- Rich atmosphere: living backgrounds, intentional motion, magazine photography hierarchy — still WCAG-readable.
+- Interactive Hero is the star (${heroVariant}): ${heroVariantDescription(heroVariant)}
+- Brand lockup = magazine title ${JSON.stringify(cfg.siteTitle)} + short editorial deck from niche — NOT a partner marketplace pitch.
+- Optional header CTA only: ${cfg.targetUrl ? JSON.stringify(cfg.targetUrl) : "(none)"} · ${JSON.stringify(cfg.ctaLabel || "Подробнее")}
+- Do NOT put partner/offer brand names into hero badges, H1, deck, category names, or footer essays. Offers live inside articles later.
 
 PUBLICATION
-- Brand / H1: ${JSON.stringify(cfg.siteTitle)}
+- Title: ${JSON.stringify(cfg.siteTitle)}
 - Niche: ${JSON.stringify(cfg.niche)}
 - Description: ${JSON.stringify(cfg.siteDescription)}
-- Logo URL (optional <img>): ${logoUrl ? JSON.stringify(logoUrl) : "(text mark OK)"}
-- Header CTA button only (optional): URL ${cfg.targetUrl ? JSON.stringify(cfg.targetUrl) : "(none)"} · label ${JSON.stringify(cfg.ctaLabel || "Подробнее")}
-- DO NOT stuff the partner brand into hero headline, badges, deck, category names, or footer essays — the magazine brand is ${JSON.stringify(cfg.siteTitle)}. Native product recommendations live in ARTICLES (server/writer), not as homepage spam.
+- Logo: ${logoUrl ? JSON.stringify(logoUrl) : "(text mark OK)"}
 
-ASSIGNED HERO ARCHETYPE (build THIS interactive hero — invent the visual language):
-${heroVariantDescription(heroVariant)}
+ASSIGNED HERO ONLY: "${heroVariant}" (do not mix other archetypes).
 
-OTHER HERO ARCHETYPES (do NOT copy them; your site uses only "${heroVariant}"):
-${SEO_HERO_VARIANTS.map((v, i) => `${i + 1}. ${v}`).join("\n")}
+${critique ? `PREVIOUS ATTEMPT REJECTED — fix this:\n${critique}\n` : ""}
+${tasteBrief ? `TASTE REFERENCES (principles only, never copy layouts):\n${tasteBrief.slice(0, 10000)}\n` : ""}
 
-${tasteBrief ? `TASTE / DESIGN REFERENCES (absorb principles, do NOT copy layouts verbatim):\n${tasteBrief.slice(0, 14000)}\n` : ""}
-
-REAL ARTICLES (sample for hero + first feed page — server injects the full paginated feed):
+REAL ARTICLES (use in hero + sample feed cards; server will refresh the full feed):
 ${JSON.stringify(feedPreview, null, 2)}
 
 CATEGORIES:
 ${JSON.stringify(cats, null, 2)}
 
-CREATIVE MANDATE
-1. Invent typography, palette, density, motion for THIS niche. Living backgrounds OK — keep text WCAG-readable.
-2. Quality bar: best digital magazines, ORIGINAL for this niche.
-3. Interactive Hero is the star. Brand name + short description MUST appear in/near the hero.
-4. Below hero: magazine-grade topics + article feed (not a dump of plain boxes).
-5. Article feed contract (CRITICAL — server refreshes + paginates):
-   - Exactly ONE wrapper: <div data-seo-article-feed data-page-size="12" class="articles-grid">...</div>
-   - Prefer a plain <div> (not section/main) for data-seo-article-feed so the server can refresh cards reliably
-   - Put article-cards ONLY inside that wrapper — never duplicate cards outside it
-   - COMPACT GRID ONLY: 4 equal cards per row (photo on top + title below). NO full-bleed mega-cards, NO featured span-8/12, NO single huge cover card in the feed.
-   - Include up to 12 sample compact cards now; server replaces with ALL articles + client-side pager (12/page, 4 columns)
-   - FORBIDDEN: invent /page/2/ URLs or separate pagination HTML files — pager is in-place buttons only
-   - Each card: <a class="article-card" href="..."> with .ac-img-wrap (16:10 photo) / .ac-title / optional short .ac-cat — keep cards equal height, modest image height (~140–180px)
-6. Sticky top chrome MUST be <header class="site-header"> with brand + <nav> category links + optional CTA.
-   Server COPIES this entire <header> onto category/article pages — it must look finished on every page.
-7. Footer with niche line + category links.
-8. Inline <script> for hero interactivity (Google Fonts CDN OK; no other JS CDNs).
-9. GEO in <head>: charset, viewport, title, description, canonical "/", og, llms.txt alternate, JSON-LD.
-10. link stylesheet exactly: href="/assets/style.css"
-11. body class must include: structure-v2 art-directed hero-${heroVariant}
-12. Mobile-first. No horizontal scroll. No decorative SVG animations instead of photos.
-13. Do NOT invent article URLs — only REAL ARTICLES / CATEGORIES hrefs.
+════════════════════════════════════
+2) PAGE STRUCTURE
+════════════════════════════════════
+- <header class="site-header"> brand + <nav> category links + optional CTA (copied to all pages)
+- Hero (${heroVariant}) with brand + short description + interactivity via inline <script>
+- Topic/section cards for categories
+- Article feed section with a visible heading (e.g. «Статьи») AND a filled feed (never an empty heading)
+- Footer with niche line + category links
+- body class: structure-v2 art-directed hero-${heroVariant}
+- link href="/assets/style.css" exactly; GEO meta + JSON-LD in <head>
+- Mobile-first; no horizontal scroll; real photo covers, not decorative SVG loops
+- Only REAL article/category hrefs from the lists above
 
-FULL-SITE CSS (mandatory — YOU style every page type; do not leave articles as unstyled black text):
-Define CSS variables (--bg --text --text2 --muted --brand --border --heading-font --body-font --r --w) and style:
-- .site-header and ALL menu/brand/CTA variants you invented
-- topic hubs, .articles-grid, .article-card, .ac-*, .seo-feed-pager
-- .article-page, .article-layout, .article-header, .article-body, .breadcrumb, .cat-header
-- .sidebar, .related-articles, .faq-*, .key-takeaways, .callout, .author-box, footer
-Article/category pages share the SAME magazine system as home.
+FULL-SITE CSS: define --bg --text --text2 --muted --brand --border --heading-font --body-font --r --w
+and style header, hero, topics, .articles-grid, .article-card, .ac-*, .seo-feed-pager,
+.article-page, .article-layout, .article-body, .breadcrumb, .cat-header, .sidebar, related, faq, footer.
 
-OUTPUT FORMAT — exactly two files, nothing else:
+════════════════════════════════════
+3) FEED CONTRACT (short — server paginates)
+════════════════════════════════════
+- Exactly ONE: <div data-seo-article-feed data-page-size="12" class="articles-grid">…up to 12 sample cards…</div>
+- Cards ONLY inside it: <a class="article-card" href="…"> with .ac-img-wrap + .ac-title (+ optional .ac-cat)
+- Compact equal cards (photo top / title below). No /page/2/ URLs. No empty «Статьи» section.
+
+OUTPUT — exactly two FILE blocks, nothing else:
 --- FILE: assets/style.css ---
 \`\`\`css
 /* magazine-art-v6 */
-...full CSS including @import Google Fonts first...
+...
 \`\`\`
 
 --- FILE: index.html ---
 \`\`\`html
 <!DOCTYPE html>
-...complete document...
+...
 \`\`\`
 `;
+}
+
+/** Reject weak / truncated / empty-feed magazine drafts so we retry instead of shipping bland shells. */
+export function magazineDesignQualityIssues(css: string, html: string, articleCount: number): string[] {
+  const issues: string[] = [];
+  if (!css || css.length < 2500) issues.push("CSS too short — invent a full magazine system (fonts, header, hero, cards, article pages).");
+  if (!html || html.length < 3500) issues.push("HTML too short — complete homepage with hero, topics, and article feed.");
+  if (!/<header\b[^>]*\bsite-header\b/i.test(html)) issues.push("Missing <header class=\"site-header\">.");
+  if (!/<script\b/i.test(html)) issues.push("Missing inline <script> for interactive hero.");
+  if (!/\bdata-seo-article-feed\b/i.test(html)) issues.push("Missing data-seo-article-feed wrapper under the articles heading.");
+  if (articleCount > 0) {
+    const cards = (html.match(/<a\b[^>]*\barticle-card\b/gi) || []).length;
+    if (cards === 0) issues.push("Article feed has zero article-card links — fill sample cards from REAL ARTICLES.");
+  }
+  if (/Статьи[\s\S]{0,400}<(?:div|section)[^>]*>\s*<\/(?:div|section)>/i.test(html)) {
+    issues.push("Empty «Статьи» section — put data-seo-article-feed with cards directly under the heading.");
+  }
+  // Common bland defaults we keep rejecting
+  if (/onest/i.test(css) && /#22d3ee|#06b6d4|cyan/i.test(css)) {
+    issues.push("Too generic Onest+cyan look — invent a niche-specific type+palette.");
+  }
+  return issues;
 }
 
 function heroVariantDescription(v: SeoHeroVariant): string {
@@ -227,9 +244,6 @@ img,video,canvas,svg{max-width:100%;height:auto}
   text-decoration:none!important;
   color:inherit!important;
   overflow:hidden!important;
-  border-radius:var(--r,14px)!important;
-  border:1px solid var(--border,rgba(255,255,255,.12))!important;
-  background:color-mix(in srgb,var(--bg2,var(--bg,#111)) 92%,transparent)!important;
   min-height:0!important;
   height:auto!important;
 }
