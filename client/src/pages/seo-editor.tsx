@@ -366,6 +366,31 @@ export default function SeoEditorPage() {
     });
   }
 
+  async function redesignHome() {
+    if (!id || isGenerating) return;
+    setIsGenerating(true);
+    setGenLog((l) => [...l.slice(-99), "🎨 Арт-директор: пересобираю уникальный дизайн…"]);
+    try {
+      const res = await fetch(`/api/seo/${id}/redesign-home`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.message || "Не удалось пересобрать дизайн");
+      setGenLog((l) => [...l.slice(-99), "✅ Новый дизайн главной готов"]);
+      toast({ title: "Дизайн обновлён", description: "Арт-директор собрал новую главную и стили." });
+      await refetch();
+      loadPreview("index.html");
+    } catch (e: any) {
+      toast({ title: "Ошибка дизайна", description: e?.message || "Попробуйте ещё раз", variant: "destructive" });
+      setGenLog((l) => [...l.slice(-99), `❌ ${e?.message || "design failed"}`]);
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
   // If page reloads while server is still generating — reconnect automatically.
   useEffect(() => {
     if (!cfg || isGenerating || genActiveRef.current) return;
@@ -983,6 +1008,7 @@ export default function SeoEditorPage() {
                         <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500" /> Генерирую статьи...
                       </div>
                     ) : (
+                      <>
                       <button onClick={() => startGeneration()} disabled={isGenerating} className={`flex-1 py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 ${cfg.pagesGenerated > 0 ? "bg-indigo-50 text-indigo-600 border border-indigo-100" : "text-white bg-gradient-to-r from-indigo-500 to-violet-600 shadow-sm"}`}>
                         {cfg.pagesGenerated > 0
                           ? (cfg.pagesGenerated >= (cfg.pagesTotal || 0) && cfg.pagesTotal > 0
@@ -990,6 +1016,18 @@ export default function SeoEditorPage() {
                             : <><RefreshCw className="w-3.5 h-3.5" /> Продолжить</>)
                           : <><Zap className="w-3.5 h-3.5" /> Генерировать</>}
                       </button>
+                      {cfg.pagesGenerated > 0 && (
+                        <button
+                          type="button"
+                          title="Заново изобрести уникальный дизайн главной (статьи не трогаем)"
+                          onClick={() => void redesignHome()}
+                          disabled={isGenerating}
+                          className="px-2.5 rounded-xl border border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100 disabled:opacity-50"
+                        >
+                          <Sparkles className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      </>
                     )}
                     <button title="Изменить ключевые слова" onClick={() => { setPhase("setup"); setKeywordsText(cfg.rawKeywords.join("\n")); setNiche(cfg.niche || ""); setTargetUrl(cfg.targetUrl || ""); setCtaLabel(cfg.ctaLabel || "Попробовать →"); }} className="px-2.5 rounded-xl border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-50">
                       <RefreshCw className="w-3.5 h-3.5" />
