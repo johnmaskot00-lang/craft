@@ -210,7 +210,7 @@ export function parseMagazineDesignFiles(raw: string): { css?: string; html?: st
 /** Safety net: unique chrome stays agent-owned; articles/menu/offer always look finished. */
 export function buildSoftMagazineGuardCss(): string {
   return `
-/* structural-guard-v12 — article magazine kit + compact feed + native offer + adaptive menu */
+/* structural-guard-v13 — article magazine kit + compact feed + agent-written native offer */
 html,body{overflow-x:hidden!important;max-width:100%!important}
 img,video,canvas,svg{max-width:100%;height:auto}
 .cta-block{display:none!important}
@@ -267,6 +267,9 @@ img,video,canvas,svg{max-width:100%;height:auto}
 }
 .callout{margin:1.35rem 0;padding:1rem 1.15rem;border-radius:var(--r,12px);border:1px solid color-mix(in srgb,var(--brand,currentColor) 22%,var(--border,rgba(127,127,127,.25)));background:color-mix(in srgb,var(--brand,currentColor) 8%,transparent)}
 .callout-title{font-size:.72rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;margin:0 0 .35rem;color:var(--brand,inherit)}
+.callout.offer-native{margin:1.45rem 0;padding:1.05rem 1.2rem}
+.callout.offer-native p{margin:0;line-height:1.65;color:var(--text2,inherit)}
+.callout.offer-native a{font-weight:750;color:var(--brand,inherit)}
 .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:.75rem;margin:1.4rem 0}
 .stat-card{padding:1rem .85rem;text-align:center;border-radius:var(--r,12px);border:1px solid var(--border,rgba(127,127,127,.2));background:color-mix(in srgb,var(--bg2,var(--bg,transparent)) 88%,transparent)}
 .stat-num{font-family:var(--heading-font,inherit);font-size:1.65rem;font-weight:850;color:var(--brand,inherit);line-height:1}
