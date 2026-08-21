@@ -3201,14 +3201,32 @@ Respond with ONLY valid JSON, no explanation:
         status: doneStatus,
         architectureVersion: 6,
       };
-      send({ type: "progress", keyword: "Арт-директор: интерактивный журналный Hero", status: "generating" });
-      try {
-        finalCfg = await designSeoMagazineSite(storage, proj.id, finalCfg, (msg) =>
-          send({ type: "progress", keyword: msg, status: "generating" }),
-        );
-      } catch (designErr: any) {
-        console.warn("[SEO] designSeoMagazineSite error:", designErr?.message || designErr);
+
+      // Do NOT re-invent the whole magazine on every «Продолжить» — that looked like a design rollback.
+      // Redesign only when there is no art-directed home/CSS yet.
+      const homeExisting = await storage.getProjectFile(proj.id, "index.html");
+      const cssExisting = await storage.getProjectFile(proj.id, "assets/style.css");
+      const hasArtDirectedHome = !!(
+        cssExisting?.code &&
+        /magazine-art-v6/i.test(cssExisting.code) &&
+        homeExisting?.code &&
+        homeExisting.code.length > 800 &&
+        (/art-directed/i.test(homeExisting.code) || /data-seo-article-feed/i.test(homeExisting.code) || /site-header/i.test(homeExisting.code))
+      );
+
+      if (!hasArtDirectedHome) {
+        send({ type: "progress", keyword: "Арт-директор: интерактивный журналный Hero", status: "generating" });
+        try {
+          finalCfg = await designSeoMagazineSite(storage, proj.id, finalCfg, (msg) =>
+            send({ type: "progress", keyword: msg, status: "generating" }),
+          );
+        } catch (designErr: any) {
+          console.warn("[SEO] designSeoMagazineSite error:", designErr?.message || designErr);
+        }
+      } else {
+        send({ type: "progress", keyword: "Обновляю ленту статей на главной (дизайн сохраняю)", status: "generating" });
       }
+
       await finalizeSeoSite(storage, proj.id, finalCfg);
       await persistGeoSurfaces(storage, proj.id, finalCfg, projectOrigin(proj));
       const homeFile = await storage.getProjectFile(proj.id, "index.html");

@@ -983,8 +983,12 @@ export default function SeoEditorPage() {
                         <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500" /> Генерирую статьи...
                       </div>
                     ) : (
-                      <button onClick={startGeneration} disabled={isGenerating} className={`flex-1 py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 ${cfg.pagesGenerated > 0 ? "bg-indigo-50 text-indigo-600 border border-indigo-100" : "text-white bg-gradient-to-r from-indigo-500 to-violet-600 shadow-sm"}`}>
-                        {cfg.pagesGenerated > 0 ? <><RefreshCw className="w-3.5 h-3.5" /> Продолжить</> : <><Zap className="w-3.5 h-3.5" /> Генерировать</>}
+                      <button onClick={() => startGeneration()} disabled={isGenerating} className={`flex-1 py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 ${cfg.pagesGenerated > 0 ? "bg-indigo-50 text-indigo-600 border border-indigo-100" : "text-white bg-gradient-to-r from-indigo-500 to-violet-600 shadow-sm"}`}>
+                        {cfg.pagesGenerated > 0
+                          ? (cfg.pagesGenerated >= (cfg.pagesTotal || 0) && cfg.pagesTotal > 0
+                            ? <><RefreshCw className="w-3.5 h-3.5" /> Обновить ленту</>
+                            : <><RefreshCw className="w-3.5 h-3.5" /> Продолжить</>)
+                          : <><Zap className="w-3.5 h-3.5" /> Генерировать</>}
                       </button>
                     )}
                     <button title="Изменить ключевые слова" onClick={() => { setPhase("setup"); setKeywordsText(cfg.rawKeywords.join("\n")); setNiche(cfg.niche || ""); setTargetUrl(cfg.targetUrl || ""); setCtaLabel(cfg.ctaLabel || "Попробовать →"); }} className="px-2.5 rounded-xl border border-slate-200 text-slate-400 hover:text-slate-700 hover:bg-slate-50">

@@ -443,6 +443,30 @@ ${feedInner}
 </section>`;
 }
 
+/**
+ * Agent often paints an empty «Статьи» block without data-seo-article-feed.
+ * Put the real feed right under that heading so the visible section is not blank.
+ */
+function hydrateEmptyArticleHeadingSections(homeHtml: string, feedInner: string, pageSize = SEO_HOME_FEED_PAGE_SIZE): string {
+  if (!homeHtml || !feedInner) return homeHtml;
+  const re = /<(h1|h2|h3)(\b[^>]*)>([\s\S]*?)<\/\1>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(homeHtml))) {
+    const text = m[3].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    if (!/(статьи|материалы|публикации|свежие|обзоры|база\s*знаний)/i.test(text)) continue;
+    const insertAt = m.index + m[0].length;
+    const tail = homeHtml.slice(insertAt);
+    if (/^\s*<[^>]{0,240}\bdata-seo-article-feed\b/i.test(tail)) return homeHtml;
+    const feedBlock = `\n<div data-seo-article-feed data-page-size="${pageSize}" class="articles-grid">\n${feedInner}\n</div>`;
+    const empty = tail.match(/^\s*<(div|section)(\b[^>]*)>\s*<\/\1>/i);
+    if (empty) {
+      return homeHtml.slice(0, insertAt) + feedBlock + homeHtml.slice(insertAt + empty[0].length);
+    }
+    return homeHtml.slice(0, insertAt) + feedBlock + homeHtml.slice(insertAt);
+  }
+  return homeHtml;
+}
+
 export function buildHomeFeedPagerBlock(pageSize = SEO_HOME_FEED_PAGE_SIZE): string {
   return `<nav class="seo-feed-pager" data-seo-feed-pager hidden aria-label="Страницы материалов"></nav>
 <script data-seo-feed-pager-script>
@@ -529,6 +553,9 @@ export function patchHomeArticleFeed(homeHtml: string, articles: SeoArticleBrief
   if (!homeHtml || articles.length === 0) return homeHtml;
   let html = stripOrphanHomeArticleCards(homeHtml);
   const feed = refreshArticleFeedHtml(articles);
+
+  // Fill visible empty «Статьи» / «Материалы» blocks the art director left blank.
+  html = hydrateEmptyArticleHeadingSections(html, feed, SEO_HOME_FEED_PAGE_SIZE);
 
   if (/data-seo-article-feed/i.test(html)) {
     html = html.replace(
