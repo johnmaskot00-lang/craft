@@ -109,6 +109,7 @@ CREATIVE MANDATE
 4. Below hero: magazine-grade topics + article feed (not a dump of plain boxes).
 5. Article feed contract (CRITICAL — server refreshes + paginates):
    - Exactly ONE wrapper: <div data-seo-article-feed data-page-size="12" class="articles-grid">...</div>
+   - Prefer a plain <div> (not section/main) for data-seo-article-feed so the server can refresh cards reliably
    - Put article-cards ONLY inside that wrapper — never duplicate cards outside it
    - COMPACT GRID ONLY: 4 equal cards per row (photo on top + title below). NO full-bleed mega-cards, NO featured span-8/12, NO single huge cover card in the feed.
    - Include up to 12 sample compact cards now; server replaces with ALL articles + client-side pager (12/page, 4 columns)
@@ -328,57 +329,84 @@ function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
-/** Find start index of the matching '</div>' for a div that opened ending at openTagEnd. */
-export function findMatchingDivClose(html: string, openTagEnd: number): number {
+/** Find start index of the matching close tag for an element that opened ending at openTagEnd. */
+export function findMatchingTagClose(html: string, openTagEnd: number, tagName: string): number {
+  const tag = String(tagName || "div").toLowerCase().replace(/[^a-z0-9:-]/g, "") || "div";
+  const openPrefix = `<${tag}`;
+  const closeRe = new RegExp(`^</\\s*${tag}\\s*>`, "i");
   let depth = 1;
   let i = openTagEnd;
   while (i < html.length) {
     const nextLt = html.indexOf("<", i);
     if (nextLt < 0) return -1;
     const rest = html.slice(nextLt);
-    if (/^<\/div\b/i.test(rest) || /^<\/\s*div\s*>/i.test(rest)) {
+    if (closeRe.test(rest)) {
       depth -= 1;
       if (depth === 0) return nextLt;
       const gt = html.indexOf(">", nextLt);
       i = gt < 0 ? html.length : gt + 1;
       continue;
     }
-    // Match opening <div ...> (not </div>)
-    if (rest.length >= 4 && rest.slice(0, 4).toLowerCase() === "<div" && (rest[4] === " " || rest[4] === ">" || rest[4] === "\t" || rest[4] === "\n" || rest[4] === "\r")) {
-      depth += 1;
-      const gt = html.indexOf(">", nextLt);
-      i = gt < 0 ? html.length : gt + 1;
-      continue;
+    // Opening same tag (not comment / close / self-ish)
+    if (rest.length >= openPrefix.length && rest.slice(0, openPrefix.length).toLowerCase() === openPrefix) {
+      const next = rest[openPrefix.length];
+      if (next === undefined || /[\s>/]/.test(next)) {
+        depth += 1;
+        const gt = html.indexOf(">", nextLt);
+        i = gt < 0 ? html.length : gt + 1;
+        continue;
+      }
     }
     i = nextLt + 1;
   }
   return -1;
 }
 
-/** Replace inner HTML of the first data-seo-article-feed wrapper (handles nested divs). */
-export function replaceSeoArticleFeedInner(homeHtml: string, newInner: string): string | null {
-  if (!homeHtml) return null;
-  const openRe = /<([^>]*\bdata-seo-article-feed\b[^>]*)>/i;
+/** @deprecated use findMatchingTagClose — kept for callers */
+export function findMatchingDivClose(html: string, openTagEnd: number): number {
+  return findMatchingTagClose(html, openTagEnd, "div");
+}
+
+type FeedOpenMatch = {
+  full: string;
+  tag: string;
+  index: number;
+  openEnd: number;
+};
+
+function matchSeoArticleFeedOpen(homeHtml: string): FeedOpenMatch | null {
+  // Any element with data-seo-article-feed (div/section/main/…)
+  const openRe = /<([a-zA-Z][\w:-]*)\b([^>]*\bdata-seo-article-feed\b[^>]*)>/i;
   const m = openRe.exec(homeHtml);
   if (!m) return null;
-  const openEnd = m.index + m[0].length;
-  const closeStart = findMatchingDivClose(homeHtml, openEnd);
+  return {
+    full: m[0],
+    tag: m[1],
+    index: m.index,
+    openEnd: m.index + m[0].length,
+  };
+}
+
+/** Replace inner HTML of the first data-seo-article-feed wrapper (handles nested tags). */
+export function replaceSeoArticleFeedInner(homeHtml: string, newInner: string): string | null {
+  if (!homeHtml) return null;
+  const open = matchSeoArticleFeedOpen(homeHtml);
+  if (!open) return null;
+  const closeStart = findMatchingTagClose(homeHtml, open.openEnd, open.tag);
   if (closeStart < 0) return null;
-  return `${homeHtml.slice(0, openEnd)}\n${newInner}\n${homeHtml.slice(closeStart)}`;
+  return `${homeHtml.slice(0, open.openEnd)}\n${newInner}\n${homeHtml.slice(closeStart)}`;
 }
 
 /** Extract full outer HTML of the first data-seo-article-feed block. */
 export function extractSeoArticleFeedBlock(homeHtml: string): { block: string; start: number; end: number } | null {
-  const openRe = /<([^>]*\bdata-seo-article-feed\b[^>]*)>/i;
-  const m = openRe.exec(homeHtml);
-  if (!m) return null;
-  const openEnd = m.index + m[0].length;
-  const closeStart = findMatchingDivClose(homeHtml, openEnd);
+  const open = matchSeoArticleFeedOpen(homeHtml);
+  if (!open) return null;
+  const closeStart = findMatchingTagClose(homeHtml, open.openEnd, open.tag);
   if (closeStart < 0) return null;
-  const closeMatch = homeHtml.slice(closeStart).match(/^<\/\s*div\s*>/i);
+  const closeMatch = homeHtml.slice(closeStart).match(new RegExp(`^</\\s*${open.tag}\\s*>`, "i"));
   if (!closeMatch) return null;
   const end = closeStart + closeMatch[0].length;
-  return { block: homeHtml.slice(m.index, end), start: m.index, end };
+  return { block: homeHtml.slice(open.index, end), start: open.index, end };
 }
 
 /** Remove duplicate article-card dumps outside the single data-seo-article-feed region. */
@@ -386,22 +414,34 @@ export function stripOrphanHomeArticleCards(homeHtml: string): string {
   if (!homeHtml) return homeHtml;
   const extracted = extractSeoArticleFeedBlock(homeHtml);
   let html = homeHtml;
-  let slot = "";
+  const slot = "<!--SEO_FEED_SLOT_0-->";
   if (extracted) {
-    slot = "<!--SEO_FEED_SLOT_0-->";
     html = homeHtml.slice(0, extracted.start) + slot + homeHtml.slice(extracted.end);
+  } else if (/\bdata-seo-article-feed\b/i.test(homeHtml)) {
+    // Broken/unclosed feed wrapper — drop it entirely so we can re-inject later.
+    html = homeHtml.replace(/<[^>]*\bdata-seo-article-feed\b[^>]*>[\s\S]*?(?=<\/(?:body|footer|html)\b|$)/i, slot);
   }
   html = html.replace(/<!--\s*Main Editorial Feed[\s\S]*?-->/gi, "");
   // Drop agent-made /page/N/ pagination shells (we use client-side pager only).
   html = html.replace(/<a\b[^>]*\bhref=["']\/page\/\d+\/?["'][^>]*>[\s\S]*?<\/a>/gi, "");
   html = html.replace(/<nav\b[^>]*\bclass=["'][^"']*\b(?:pagination|pager|pages)\b[^"']*["'][^>]*>[\s\S]*?<\/nav>/gi, "");
   html = html.replace(/<a\b[^>]*\bclass=["'][^"']*\barticle-card\b[^"']*["'][^>]*>[\s\S]*?<\/a>/gi, "");
-  // Also catch cards with class before other attrs
   html = html.replace(/<a\b[^>]*\barticle-card\b[^>]*>[\s\S]*?<\/a>/gi, "");
-  if (extracted) {
+  if (html.includes(slot) && extracted) {
     html = html.replace(slot, extracted.block);
+  } else {
+    html = html.replace(slot, "");
   }
   return html;
+}
+
+function buildHomeFeedSection(feedInner: string, pageSize = SEO_HOME_FEED_PAGE_SIZE): string {
+  return `<section class="container section-latest" data-seo-home-feed>
+  <div class="section-headline-bar"><h2 class="section-title">Свежие публикации</h2></div>
+  <div data-seo-article-feed data-page-size="${pageSize}" class="articles-grid">
+${feedInner}
+  </div>
+</section>`;
 }
 
 export function buildHomeFeedPagerBlock(pageSize = SEO_HOME_FEED_PAGE_SIZE): string {
@@ -462,11 +502,9 @@ export function ensureHomeFeedPager(homeHtml: string, pageSize = SEO_HOME_FEED_P
       return `${start} data-page-size="${pageSize}"${end}`;
     },
   );
-  // Drop previous pager+script so refresh stays idempotent
   html = html.replace(/<nav[^>]*\bdata-seo-feed-pager\b[^>]*>[\s\S]*?<\/nav>\s*/gi, "");
   html = html.replace(/<script[^>]*\bdata-seo-feed-pager-script\b[^>]*>[\s\S]*?<\/script>\s*/gi, "");
   html = html.replace(/<script>\s*\(function\(\)\{\s*var size=\d+;[\s\S]*?data-seo-article-feed[\s\S]*?<\/script>\s*/gi, "");
-  // Kill broken agent /page/N/ navigations
   html = html.replace(/<a\b[^>]*\bhref=["']\/page\/\d+\/?["'][^>]*>[\s\S]*?<\/a>/gi, "");
   const pager = buildHomeFeedPagerBlock(pageSize);
   const feedBlock = extractSeoArticleFeedBlock(html);
@@ -476,16 +514,28 @@ export function ensureHomeFeedPager(homeHtml: string, pageSize = SEO_HOME_FEED_P
   return html;
 }
 
+function countFeedCards(html: string): number {
+  const block = extractSeoArticleFeedBlock(html);
+  if (!block) return 0;
+  return (block.block.match(/<a\b[^>]*\barticle-card\b/gi) || []).length;
+}
+
+export function homeFeedNeedsRepair(homeHtml: string, articleCount: number): boolean {
+  if (articleCount <= 0) return false;
+  if (!homeHtml) return true;
+  return countFeedCards(homeHtml) === 0;
+}
+
 export function patchHomeArticleFeed(homeHtml: string, articles: SeoArticleBrief[]): string {
   if (!homeHtml || articles.length === 0) return homeHtml;
   let html = stripOrphanHomeArticleCards(homeHtml);
   const feed = refreshArticleFeedHtml(articles);
+
   if (/data-seo-article-feed/i.test(html)) {
-    // Normalize wrapper: drop featured/span mega-card classes from agent HTML
     html = html.replace(
-      /<([^>]*\bdata-seo-article-feed\b)([^>]*)>/i,
-      (_m, start: string, rest: string) => {
-        let attrs = `${start}${rest}`;
+      /<([a-zA-Z][\w:-]*)\b([^>]*\bdata-seo-article-feed\b)([^>]*)>/i,
+      (_m, tag: string, mid: string, rest: string) => {
+        let attrs = `${tag}${mid}${rest}`;
         attrs = attrs.replace(/\sclass=(["'])([\s\S]*?)\1/i, (_c, q: string, cls: string) => {
           const cleaned = String(cls)
             .split(/\s+/)
@@ -499,16 +549,55 @@ export function patchHomeArticleFeed(homeHtml: string, articles: SeoArticleBrief
       },
     );
     const next = replaceSeoArticleFeedInner(html, feed);
-    if (next) html = next;
+    if (next) {
+      html = next;
+    } else {
+      // Unclosed/broken wrapper — remove and inject a clean section.
+      html = html.replace(/<[^>]*\bdata-seo-article-feed\b[^>]*>[\s\S]*?(?=<\/(?:body|footer|html)\b|$)/i, "");
+      const section = buildHomeFeedSection(feed);
+      if (/<footer[\s\S]*?<\/footer>/i.test(html)) {
+        html = html.replace(/<footer[\s\S]*?<\/footer>/i, `${section}\n$&`);
+      } else if (/<\/body>/i.test(html)) {
+        html = html.replace(/<\/body>/i, `${section}\n</body>`);
+      } else {
+        html = `${html}\n${section}`;
+      }
+    }
   } else {
-    const section = `<section class="container section-latest"><div class="section-headline-bar"><h2 class="section-title">Материалы</h2></div><div data-seo-article-feed data-page-size="${SEO_HOME_FEED_PAGE_SIZE}" class="articles-grid">\n${feed}\n</div></section>`;
+    const section = buildHomeFeedSection(feed);
+    if (/<footer[\s\S]*?<\/footer>/i.test(html)) {
+      html = html.replace(/<footer[\s\S]*?<\/footer>/i, `${section}\n$&`);
+    } else if (/<\/body>/i.test(html)) {
+      html = html.replace(/<\/body>/i, `${section}\n</body>`);
+    } else {
+      html = `${html}\n${section}`;
+    }
+  }
+
+  // Safety: if feed still empty after patch, force a fresh section before footer.
+  if (countFeedCards(html) === 0) {
+    html = html.replace(/<[^>]*\bdata-seo-article-feed\b[\s\S]*?<\/[a-zA-Z][\w:-]*>/i, "");
+    const section = buildHomeFeedSection(feed);
+    if (/<footer[\s\S]*?<\/footer>/i.test(html)) {
+      html = html.replace(/<footer[\s\S]*?<\/footer>/i, `${section}\n$&`);
+    } else if (/<\/body>/i.test(html)) {
+      html = html.replace(/<\/body>/i, `${section}\n</body>`);
+    } else {
+      html = `${html}\n${section}`;
+    }
+  }
+
+  // Strip orphan cards only outside the (now filled) feed — never wipe the feed itself.
+  html = stripOrphanHomeArticleCards(html);
+  if (countFeedCards(html) === 0) {
+    // stripOrphan failed on broken wrapper — last-resort inject
+    const section = buildHomeFeedSection(feed);
     if (/<footer[\s\S]*?<\/footer>/i.test(html)) {
       html = html.replace(/<footer[\s\S]*?<\/footer>/i, `${section}\n$&`);
     } else {
       html = `${html}\n${section}`;
     }
   }
-  html = stripOrphanHomeArticleCards(html);
   return ensureHomeFeedPager(html, SEO_HOME_FEED_PAGE_SIZE);
 }
 
