@@ -25,6 +25,7 @@ import {
   ensureRealRelatedArticles,
   ensureSoftMagazineGuardCss,
   extractHomeShell,
+  homeFeedNeedsRepair,
   isArtDirectedSeo,
   parseMagazineDesignFiles,
   patchHomeArticleFeed,
@@ -2760,6 +2761,19 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
           filename: "assets/style.css",
           code: ensureStructuralGuardCss(buildSiteCss(themeOf(cfg)), cfg),
         });
+      }
+      // Fix empty «Свежие публикации» when agent used <section> feed or patch failed.
+      if (isArtDirectedSeo(cfg) && (cfg.pagesGenerated || 0) > 0) {
+        const home = await storage.getProjectFile(proj.id, "index.html");
+        const articles = collectSeoArticleBriefs(cfg);
+        if (home?.code && articles.length > 0 && homeFeedNeedsRepair(home.code, articles.length)) {
+          const patched = patchHomeArticleFeed(home.code, articles);
+          if (patched && patched !== home.code) {
+            await storage.upsertProjectFile({ projectId: proj.id, filename: "index.html", code: patched });
+            await storage.updateProject(proj.id, { generatedCode: patched } as any);
+            await syncSeoShellAcrossPages(storage, proj.id, cfg);
+          }
+        }
       }
       (proj as any).seoConfig = cfg;
     }
