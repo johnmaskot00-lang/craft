@@ -31,6 +31,7 @@ import {
   parseMagazineDesignFiles,
   patchHomeArticleFeed,
   pickHeroVariant,
+  relabelHeaderCategoryLinks,
   type SeoHeroVariant,
 } from "./seo-magazine-design";
 import { loadProfessionalTastePack, truncateSkillsForStudy } from "./taste-skill-loader";
@@ -414,7 +415,7 @@ function ensureInlineOfferMention(
   if (/offer-inline-tip/i.test(html)) return html;
   const product = seoOfferProductName(offer.niche, offer.targetUrl);
   const nicheBit = (offer.niche || product).slice(0, 80);
-  const tip = `<p class="offer-inline-tip">На практике удобнее не собирать стек вручную: <a href="${url}" target="_blank" rel="noopener sponsored">${esc(product)}</a>${nicheBit && nicheBit.toLowerCase() !== product.toLowerCase() ? ` (${esc(nicheBit)})` : ""} даёт готовый доступ к нужным моделям и сценариям по теме материала.</p>`;
+  const tip = `<p class="offer-inline-tip">Редакция рекомендует сразу применить шаги на практике: <a href="${url}" target="_blank" rel="noopener sponsored">${esc(product)}</a>${nicheBit && nicheBit.toLowerCase() !== product.toLowerCase() ? ` — ${esc(nicheBit)}` : ""}.</p>`;
   if (/<p class="lead"[\s\S]*?<\/p>/i.test(html)) {
     return html.replace(/(<p class="lead"[\s\S]*?<\/p>)/i, `$1\n${tip}`);
   }
@@ -465,7 +466,67 @@ function parseRefCopyMarker(html: string, slot: "top" | "bottom"): { title: stri
   return { title: parts[0].slice(0, 120), desc: (parts[1] || parts[0]).slice(0, 240) };
 }
 
-/** Guarantee native in-article offer mentions; branded boxes only when writer supplied REF markers. */
+function editorialOfferCopy(product: string, niche: string): { title: string; desc: string } {
+  const essence = String(niche || product).trim();
+  const same = essence.toLowerCase() === product.toLowerCase();
+  return {
+    title: `Редакция рекомендует ${product}`,
+    desc: same
+      ? `Откройте ${product} и сразу примените рекомендации из этого материала на готовой платформе.`
+      : `${product} — ${essence}. Откройте сервис и примените шаги из статьи на практике, без сборки решения с нуля.`,
+  };
+}
+
+function polishArticleLists(html: string): string {
+  if (!html) return html;
+  return html.replace(
+    /(<(?:h2|h3)[^>]*>[^<]*(?:Содержание|Оглавление|Contents|Короткий ответ)[^<]*<\/(?:h2|h3)>)\s*<(ul|ol)(\b[^>]*)>/gi,
+    (full, heading: string, tag: string, attrs: string) => {
+      if (/\b(toc|key-takeaways)\b/i.test(attrs)) return full;
+      const cls = /Содержание|Оглавление|Contents/i.test(heading) ? "toc" : "key-takeaways";
+      const nextAttrs = /\bclass=/i.test(attrs)
+        ? attrs.replace(/class=(["'])/i, `class=$1${cls} `)
+        : ` class="${cls}"${attrs}`;
+      return `${heading}\n<${tag}${nextAttrs}>`;
+    },
+  );
+}
+
+function ensureInlineInternalLinks(
+  html: string,
+  kw: SeoKeyword,
+  cluster: SeoCluster,
+  cfg: SeoConfig,
+): string {
+  if (!html) return html;
+  const others = (cfg.clusters || [])
+    .flatMap((c) =>
+      c.keywords
+        .filter((k) => k.slug !== kw.slug && (k.status === "done" || k.filename))
+        .slice(0, 2)
+        .map((k) => ({ title: k.title, href: `/${c.slug}/${k.slug}/` })),
+    )
+    .filter((it) => it.href !== `/${cluster.slug}/${kw.slug}/`)
+    .slice(0, 4);
+  if (others.length === 0) return html;
+  const bodyMatch = html.match(/<div class="article-body"[^>]*>([\s\S]*?)<\/div>/i);
+  const probe = bodyMatch?.[1] || html;
+  const existing = (probe.match(/<a\b[^>]*href=["']\/[^"']+["']/gi) || []).length;
+  if (existing >= 2) return html;
+  const pick = others.slice(0, 2);
+  const line = `<p class="article-also">Читайте также: ${pick
+    .map((it) => `<a href="${esc(it.href)}">${esc(it.title)}</a>`)
+    .join(" · ")}.</p>`;
+  if (/<p class="lead"[\s\S]*?<\/p>/i.test(html)) {
+    return html.replace(/(<p class="lead"[\s\S]*?<\/p>)/i, `$1\n${line}`);
+  }
+  if (/<div class="article-body"[^>]*>/i.test(html)) {
+    return html.replace(/(<div class="article-body"[^>]*>)/i, `$1\n${line}`);
+  }
+  return html;
+}
+
+/** Guarantee native in-article offer mentions and editorial recommendation boxes. */
 function ensureArticleReferralOffers(
   html: string,
   kw: SeoKeyword,
@@ -478,6 +539,7 @@ function ensureArticleReferralOffers(
 
   const product = seoOfferProductName(offer.niche || cfg.niche || cluster.name, offer.targetUrl);
   const nicheForCopy = offer.niche || cfg.niche || cluster.name;
+  const fallback = editorialOfferCopy(product, nicheForCopy);
   const ctaLabel = /[a-zа-я0-9]/i.test(offer.ctaLabel) && offer.ctaLabel.length > 2
     ? (/\b(попробовать|открыть|перейти)\b/i.test(offer.ctaLabel) && !new RegExp(product, "i").test(offer.ctaLabel)
       ? `${offer.ctaLabel.replace(/→\s*$/, "").trim()} ${product}`
@@ -486,10 +548,11 @@ function ensureArticleReferralOffers(
 
   const topFromAi = parseRefCopyMarker(html, "top");
   const bottomFromAi = parseRefCopyMarker(html, "bottom");
-  // Branded .ref-offer boxes ONLY when the article writer supplied REF markers (native copy).
-  // No server title-stuffing templates. Monetization fallback = in-body native link.
-  const topCopy = topFromAi;
-  const bottomCopy = bottomFromAi;
+  const topCopy = topFromAi || fallback;
+  const bottomCopy = bottomFromAi || {
+    title: `${product} под рукой`,
+    desc: `Когда будете повторять шаги из статьи, откройте ${product} — так быстрее перейти от теории к практике.`,
+  };
 
   let out = html
     .replace(/\{\{REF_TOP:[\s\S]*?\}\}/gi, "")
@@ -543,8 +606,8 @@ function ensureArticleReferralOffers(
     /(<aside class="ref-offer[\s\S]*?<a href=")[^"]+(" class="ref-offer-btn")/gi,
     `$1${url}$2`,
   );
-  // Primary monetization path: native in-body link that explains the offer essence.
   out = ensureInlineOfferMention(out, offer);
+  out = ensureInlineInternalLinks(out, kw, cluster, cfg);
   return out;
 }
 
@@ -584,7 +647,9 @@ async function refreshArticleReferralOffers(storage: IStorage, projectId: number
     const kw = cluster?.keywords.find((k) => k.slug === m[2]);
     if (!cluster || !kw) continue;
     if (kw.status !== "done" && !kw.filename && !f.code) continue;
-    const next = ensureArticleReferralOffers(f.code, kw, cluster, effectiveCfg);
+    const next = polishArticleLists(
+      ensureArticleReferralOffers(f.code, kw, cluster, effectiveCfg),
+    );
     if (next !== f.code) {
       await storage.upsertProjectFile({ projectId, filename: f.filename, code: next });
     }
@@ -1039,7 +1104,7 @@ async function syncSeoShellAcrossPages(storage: IStorage, projectId: number, cfg
     const home = files.find((f) => f.filename === "index.html");
     const shell = extractHomeShell(home?.code);
     // Full <header class="site-header"> — never replace category <header class="cat-header">
-    if (shell.header) header = demoteHeaderBrandH1(shell.header);
+    if (shell.header) header = relabelHeaderCategoryLinks(demoteHeaderBrandH1(shell.header), cfg.clusters);
     else if (shell.nav) nav = shell.nav;
     if (shell.footer) footer = shell.footer;
     if (shell.bodyClass) cls = shell.bodyClass;
@@ -1359,7 +1424,8 @@ async function persistUniqueSkin(
       existing.code.includes("structural-guard-v8") ||
       existing.code.includes("structural-guard-v9") ||
       existing.code.includes("structural-guard-v10") ||
-      existing.code.includes("structural-guard-v11"));
+      existing.code.includes("structural-guard-v11") ||
+      existing.code.includes("structural-guard-v12"));
   if (isArtDirectedSeo(next) && hasAgentCss && existing?.code) {
     const guarded = ensureStructuralGuardCss(existing.code, next);
     if (guarded !== existing.code) {
@@ -1965,7 +2031,7 @@ function ensureStructuralGuardCss(css: string, cfg?: SeoConfig): string {
   if (cfg && isArtDirectedSeo(cfg)) {
     return ensureSoftMagazineGuardCss(css);
   }
-  if (css.includes("structural-guard-v8") || css.includes("structural-guard-v9") || css.includes("structural-guard-v10") || css.includes("structural-guard-v11") || css.includes("magazine-art-v6")) {
+  if (css.includes("structural-guard-v8") || css.includes("structural-guard-v9") || css.includes("structural-guard-v10") || css.includes("structural-guard-v11") || css.includes("structural-guard-v12") || css.includes("magazine-art-v6")) {
     return ensureSoftMagazineGuardCss(css);
   }
   if (css.includes("structural-guard-v7")) return css;
@@ -2565,16 +2631,16 @@ INTERNAL LINKS (use naturally in body text as real <a href="..."> — ONLY URLs 
 ${relatedLinks || "(none yet)"}
 Never invent article titles or URLs. Do not add a "Читайте также" block with fake cards — the server injects real related links.
 ${hasReferral ? `
-NATIVE PRODUCT RECOMMENDATION (CRITICAL — only inside this article, not as spam chrome):
-Owner platform: "${productName}" (${safeUrl}). Essence / niche: "${offerNiche}".
-1) PRIMARY: In the ARTICLE BODY weave 2–3 natural staff tips that explain WHAT "${productName}" is and WHY it helps THIS keyword (e.g. marketplace of ready prompts/models, one place to run the workflow you just described). Different wording each time.
+NATIVE PRODUCT RECOMMENDATION (MANDATORY — inside this article only):
+Owner platform: "${productName}" (${safeUrl}). Essence: "${offerNiche}".
+1) In the ARTICLE BODY weave 2 natural staff tips that explain WHAT "${productName}" is and WHY it helps THIS keyword. Different wording each time.
 2) At least TWO body mentions MUST be real links:
    <a href="${safeUrl}" target="_blank" rel="noopener sponsored">${productName}</a>
-3) OPTIONAL soft boxes — only if you can write NON-TEMPLATE copy that reveals offer essence (never paste the article H1 into the tip):
+3) Also emit both markers (server turns them into editorial cards):
    {{REF_TOP:benefit headline about ${productName} / ${offerNiche}|||1–2 sentences: what reader unlocks on ${productName} for this topic}}
    {{REF_BOTTOM:different closing tip about using ${productName}|||1 sentence, practical}}
 FORBIDDEN:
-- Do not write «Инструменты под «{title статьи}»» or «без ухода к конкурентам» — that is spam template.
+- Do not write «Инструменты под «{title статьи}»» or «без ухода к конкурентам».
 - Do not add CTA links to Midjourney / Kling / Runway / ElevenLabs / Suno / ChatGPT / Adobe Stock etc.
 - Named tools OK as market context; the ONLY sponsored/action URL is ${safeUrl}.
 ` : ""}
@@ -2647,6 +2713,7 @@ Output ONLY the HTML fragment above — no markdown, no explanations, no page-le
     .replace(/<figure class="article-svg"[\s\S]*?<\/figure>/gi, "")
     .replace(/<svg\b[\s\S]*?<\/svg>/gi, "");
   articleContent = ensureArticleReferralOffers(articleContent, kw, cluster, cfg);
+  articleContent = polishArticleLists(articleContent);
   articleContent = ensureRealRelatedArticles(articleContent, kw, cluster, cfgAll);
 
   // ── Schema.org + GEO ──
@@ -2768,8 +2835,16 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
           code: ensureStructuralGuardCss(buildSiteCss(themeOf(cfg)), cfg),
         });
       }
-      // Fix empty «Свежие публикации» when agent used <section> feed or patch failed.
+      // Keep magazine CSS + native offers current on already generated sites.
       if (isArtDirectedSeo(cfg) && (cfg.pagesGenerated || 0) > 0) {
+        const cssFileArt = await storage.getProjectFile(proj.id, "assets/style.css");
+        if (cssFileArt?.code && !cssFileArt.code.includes("structural-guard-v12")) {
+          await storage.upsertProjectFile({
+            projectId: proj.id,
+            filename: "assets/style.css",
+            code: ensureSoftMagazineGuardCss(cssFileArt.code),
+          });
+        }
         const home = await storage.getProjectFile(proj.id, "index.html");
         const articles = collectSeoArticleBriefs(cfg);
         if (home?.code && articles.length > 0 && homeFeedNeedsRepair(home.code, articles.length)) {
@@ -2777,9 +2852,11 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
           if (patched && patched !== home.code) {
             await storage.upsertProjectFile({ projectId: proj.id, filename: "index.html", code: patched });
             await storage.updateProject(proj.id, { generatedCode: patched } as any);
-            await syncSeoShellAcrossPages(storage, proj.id, cfg);
           }
         }
+        await refreshArticleReferralOffers(storage, proj.id, cfg);
+        await refreshArticleSidebars(storage, proj.id, cfg);
+        await syncSeoShellAcrossPages(storage, proj.id, cfg);
       }
       (proj as any).seoConfig = cfg;
     }
@@ -3676,7 +3753,7 @@ ${offerBlock}
 - Основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст WCAG AA. Текст на фото — .on-media + overlay.
 - Сохраняй data-seo-article-feed и .article-card на главной (сервер обновляет карточки).
 - Статьи: без SVG-анимаций; до 3 фото; нативные ссылки на оффер владельца в тексте статьи (раскрывай суть продукта). Не засоряй главную оффером. Не превращай в .cta-block.
-- Маркеры magazine-art-v6 / structural-guard-v11 не удаляй. Запрещены горизонтальный скролл и микротекст.
+- Маркеры magazine-art-v6 / structural-guard-v12 не удаляй. Запрещены горизонтальный скролл и микротекст.
 - Для фото — точные URL из вложений. Не выдумывай стоки.
 - Краткий итог после патчей, без огромного HTML в чат.
 - Пользователь смотрит файл «${safeActive}».`;
