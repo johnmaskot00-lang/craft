@@ -2584,13 +2584,13 @@ OUTPUT EXACTLY THIS STRUCTURE (no outer wrappers, no page-level tags):
   </div>
 </div>
 {{COVER}}
-${hasReferral ? "{{REF_TOP:...}} marker here — native service recommend with CTA" : ""}
+${hasReferral ? "<!-- optional {{REF_TOP:...}} only if you wrote non-template essence copy -->" : ""}
 <div class="key-takeaways"><h3>Короткий ответ</h3><ul>[3-5 citation-ready bullets]</ul></div>
 [toc if guide/tutorial/listicle]
 <div class="article-body">
   <p class="lead">[opening lead paragraph — bold, sets the stakes, answers the query in 2 sentences]</p>
-  [h2 sections with full content; rich visual elements (pull-quote / callout / stat-grid) and optional {{IMG:...}} markers interleaved; internal links where relevant; ${hasReferral ? `2–3 native ${productName} recommendations with sponsored links` : "no referral"}]
-  ${hasReferral ? "{{REF_BOTTOM:...}} marker here" : ""}
+  [h2 sections with full content; rich visual elements (pull-quote / callout / stat-grid) and optional {{IMG:...}} markers interleaved; internal links where relevant; ${hasReferral ? `2–3 native ${productName} recommendations with sponsored links explaining offer essence` : "no referral"}]
+  ${hasReferral ? "<!-- optional {{REF_BOTTOM:...}} -->" : ""}
 </div>
 <div class="author-box"><div class="author-avatar">${esc((cfg.siteTitle || "R").slice(0, 1))}</div><div class="author-info"><div class="author-name">${esc(cfg.siteTitle)}</div><div class="author-bio">Редакция издания. Тема: ${esc(cfg.niche || cluster.name)}. Обновлено: ${today}.</div></div></div>
 <div class="faq-section">
