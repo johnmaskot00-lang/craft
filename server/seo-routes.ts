@@ -25,6 +25,7 @@ import {
   ensureRealRelatedArticles,
   ensureSoftMagazineGuardCss,
   extractHomeShell,
+  findMatchingTagClose,
   homeFeedNeedsRepair,
   isArtDirectedSeo,
   magazineDesignQualityIssues,
@@ -382,8 +383,63 @@ function articleHasNativeOffer(html: string, url: string | undefined): boolean {
   return new RegExp(`href=["'][^"']*${host.replace(/\./g, "\\.")}`, "i").test(body);
 }
 
-function nativeOfferCallout(innerHtml: string): string {
-  return `<div class="callout offer-native"><div class="callout-title">Совет редакции</div><p>${innerHtml}</p></div>`;
+function extractBlockByClass(html: string, cls: string): { start: number; end: number; block: string } | null {
+  const openRe = new RegExp(`<([a-zA-Z][\\w:-]*)\\b([^>]*\\b${cls}\\b[^>]*)>`, "i");
+  const m = html.match(openRe);
+  if (!m || m.index == null) return null;
+  const closeAt = findMatchingTagClose(html, m.index + m[0].length, m[1]);
+  if (closeAt < 0) return null;
+  const end = closeAt + `</${m[1]}>`.length;
+  return { start: m.index, end, block: html.slice(m.index, end) };
+}
+
+/** «Короткий ответ» / TOC are visual clutter — GEO is FAQ + JSON-LD + lead, not these boxes. */
+function stripArticlePreambleBoxes(html: string): string {
+  if (!html) return html;
+  let out = html;
+  for (const cls of ["key-takeaways", "toc"]) {
+    let guard = 0;
+    while (guard++ < 8) {
+      const block = extractBlockByClass(out, cls);
+      if (!block) break;
+      out = out.slice(0, block.start) + out.slice(block.end);
+    }
+  }
+  out = out.replace(/<p\b[^>]*\btoc-title\b[^>]*>[\s\S]*?<\/p>\s*/gi, "");
+  out = out.replace(
+    /<(h2|h3)(\b[^>]*)>((?:(?!<\/h[23]>).)*?(?:Короткий\s*ответ|Содержание(?:\s+(?:обзора|руководства|статьи))?|Оглавление|Key Takeaways|What You(?:['’]|&rsquo;)?ll Learn|Quick Verdict)(?:(?!<\/h[23]>).)*?)<\/\1>\s*<(ul|ol)(\b[^>]*)>[\s\S]*?<\/\4>/gi,
+    "",
+  );
+  return out;
+}
+
+function insertAfterLeadOrCover(html: string, snippet: string): string {
+  if (/<p class="lead"[\s\S]*?<\/p>/i.test(html)) {
+    return html.replace(/(<p class="lead"[\s\S]*?<\/p>)/i, `$1\n${snippet}`);
+  }
+  if (/<img class="hero-article-img"[\s\S]*?>/i.test(html) || /<div class="hero-cover-fallback"[\s\S]*?<\/div>/i.test(html)) {
+    return html.replace(
+      /(<img class="hero-article-img"[\s\S]*?>|<div class="hero-cover-fallback"[\s\S]*?<\/div>)/i,
+      `$1\n${snippet}`,
+    );
+  }
+  if (/<div class="article-body"[^>]*>/i.test(html)) {
+    return html.replace(/(<div class="article-body"[^>]*>)/i, `$1\n${snippet}`);
+  }
+  return `${snippet}\n${html}`;
+}
+
+/** First native offer must sit under the lead — not after TOC / half the article. */
+function moveFirstNativeOfferNearStart(html: string): string {
+  const found = extractBlockByClass(html, "offer-native");
+  if (!found) return html;
+  const lead = html.match(/<p class="lead"[\s\S]*?<\/p>/i);
+  if (lead && lead.index != null) {
+    const leadEnd = lead.index + lead[0].length;
+    if (found.start >= leadEnd && found.start - leadEnd < 280) return html;
+  }
+  const without = html.slice(0, found.start) + html.slice(found.end);
+  return insertAfterLeadOrCover(without, found.block);
 }
 
 function offerTextWithLink(raw: string, url: string, product: string): string {
@@ -400,6 +456,10 @@ function offerTextWithLink(raw: string, url: string, product: string): string {
     if (/<a\b/i.test(withAnchors)) return withAnchors;
   }
   return `${esc(text)} <a href="${url}" target="_blank" rel="noopener sponsored">${esc(product)}</a>.`;
+}
+
+function nativeOfferCallout(innerHtml: string): string {
+  return `<div class="callout offer-native"><div class="callout-title">Совет редакции</div><p>${innerHtml}</p></div>`;
 }
 
 /** Same pipeline as {{IMG:...}}: agent writes the copy, server only materializes the link. */
@@ -470,13 +530,13 @@ OWNER OFFER:
 TASK:
 1) Write TWO original editorial recommendations in the SAME LANGUAGE as the article.
 2) Each must explain why "${product}" helps THIS specific topic (not a generic ad, not «инструменты под {title}», not «без ухода к конкурентам»).
-3) Place them where they fit the surrounding section — after lead / mid-article, the same way photos sit next to the relevant block.
+3) Place the FIRST recommendation immediately after the lead paragraph (top of the article). Place the SECOND later, before FAQ.
 4) Markup for each rec:
 <div class="callout offer-native">
   <div class="callout-title">Совет редакции</div>
   <p>...your 2–4 sentences... <a href="${url}" target="_blank" rel="noopener sponsored">${product}</a></p>
 </div>
-5) Keep every existing photo, FAQ, key-takeaways, header, footer, internal links, scripts. Do not add competitor CTAs.
+5) Keep photos, FAQ, header, footer, internal links, scripts. REMOVE «Короткий ответ» / key-takeaways and «Содержание» / TOC if present. Do not add competitor CTAs.
 
 HTML:
 ${html.slice(0, 28000)}`,
@@ -505,14 +565,17 @@ async function ensureNativeOfferInArticle(
   cluster: SeoCluster,
   cfg: SeoConfig,
 ): Promise<string> {
+  let out = stripArticlePreambleBoxes(html);
   const offer = resolveSeoOffer(kw, cluster, cfg);
-  if (!normalizeHttpUrl(offer.targetUrl)) return html;
-  let out = resolveInlineOfferMarkers(html, offer);
+  if (!normalizeHttpUrl(offer.targetUrl)) return out;
+  out = resolveInlineOfferMarkers(out, offer);
   out = out.replace(/<aside class="ref-offer[\s\S]*?<\/aside>/gi, "");
   out = out.replace(/<p class="offer-inline-tip"[\s\S]*?<\/p>/gi, "");
   if (!articleHasNativeOffer(out, offer.targetUrl)) {
     out = await weaveNativeOfferWithAgent(out, kw, cluster, cfg);
+    out = stripArticlePreambleBoxes(out);
   }
+  out = moveFirstNativeOfferNearStart(out);
   out = ensureInlineInternalLinks(out, kw, cluster, cfg);
   return out;
 }
@@ -551,18 +614,7 @@ function parseRefCopyMarker(html: string, slot: "top" | "bottom"): { title: stri
 }
 
 function polishArticleLists(html: string): string {
-  if (!html) return html;
-  return html.replace(
-    /(<(?:h2|h3)[^>]*>[^<]*(?:Содержание|Оглавление|Contents|Короткий ответ)[^<]*<\/(?:h2|h3)>)\s*<(ul|ol)(\b[^>]*)>/gi,
-    (full, heading: string, tag: string, attrs: string) => {
-      if (/\b(toc|key-takeaways)\b/i.test(attrs)) return full;
-      const cls = /Содержание|Оглавление|Contents/i.test(heading) ? "toc" : "key-takeaways";
-      const nextAttrs = /\bclass=/i.test(attrs)
-        ? attrs.replace(/class=(["'])/i, `class=$1${cls} `)
-        : ` class="${cls}"${attrs}`;
-      return `${heading}\n<${tag}${nextAttrs}>`;
-    },
-  );
+  return stripArticlePreambleBoxes(html);
 }
 
 function ensureInlineInternalLinks(
@@ -635,11 +687,6 @@ async function refreshArticleReferralOffers(storage: IStorage, projectId: number
     const kw = cluster?.keywords.find((k) => k.slug === m[2]);
     if (!cluster || !kw) continue;
     if (kw.status !== "done" && !kw.filename && !f.code) continue;
-    if (articleHasNativeOffer(f.code, resolveSeoOffer(kw, cluster, effectiveCfg).targetUrl)
-      && !/\{\{(?:OFFER|REF_TOP|REF_BOTTOM):/i.test(f.code)
-      && !/<aside class="ref-offer/i.test(f.code)) {
-      continue;
-    }
     const next = polishArticleLists(
       await ensureNativeOfferInArticle(f.code, kw, cluster, effectiveCfg),
     );
@@ -966,7 +1013,7 @@ function articleJsonLd(
       ...(seoAssetUrl(cfg, cover) ? { image: [seoAssetUrl(cfg, cover)] } : {}),
       speakable: {
         "@type": "SpeakableSpecification",
-        cssSelector: [".lead", ".key-takeaways", ".faq-answer"],
+        cssSelector: [".lead", ".faq-answer"],
       },
     },
     {
@@ -2496,24 +2543,21 @@ function getContentTypeInstructions(contentType: string | undefined, keyQuestion
 
   const structures: Record<string, string> = {
     guide: `CONTENT TYPE: Comprehensive Guide
-- Open with a "Key Takeaways" box (class="key-takeaways"): <h3>Key Takeaways</h3><ul>3-5 bullet insights</ul>
-- Then a Table of Contents (class="toc"): <p class="toc-title">Contents</p><ol>one <li><a href="#section-id">Section title</a></li> per H2</ol>
-- 5-6 H2 sections with real depth — beginner-friendly first, advanced last
+- Start with a strong lead paragraph, then go straight into 5-6 H2 sections (beginner-friendly first, advanced last)
+- NO Key Takeaways box, NO «Короткий ответ», NO table of contents / «Содержание»
 - Each section has practical examples, data points, or real-world scenarios
 - Add 1-2 <blockquote> with expert-sounding insights
 - Author box before FAQ: <div class="author-box"><div class="author-avatar">✍</div><div class="author-info"><div class="author-name">Editorial Team</div><div class="author-bio">Verified by experts with 10+ years in the field. Last updated: ${new Date().toLocaleDateString("ru-RU")}.</div></div></div>`,
 
     tutorial: `CONTENT TYPE: Step-by-Step Tutorial
-- Open with a "What You'll Learn" box (class="key-takeaways"): <h3>What You'll Learn</h3><ul>3-4 outcomes</ul>
-- Prerequisites paragraph (1-2 sentences)
-- Table of Contents (class="toc")
+- Strong lead, then prerequisites (1-2 sentences). NO takeaways box, NO table of contents.
 - Number each step using <div class="step-box"><div class="step-num">1</div><div class="step-content"><h3>Step title</h3><p>Clear action + expected result</p></div></div>
 - "Common Mistakes to Avoid" H2 section
 - "Quick Reference" summary table at the end
 - Author box before FAQ`,
 
     comparison: `CONTENT TYPE: Comparison Article
-- Open with "Quick Verdict" box (class="key-takeaways"): <h3>Quick Verdict</h3><ul>3 decisive bullet conclusions</ul>
+- Strong lead with a one-sentence verdict in prose (NOT a Key Takeaways / Quick Verdict box). NO table of contents.
 - Comparison table with HTML <table class="comparison-table">: columns for each option, rows for key features, mark winners with class="ct-winner"
 - One H2 per option with deep dive + <div class="pros-cons"><div class="pros"><h4>Pros</h4><ul>…</ul></div><div class="cons"><h4>Cons</h4><ul>…</ul></div></div>
 - "Which Should You Choose?" H2 with use-case matrix ("Choose X if… / Choose Y if…")
@@ -2521,7 +2565,7 @@ function getContentTypeInstructions(contentType: string | undefined, keyQuestion
 - Author box before FAQ`,
 
     review: `CONTENT TYPE: Review
-- Open with verdict summary (class="key-takeaways"): <h3>Our Verdict</h3><ul>rating, key strengths, best for</ul>
+- Strong lead with rating/verdict in prose. NO Key Takeaways box, NO TOC.
 - Key features H2 with numbered highlights
 - <div class="pros-cons"> grid
 - "Who It's For / Who Should Avoid It" H2
@@ -2531,8 +2575,7 @@ function getContentTypeInstructions(contentType: string | undefined, keyQuestion
 - Author box before FAQ`,
 
     listicle: `CONTENT TYPE: Listicle / Best-Of Article
-- Brief intro (2-3 sentences): methodology, what was tested, time/experience basis
-- Table of Contents (class="toc")
+- Brief intro (2-3 sentences): methodology, what was tested, time/experience basis. NO table of contents.
 - One H2 per list item (numbered: "1. Best X for Y", "2. …")
 - Each item: 150-200 words + pros/cons mini list + "Best for: …" sentence
 - Summary comparison table (class="comparison-table") after all items
@@ -2595,8 +2638,8 @@ CONTENT QUALITY (write in the same language as the keyword):
 - 5 FAQ pairs in collapsible structure. Each answer is 2–4 self-contained sentences that quote the entity/topic by name (so ChatGPT/Perplexity/YandexGPT can cite it)
 
 GEO / AI CITATION (ChatGPT, Perplexity, Gemini, Claude, YandexGPT, Alice):
-- Immediately after the lead paragraph, output a <div class="key-takeaways"><h3>Короткий ответ</h3><ul>3-5 bullets that fully answer the keyword as a standalone snippet</ul></div>
-- The lead + key-takeaways must make sense if an AI quotes ONLY that block
+- Do NOT output «Короткий ответ», Key Takeaways, or «Содержание» / table of contents — they steal the top of the article. GEO is the lead paragraph + FAQ (schema.org FAQPage) + JSON-LD.
+- The lead must answer the query in 2 sentences so an AI can cite it.
 - FAQ questions should match how people actually ask AI assistants, not stuffed keywords
 - Author box: publication name "${cfg.siteTitle}", not "Editorial Team"
 
@@ -2611,10 +2654,10 @@ VISUAL RHYTHM — RICH MAGAZINE LAYOUT WITHOUT SVG (CRITICAL):
 - NO SVG, NO CSS animations, NO decorative flourish lines, NO Lottie. Typography + photos + callouts only.
 - DO NOT output any <img> tags yourself. Cover is {{COVER}}. For in-article photos use ONLY markers:
   {{IMG:English photo prompt describing EXACTLY what this section needs}}
-${hasReferral ? `- OWNER OFFER uses the SAME marker idea. Place EXACTLY TWO markers in the body, where they fit the surrounding section (after a relevant H2 / next to a how-to), never in the header:
+${hasReferral ? `- OWNER OFFER uses the SAME marker idea as photos. Place EXACTLY TWO {{OFFER:...}} markers:
+  1) FIRST marker immediately after the lead paragraph (top of the article — not after a TOC or halfway down).
+  2) SECOND marker later in the body, before FAQ.
   {{OFFER:2–4 original sentences in the article language: why ${productName} helps THIS keyword / this section. Staff-writer voice, concrete, not an ad template.}}
-  Example for a pizza dough article if the offer is a cooking-school platform: {{OFFER:Когда тесто уже понятно руками, удобнее не собирать курс с нуля — на ${productName} есть готовые сценарии под домашнюю пиццу: ферментация, температура камня, типичные ошибки новичков.}}
-  Example for an AI-video article if the offer is a model marketplace: {{OFFER:Чтобы не прыгать между десятью генераторами, для этого сценария мы пользуемся ${productName} — там уже собраны модели и пресеты под ролики, о которых речь в разделе.}}
 ` : ""}
   Rules for {{IMG:...}}:
   • You may place 0, 1, or 2 markers total (agent decides based on article needs; max 2). Cover counts separately as photo #1 of up to 3.
@@ -2631,8 +2674,8 @@ Never invent article titles or URLs. Do not add a "Читайте также" bl
 ${hasReferral ? `
 NATIVE OFFER (MANDATORY — same seriousness as {{IMG}}):
 Product: "${productName}" · essence: "${offerNiche}" · URL ${safeUrl}
-- EXACTLY two {{OFFER:...}} markers inside .article-body, in different sections, written by YOU for THIS keyword.
-- Do not emit a generic «Редакция рекомендует сразу применить шаги» sentence. Do not paste the H1 into the tip.
+- EXACTLY two {{OFFER:...}} markers: the FIRST right after <p class="lead">, the SECOND later before FAQ.
+- Do not emit «Короткий ответ», «Содержание обзора», Key Takeaways, or a table of contents.
 - Do not invent competitor CTAs (Midjourney / Kling / Runway / ElevenLabs / Suno / ChatGPT / Adobe Stock as action links).
 - The ONLY sponsored URL is ${safeUrl}. Named tools may appear as market context only.
 ` : ""}
@@ -2648,11 +2691,10 @@ OUTPUT EXACTLY THIS STRUCTURE (no outer wrappers, no page-level tags):
   </div>
 </div>
 {{COVER}}
-<div class="key-takeaways"><h3>Короткий ответ</h3><ul>[3-5 citation-ready bullets]</ul></div>
-[toc if guide/tutorial/listicle]
 <div class="article-body">
   <p class="lead">[opening lead paragraph — bold, sets the stakes, answers the query in 2 sentences]</p>
-  [h2 sections; visual elements; optional {{IMG:...}}; ${hasReferral ? `EXACTLY two {{OFFER:...}} markers with original copy about ${productName} for this keyword` : "no referral"}]
+  ${hasReferral ? `{{OFFER:native rec #1 about ${productName} for this keyword — FIRST thing after the lead}}` : ""}
+  [h2 sections; visual elements; optional {{IMG:...}}; ${hasReferral ? `second {{OFFER:...}} later in the body` : "no referral"}]
 </div>
 <div class="author-box"><div class="author-avatar">${esc((cfg.siteTitle || "R").slice(0, 1))}</div><div class="author-info"><div class="author-name">${esc(cfg.siteTitle)}</div><div class="author-bio">Редакция издания. Тема: ${esc(cfg.niche || cluster.name)}. Обновлено: ${today}.</div></div></div>
 <div class="faq-section">
@@ -2665,7 +2707,7 @@ Output ONLY the HTML fragment above — no markdown, no explanations, no page-le
   let articleContent = "";
   try {
     articleContent = await kieSync([
-      { role: "system", content: `You are an expert magazine SEO writer. Output only a clean inner HTML fragment — no markdown, no page-level tags, no explanation.${hasReferral ? ` When an owner offer is provided you MUST place two {{OFFER:...}} markers in the article body (same mechanism as {{IMG:...}}): you write original editorial copy tied to THIS keyword, the server turns the marker into a recommendation with the real link.` : ""}` },
+      { role: "system", content: `You are an expert magazine SEO writer. Output only a clean inner HTML fragment — no markdown, no page-level tags, no explanation. Do not write «Короткий ответ» or a table of contents.${hasReferral ? ` When an owner offer is provided you MUST place the first {{OFFER:...}} immediately after the lead and a second one later before FAQ.` : ""}` },
       { role: "user", content: prompt },
     ], 120000);
     // Strip any accidental page-level wrapping
@@ -3743,8 +3785,8 @@ ${offerBlock}
 ПРАВИЛА:
 - Меняй то, что просит пользователь, сохраняя premium magazine quality.
 - Не удаляй статьи, slug и внутренние ссылки без явной просьбы.
-- GEO обязательно: FAQ, .key-takeaways, JSON-LD, canonical, llms.txt, robots.txt, sitemap.xml.
-- Если правишь статью — сохрани «Короткий ответ» (key-takeaways) и FAQ.
+- GEO обязательно: FAQ, JSON-LD, canonical, llms.txt, robots.txt, sitemap.xml. Не добавляй «Короткий ответ» и «Содержание».
+- Если правишь статью — сохрани FAQ. Нативную рекомендацию оффера (offer-native) держи сразу под лидом.
 - Основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст WCAG AA. Текст на фото — .on-media + overlay.
 - Сохраняй data-seo-article-feed и .article-card на главной (сервер обновляет карточки).
 - Статьи: без SVG-анимаций; до 3 фото. Если задан оффер владельца — в КАЖДОЙ статье две нативные рекомендации (callout.offer-native + ссылка), текст пишешь сам под тему материала. Не засоряй главную. Не .cta-block и не шаблонные aside.ref-offer.
