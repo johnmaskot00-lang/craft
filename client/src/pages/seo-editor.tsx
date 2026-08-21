@@ -231,10 +231,18 @@ export default function SeoEditorPage() {
         credentials: "include",
         body: JSON.stringify({ keywords, niche, projectName: name, targetUrl: targetUrl.trim(), ctaLabel: ctaLabel.trim() }),
       });
-      if (!res.ok) throw new Error((await res.json()).message);
+      const raw = await res.text();
+      let d: any = {};
+      try { d = raw ? JSON.parse(raw) : {}; } catch { d = {}; }
+      if (!res.ok) {
+        const hint = res.status === 502 || res.status === 504
+          ? "Сервер не успел обработать большой список. Нажмите «Построить структуру» ещё раз."
+          : (d.message || `Ошибка ${res.status}`);
+        throw new Error(hint);
+      }
       await refetch();
       setPhase("structure");
-      toast({ title: "Структура построена ✓" });
+      toast({ title: "Структура построена ✓", description: keywords.length > 80 ? `${keywords.length} ключей разложены по разделам` : undefined });
     } catch (e: any) {
       toast({ title: "Ошибка анализа", description: e.message, variant: "destructive" });
     } finally {
@@ -1540,7 +1548,7 @@ function AnalyzingScreen({ elapsed, keywordCount }: { elapsed: number; keywordCo
         </div>
         <div style={{ fontSize: 12, color: "#444" }}>
           Прошло: {elapsed < 60 ? `${elapsed}с` : `${Math.floor(elapsed / 60)}м ${elapsed % 60}с`}
-          {" · "}обычно занимает 1–3 мин
+          {" · "}{keywordCount > 200 ? "большой список, обычно до 1–2 мин" : "обычно занимает до минуты"}
         </div>
       </div>
 

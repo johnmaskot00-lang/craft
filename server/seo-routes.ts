@@ -74,6 +74,160 @@ function slugify(text: string): string {
     .slice(0, 60) || "page";
 }
 
+function keywordKey(s: string): string {
+  return String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function inferSeoContentType(keyword: string): SeoKeyword["contentType"] {
+  const s = String(keyword || "").toLowerCase();
+  if (/\bvs\b|против|\bили\b|\bor\b|сравнен/.test(s)) return "comparison";
+  if (/(^|\s)как\s|how to|пошаг|инструкц/.test(s)) return "tutorial";
+  if (/обзор|review|стоит ли|отзыв/.test(s)) return "review";
+  if (/лучшие|топ[- ]?\d|\bbest\b|\b10\b|список/.test(s)) return "listicle";
+  return "guide";
+}
+
+type CompactAnalyzeCluster = { name: string; slug: string; description: string; keywords: string[] };
+
+function fallbackClusterKeywords(keywords: string[], niche: string): CompactAnalyzeCluster[] {
+  const stop = new Set(["vs", "или", "and", "the", "для", "как", "что", "про", "это", "best", "top"]);
+  const buckets = new Map<string, string[]>();
+  for (const kw of keywords) {
+    const words = String(kw)
+      .split(/[\s/|,]+/)
+      .map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""))
+      .filter((w) => w.length > 1 && !stop.has(w.toLowerCase()));
+    const head = words.slice(0, 2).join(" ") || kw.slice(0, 40) || "темы";
+    const key = keywordKey(head);
+    const list = buckets.get(key) || [];
+    list.push(kw);
+    buckets.set(key, list);
+  }
+  const entries = [...buckets.entries()].sort((a, b) => b[1].length - a[1].length);
+  const kept: CompactAnalyzeCluster[] = [];
+  const tiny: string[] = [];
+  for (const [name, kws] of entries) {
+    if (kws.length < 3 && entries.length > 6) {
+      tiny.push(...kws);
+      continue;
+    }
+    kept.push({
+      name: name.replace(/\b\S/g, (c) => c.toUpperCase()).slice(0, 60) || "Раздел",
+      slug: slugify(name),
+      description: `${name} — материалы по теме ${niche}`.slice(0, 180),
+      keywords: kws,
+    });
+  }
+  if (tiny.length) {
+    const extra = kept.find((c) => c.slug === "more-topics") || {
+      name: "Ещё темы",
+      slug: "more-topics",
+      description: `Дополнительные запросы: ${niche}`.slice(0, 180),
+      keywords: [] as string[],
+    };
+    extra.keywords.push(...tiny);
+    if (!kept.includes(extra)) kept.push(extra);
+  }
+  return kept.slice(0, 14);
+}
+
+function extractClusterKeywordList(raw: any): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((k) => (typeof k === "string" ? k : k?.keyword || k?.title || ""))
+    .map((s) => String(s).trim())
+    .filter(Boolean);
+}
+
+function coverAllKeywords(clusters: CompactAnalyzeCluster[], input: string[]): CompactAnalyzeCluster[] {
+  const used = new Set<string>();
+  const out: CompactAnalyzeCluster[] = [];
+  for (const c of clusters) {
+    const mapped: string[] = [];
+    for (const k of c.keywords) {
+      const original = input.find((i) => keywordKey(i) === keywordKey(k)) || k;
+      const key = keywordKey(original);
+      if (!key || used.has(key)) continue;
+      used.add(key);
+      mapped.push(original);
+    }
+    if (mapped.length) out.push({ ...c, slug: slugify(c.slug || c.name), keywords: mapped });
+  }
+  const missing = input.filter((k) => !used.has(keywordKey(k)));
+  if (missing.length) {
+    out.push({
+      name: "Ещё темы",
+      slug: "more-topics",
+      description: "Запросы, которые не вошли в основные разделы",
+      keywords: missing,
+    });
+  }
+  return out.filter((c) => c.keywords.length > 0);
+}
+
+function parseAnalyzeJson(raw: string): any {
+  const text = String(raw || "").trim();
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  const slice = start >= 0 && end > start ? text.slice(start, end + 1) : text;
+  try {
+    return JSON.parse(slice);
+  } catch {
+    const repaired = slice
+      .replace(/,\s*([}\]])/g, "$1")
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "");
+    return JSON.parse(repaired);
+  }
+}
+
+async function compactAnalyzeClusters(keywords: string[], niche: string): Promise<{
+  siteDescription?: string;
+  visualIdentity?: any;
+  clusters: CompactAnalyzeCluster[];
+}> {
+  const prompt = `Cluster these ${keywords.length} SEO keywords into 4-12 topical categories for a website about ${JSON.stringify(niche)}.
+
+RULES:
+- Every keyword MUST appear in exactly one category, copied EXACTLY from the list (do not rewrite).
+- Return compact JSON only: category name/slug/description + keyword STRINGS. No article titles, no questions, no contentType.
+- Max 80 keywords per category; merge leftovers.
+- 4-12 categories.
+
+KEYWORDS:
+${keywords.join("\n")}
+
+JSON shape:
+{"siteDescription":"120-160 chars","visualIdentity":{"mood":"...","layoutFamily":"magazine","typographyVibe":"...","backgroundEnergy":"calm|living-deep|cinematic|airy"},"clusters":[{"name":"...","slug":"...","description":"...","keywords":["exact keyword", "..."]}]}`;
+
+  const responseText = await kieSync(
+    [
+      {
+        role: "system",
+        content:
+          "You are an SEO information architect. Output ONLY valid compact JSON. Copy keywords verbatim. Never omit keywords.",
+      },
+      { role: "user", content: prompt },
+    ],
+    90000,
+  );
+  const parsed = parseAnalyzeJson(responseText);
+  const clusters = coverAllKeywords(
+    (parsed.clusters || []).map((c: any) => ({
+      name: String(c.name || "Раздел"),
+      slug: slugify(c.slug || c.name || "category"),
+      description: String(c.description || ""),
+      keywords: extractClusterKeywordList(c.keywords),
+    })),
+    keywords,
+  );
+  if (clusters.length === 0) throw new Error("Empty clusters");
+  return {
+    siteDescription: parsed.siteDescription,
+    visualIdentity: parsed.visualIdentity || parsed.visual,
+    clusters,
+  };
+}
+
 // Uses KIE Gemini 3 Flash via the non-streaming generateContent endpoint.
 // Non-streaming avoids stream-accumulation overhead and returns a single JSON
 // response — much faster for large keyword clusters and long articles.
@@ -2954,80 +3108,30 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
     } as any);
 
     try {
-      const prompt = `You are an expert SEO architect and content strategist. Cluster these ${limited.length} keywords into thematic categories for a website about "${siteNiche}".
-
-KEYWORDS:
-${limited.join("\n")}
-
-CONTENT ARCHITECTURE:
-- Group related keywords into 3-10 logical categories
-- Each category should have a clear topic focus
-- Each keyword goes into exactly one category
-- Max 100 keywords per category (merge small groups)
-- Generate a compelling SEO article title for each keyword (50-60 chars)
-- Keep category and keyword slugs URL-safe (Latin, no spaces)
-- Classify each keyword's content type based on searcher intent:
-  * "guide" — broad informational ("what is X", "how X works", "complete guide to X")
-  * "tutorial" — how-to with steps ("how to do X", "step by step", "DIY")
-  * "comparison" — X vs Y, best alternatives, "or", "vs"
-  * "review" — specific product/service review, "rating", "pros cons", "worth it"
-  * "listicle" — top-N, best-of, "10 ways", "list of"
-- For each keyword, identify 3 real questions searchers have (short, 60 chars max each)
-
-PUBLICATION ARCHITECTURE (CRITICAL):
-- Choose ONE reader-first publication model that fits the niche audience:
-  * editorial — thoughtful long-form journal
-  * magazine — broad topical web magazine (prefer for media/tech/lifestyle niches)
-  * knowledge — structured evergreen reference
-  * portal — frequently updated information hub
-  * digest — concise curated reading
-- Also invent a short art-direction brief: mood, color energy, typography vibe (Cyrillic-capable fonts), and whether the site should feel dark/cinematic or bright/editorial.
-- A separate art-director agent will design the interactive homepage (7 hero systems). You only choose the editorial model + visual mood — do NOT prescribe fixed HTML templates.
-
-Respond with ONLY valid JSON, no explanation:
-{
-  "siteTitle": "Human-readable site title about the niche",
-  "siteDescription": "One compelling sentence describing what the site covers (120-160 chars)",
-  "visualIdentity": {
-    "mood": "3-8 word art direction (palette + atmosphere)",
-    "layoutFamily": "editorial|magazine|knowledge|portal|digest",
-    "typographyVibe": "short note on heading vs body feel",
-    "backgroundEnergy": "calm|living-deep|cinematic|airy"
-  },
-  "clusters": [
-    {
-      "name": "Category display name",
-      "slug": "category-slug",
-      "description": "What this category covers (1-2 sentences)",
-      "keywords": [
-        {
-          "keyword": "original keyword text",
-          "slug": "keyword-slug",
-          "title": "Full SEO article title (50-60 chars)",
-          "contentType": "guide|tutorial|comparison|review|listicle",
-          "keyQuestions": ["Question 1?", "Question 2?", "Question 3?"]
-        }
-      ]
-    }
-  ]
-}`;
-
-      const responseText = await kieSync([
-        { role: "system", content: "You are a principal SEO information architect and brand art director. Choose the publication model and a vivid visual mood for a unique web magazine. Prioritize topical authority and a distinctive editorial personality. Respond only with valid JSON." },
-        { role: "user", content: prompt },
-      ], 120000);
-
-      let parsed: any;
+      // Compact clustering: do NOT ask the model for titles/questions per keyword.
+      // That JSON explodes at ~500 keys, times out, and the UI stays on the splash.
+      let analyzed: {
+        siteDescription?: string;
+        visualIdentity?: any;
+        clusters: CompactAnalyzeCluster[];
+      };
       try {
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        parsed = JSON.parse(jsonMatch?.[0] || responseText);
-      } catch {
-        throw new Error("Invalid JSON from AI");
+        analyzed = await compactAnalyzeClusters(limited, siteNiche);
+      } catch (aiErr: any) {
+        console.warn("[SEO] compact analyze failed, using fallback clusters:", aiErr?.message || aiErr);
+        analyzed = {
+          siteDescription: siteNiche,
+          visualIdentity: {},
+          clusters: fallbackClusterKeywords(limited, siteNiche),
+        };
+      }
+      if (!analyzed.clusters.length) {
+        analyzed.clusters = fallbackClusterKeywords(limited, siteNiche);
       }
 
       const siteTargetUrl = normalizeHttpUrl(String(targetUrl || prevCfg.targetUrl || "").trim());
       const siteCtaLabel = String(ctaLabel || prevCfg.ctaLabel || "Попробовать →").trim() || "Попробовать →";
-      const clusters: SeoCluster[] = (parsed.clusters || []).map((c: any) => ({
+      const clusters: SeoCluster[] = analyzed.clusters.map((c) => ({
         id: crypto.randomUUID(),
         name: c.name || "Category",
         slug: slugify(c.slug || c.name || "category"),
@@ -3035,14 +3139,14 @@ Respond with ONLY valid JSON, no explanation:
         niche: siteNiche,
         targetUrl: siteTargetUrl || undefined,
         ctaLabel: siteCtaLabel,
-        keywords: (c.keywords || []).map((k: any) => ({
+        keywords: c.keywords.map((kw) => ({
           id: crypto.randomUUID(),
-          keyword: k.keyword || "",
-          slug: slugify(k.slug || k.keyword || "page"),
-          title: k.title || k.keyword || "",
+          keyword: kw,
+          slug: slugify(kw),
+          title: kw.slice(0, 70),
           status: "pending" as const,
-          contentType: (["guide","tutorial","comparison","review","listicle"].includes(k.contentType) ? k.contentType : "guide") as SeoKeyword["contentType"],
-          keyQuestions: Array.isArray(k.keyQuestions) ? k.keyQuestions.slice(0, 3).map(String) : [],
+          contentType: inferSeoContentType(kw),
+          keyQuestions: [],
           niche: siteNiche,
           targetUrl: siteTargetUrl || undefined,
           ctaLabel: siteCtaLabel,
@@ -3050,13 +3154,14 @@ Respond with ONLY valid JSON, no explanation:
       }));
 
       const totalPages = clusters.reduce((s, c) => s + c.keywords.length, 0);
-      // Project name is authoritative — used verbatim as siteTitle across the whole site.
-      const finalName = siteName || parsed.siteTitle || proj.title;
-      const theme = selectTheme(finalName, siteNiche, parsed.visualIdentity || parsed.visual);
-      const mood = String(parsed.visualIdentity?.mood || parsed.visual?.mood || "").trim();
-      const bgEnergy = String(parsed.visualIdentity?.backgroundEnergy || "").trim();
+      if (totalPages === 0) throw new Error("Не удалось распределить ключевые слова");
+      const vis = analyzed.visualIdentity || {};
+      const finalName = siteName || proj.title;
+      const theme = selectTheme(finalName, siteNiche, vis);
+      const mood = String(vis.mood || "").trim();
+      const bgEnergy = String(vis.backgroundEnergy || "").trim();
       if (mood || bgEnergy) {
-        theme.designBrief = [mood, bgEnergy, parsed.visualIdentity?.typographyVibe]
+        theme.designBrief = [mood, bgEnergy, vis.typographyVibe]
           .filter(Boolean)
           .join(" · ")
           .slice(0, 400);
@@ -3068,7 +3173,7 @@ Respond with ONLY valid JSON, no explanation:
         clusters,
         projectName: finalName,
         siteTitle: finalName,
-        siteDescription: parsed.siteDescription || siteNiche,
+        siteDescription: String(analyzed.siteDescription || siteNiche).slice(0, 200),
         targetUrl: siteTargetUrl,
         ctaLabel: siteCtaLabel,
         theme,
