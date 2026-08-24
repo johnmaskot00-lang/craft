@@ -56,7 +56,26 @@ const SEO_COVER_RETRIES = 3;
 const seoGenerateInFlight = new Map<number, {
   startedAt: number;
   total: number;
+  stopRequested?: boolean;
+  skipKeywordIds?: Set<string>;
 }>();
+
+function recountSeoPages(cfg: SeoConfig): SeoConfig {
+  const pagesTotal = (cfg.clusters || []).reduce((s, c) => s + c.keywords.length, 0);
+  const pagesGenerated = (cfg.clusters || []).reduce(
+    (s, c) => s + c.keywords.filter((k) => k.status === "done").length,
+    0,
+  );
+  return { ...cfg, pagesTotal, pagesGenerated };
+}
+
+async function deleteSeoHtmlFile(storage: IStorage, projectId: number, filename: string | undefined) {
+  if (!filename) return;
+  const file = await storage.getProjectFile(projectId, filename);
+  if (file?.id) {
+    try { await storage.deleteProjectFile(file.id); } catch {}
+  }
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -3421,7 +3440,12 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
       return;
     }
 
-    seoGenerateInFlight.set(projectId, { startedAt: Date.now(), total: cfg.pagesTotal });
+    seoGenerateInFlight.set(projectId, {
+      startedAt: Date.now(),
+      total: cfg.pagesTotal,
+      stopRequested: false,
+      skipKeywordIds: new Set(),
+    });
 
     let creditsDepleted = false;
     let generated = 0;
@@ -3479,22 +3503,40 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
         jobs.push({ kw, cluster, idx, filename: `${cluster.slug}/${kw.slug}/index.html` });
       }
     }
-    seoGenerateInFlight.set(projectId, {
-      startedAt: seoGenerateInFlight.get(projectId)?.startedAt || Date.now(),
-      total: cfg.pagesTotal,
-    });
+    const liveFlight = () => seoGenerateInFlight.get(projectId);
+    const pruneLiveQueue = () => {
+      const skip = liveFlight()?.skipKeywordIds;
+      if (!skip?.size) return;
+      for (const c of allClusters) {
+        c.keywords = c.keywords.filter((k) => !skip.has(k.id));
+      }
+      for (let i = allClusters.length - 1; i >= 0; i--) {
+        if (!allClusters[i].keywords.length) allClusters.splice(i, 1);
+      }
+      cfg = {
+        ...cfg,
+        clusters: allClusters,
+        pagesTotal: allClusters.reduce((s, c) => s + c.keywords.length, 0),
+      };
+    };
+
+    const flight = liveFlight();
+    if (flight) flight.total = cfg.pagesTotal;
     send({ type: "start", total: cfg.pagesTotal, generated });
 
     let persistChain = Promise.resolve();
     const persistProgress = () => {
       persistChain = persistChain
         .then(async () => {
+          pruneLiveQueue();
+          generated = allClusters.reduce((s, c) => s + c.keywords.filter((k) => k.status === "done").length, 0);
+          const stopping = !!liveFlight()?.stopRequested;
           const progressCfg: SeoConfig = {
             ...cfg,
             clusters: allClusters,
             pagesGenerated: generated,
             pagesTotal: allClusters.reduce((s, c) => s + c.keywords.length, 0),
-            status: "generating",
+            status: stopping ? "idle" : "generating",
           };
           await storage.updateProject(proj.id, { seoConfig: progressCfg } as any);
         })
@@ -3505,11 +3547,12 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
     await runStaggeredPool(jobs, {
       concurrency: SEO_ARTICLE_CONCURRENCY,
       staggerMs: SEO_ARTICLE_STAGGER_MS,
-      // Never stop because the browser disconnected — only when credits run out.
-      shouldStop: () => creditsDepleted,
+      // Stop launching new articles on user stop or when credits run out.
+      shouldStop: () => creditsDepleted || !!liveFlight()?.stopRequested,
       worker: async ({ kw, cluster, idx, filename }) => {
-        if (creditsDepleted) return;
+        if (creditsDepleted || liveFlight()?.stopRequested) return;
         if (isSeoDumpCluster(cluster)) return;
+        if (liveFlight()?.skipKeywordIds?.has(kw.id)) return;
         send({ type: "progress", keyword: kw.keyword, status: "generating", generated, total: cfg.pagesTotal });
 
         const ikey = `seo-article-${proj.id}-${kw.id}`;
@@ -3542,6 +3585,11 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
         }
         if (html && cover) html = injectCoverIntoArticleHtml(html, cover, kw.title, cfg);
 
+        if (liveFlight()?.stopRequested || liveFlight()?.skipKeywordIds?.has(kw.id)) {
+          if (!ded.alreadyProcessed) { try { await storage.refundCredits(userId, SEO_ARTICLE_COST, ikey); } catch {} }
+          return;
+        }
+
         if (!html) {
           if (!ded.alreadyProcessed) { try { await storage.refundCredits(userId, SEO_ARTICLE_COST, ikey); } catch {} }
           const fallback = buildFallbackArticle(kw, cluster, { ...cfg, clusters: allClusters });
@@ -3566,12 +3614,14 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
     });
 
     await persistChain.catch(() => {});
+    pruneLiveQueue();
 
     await repairArticleCovers(storage, proj.id, { ...cfg, clusters: allClusters });
 
     // Articles keep SEO writing quality; homepage/CSS are invented by the magazine art-director agent.
     {
-      const doneStatus = creditsDepleted ? "idle" : "done";
+      const stopped = !!liveFlight()?.stopRequested;
+      const doneStatus = creditsDepleted || stopped ? "idle" : "done";
       let finalCfg: SeoConfig = {
         ...cfg,
         clusters: allClusters,
@@ -3593,7 +3643,7 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
         (/art-directed/i.test(homeExisting.code) || /data-seo-article-feed/i.test(homeExisting.code) || /site-header/i.test(homeExisting.code))
       );
 
-      if (!hasArtDirectedHome) {
+      if (!stopped && !hasArtDirectedHome) {
         send({ type: "progress", keyword: "Арт-директор: интерактивный журналный Hero", status: "generating" });
         try {
           finalCfg = await designSeoMagazineSite(storage, proj.id, finalCfg, (msg) =>
@@ -3602,19 +3652,23 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
         } catch (designErr: any) {
           console.warn("[SEO] designSeoMagazineSite error:", designErr?.message || designErr);
         }
-      } else {
-        send({ type: "progress", keyword: "Обновляю ленту статей на главной (дизайн сохраняю)", status: "generating" });
+      } else if (generated > 0) {
+        send({ type: "progress", keyword: stopped ? "Сохраняю уже готовые статьи" : "Обновляю ленту статей на главной (дизайн сохраняю)", status: "generating" });
       }
 
-      await finalizeSeoSite(storage, proj.id, finalCfg);
-      await persistGeoSurfaces(storage, proj.id, finalCfg, projectOrigin(proj));
+      if (generated > 0 || hasArtDirectedHome) {
+        await finalizeSeoSite(storage, proj.id, finalCfg);
+        await persistGeoSurfaces(storage, proj.id, finalCfg, projectOrigin(proj));
+      }
       const homeFile = await storage.getProjectFile(proj.id, "index.html");
       await storage.updateProject(proj.id, { seoConfig: finalCfg, generatedCode: homeFile?.code || "" } as any);
-      if (creditsDepleted) {
-        send({ type: "done", generated, total: cfg.pagesTotal, partial: true });
-      } else {
-        send({ type: "done", generated, total: cfg.pagesTotal });
-      }
+      send({
+        type: "done",
+        generated,
+        total: finalCfg.pagesTotal,
+        partial: creditsDepleted || stopped,
+        stopped,
+      });
     }
 
     try { res.end(); } catch {}
@@ -3623,6 +3677,86 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
       seoGenerateInFlight.delete(projectId);
       releaseGenerate();
     }
+  });
+
+  // POST /api/seo/:id/stop — stop launching new articles (in-flight ones finish).
+  app.post("/api/seo/:id/stop", async (req, res) => {
+    const userId = requireAuth(req, res);
+    if (!userId) return;
+    const projectId = parseInt(req.params.id);
+    const proj = await storage.getProject(projectId);
+    if (!proj || proj.userId !== userId) return res.status(404).json({ message: "Not found" });
+
+    const flight = seoGenerateInFlight.get(projectId);
+    if (flight) flight.stopRequested = true;
+
+    const cfg = proj.seoConfig as SeoConfig | undefined;
+    if (cfg?.status === "generating") {
+      await storage.updateProject(proj.id, { seoConfig: { ...cfg, status: "idle" } } as any);
+    }
+    res.json({ ok: true, stopping: !!flight });
+  });
+
+  // POST /api/seo/:id/remove-page — drop a keyword so it is not generated (or delete a ready article).
+  app.post("/api/seo/:id/remove-page", async (req, res) => {
+    const userId = requireAuth(req, res);
+    if (!userId) return;
+    const projectId = parseInt(req.params.id);
+    const proj = await storage.getProject(projectId);
+    if (!proj || proj.userId !== userId) return res.status(404).json({ message: "Not found" });
+
+    const keywordId = String((req.body || {}).keywordId || "").trim();
+    if (!keywordId) return res.status(400).json({ message: "keywordId required" });
+
+    const cfg = proj.seoConfig as SeoConfig | undefined;
+    if (!cfg?.clusters?.length) return res.status(400).json({ message: "Нет структуры" });
+
+    let removed: SeoKeyword | undefined;
+    let clusterSlug = "";
+    const clusters: SeoCluster[] = [];
+    for (const cluster of cfg.clusters) {
+      const hit = cluster.keywords.find((k) => k.id === keywordId);
+      if (hit) {
+        removed = hit;
+        clusterSlug = cluster.slug;
+      }
+      const keywords = cluster.keywords.filter((k) => k.id !== keywordId);
+      if (keywords.length) clusters.push({ ...cluster, keywords });
+    }
+    if (!removed) return res.status(404).json({ message: "Страница не найдена" });
+
+    const flight = seoGenerateInFlight.get(projectId);
+    if (flight) {
+      if (!flight.skipKeywordIds) flight.skipKeywordIds = new Set();
+      flight.skipKeywordIds.add(keywordId);
+    }
+
+    const filename = removed.filename || (clusterSlug && removed.slug ? `${clusterSlug}/${removed.slug}/index.html` : undefined);
+    await deleteSeoHtmlFile(storage, proj.id, filename);
+
+    const rawKeywords = (cfg.rawKeywords || []).filter((k) => k.trim() !== removed!.keyword.trim());
+    let next = recountSeoPages({ ...cfg, clusters, rawKeywords });
+    if (next.status === "generating" && !flight) next = { ...next, status: "idle" };
+
+    if ((removed.status === "done" || removed.filename) && next.pagesGenerated > 0) {
+      const home = await storage.getProjectFile(proj.id, "index.html");
+      const articles = collectSeoArticleBriefs(next);
+      if (home?.code && articles.length > 0) {
+        const patched = patchHomeArticleFeed(home.code, articles);
+        if (patched && patched !== home.code) {
+          await storage.upsertProjectFile({ projectId: proj.id, filename: "index.html", code: patched });
+          await storage.updateProject(proj.id, { seoConfig: next, generatedCode: patched } as any);
+        } else {
+          await storage.updateProject(proj.id, { seoConfig: next } as any);
+        }
+      } else {
+        await storage.updateProject(proj.id, { seoConfig: next } as any);
+      }
+    } else {
+      await storage.updateProject(proj.id, { seoConfig: next } as any);
+    }
+
+    res.json({ ok: true, seoConfig: next, removed: removed.keyword });
   });
 
   // POST /api/seo/:id/redesign-home — re-run magazine art director (keeps articles).
