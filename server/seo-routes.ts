@@ -940,8 +940,79 @@ async function ensureNativeOfferInArticle(
     out = await weaveNativeOfferWithAgent(out, kw, cluster, cfg);
     out = stripArticlePreambleBoxes(out);
   }
+  // The writer or the weaver can still miss it (kit-driven prompts, model refusals).
+  // A recommendation the owner paid for must never silently disappear.
+  if (!articleHasNativeOffer(out, offer.targetUrl) && hasArticleBodyAnchor(out)) {
+    out = insertAfterLeadOrCover(out, buildFallbackOfferCallout(kw, cluster, cfg, offer));
+  }
   out = moveFirstNativeOfferNearStart(out);
   return out;
+}
+
+/**
+ * Keep at most `max` tables and make the survivor presentable: the writer kit
+ * styles `.comparison-table`, and `.table-scroll` stops wide grids from
+ * squeezing cells into one-word columns on narrow screens.
+ */
+function capArticleTables(html: string, max: number): string {
+  if (!html || !/<table\b/i.test(html)) return html;
+  let out = html;
+  let cursor = 0;
+  let kept = 0;
+  let guard = 0;
+  while (guard++ < 24) {
+    const m = out.slice(cursor).match(/<table\b[^>]*>/i);
+    if (!m || m.index == null) break;
+    const openStart = cursor + m.index;
+    const closeAt = findMatchingTagClose(out, openStart + m[0].length, "table");
+    if (closeAt < 0) break;
+    const end = closeAt + "</table>".length;
+    if (kept >= max) {
+      out = out.slice(0, openStart) + out.slice(end);
+      cursor = openStart;
+      continue;
+    }
+    kept++;
+    let block = out.slice(openStart, end);
+    if (!/\bcomparison-table\b/i.test(block)) {
+      block = /\sclass=["'][^"']*["']/i.test(m[0])
+        ? block.replace(/\sclass=(["'])([^"']*)\1/i, (_x, q: string, cls: string) => ` class=${q}${cls} comparison-table${q}`)
+        : block.replace(/^<table\b/i, `<table class="comparison-table"`);
+    }
+    const before = out.slice(0, openStart);
+    if (!/<div[^>]*\btable-scroll\b[^>]*>\s*$/i.test(before)) {
+      block = `<div class="table-scroll">${block}</div>`;
+    }
+    out = before + block + out.slice(end);
+    cursor = openStart + block.length;
+  }
+  return out;
+}
+
+/** Without one of these anchors an insertion would land outside the document. */
+function hasArticleBodyAnchor(html: string): boolean {
+  return /<p class="lead"/i.test(html)
+    || /<div class="article-body"/i.test(html)
+    || /hero-article-img|hero-cover-fallback/i.test(html);
+}
+
+/** Last-resort, no-LLM native recommendation so the owner offer is always present. */
+function buildFallbackOfferCallout(
+  kw: SeoKeyword,
+  cluster: SeoCluster,
+  cfg: SeoConfig,
+  offer: { niche: string; targetUrl: string; ctaLabel: string },
+): string {
+  const url = safeHref(offer.targetUrl);
+  const product = seoOfferProductName(offer.niche || cfg.niche || cluster.name, offer.targetUrl);
+  const topic = String(kw.title || kw.keyword || cluster.name).replace(/\s+/g, " ").trim();
+  const essence = String(offer.niche || cfg.niche || cluster.name).replace(/\s+/g, " ").trim();
+  const ru = /[\u0400-\u04FF]/.test(`${topic}${essence}`);
+  const link = `<a href="${url}" target="_blank" rel="noopener sponsored">${esc(product)}</a>`;
+  const body = ru
+    ? `Если разбираетесь с темой «${esc(topic)}» на практике, начните с ${link} — ${esc(essence.toLowerCase())} без долгой настройки.`
+    : `Working through ${esc(topic)} in practice? Start with ${link} — ${esc(essence.toLowerCase())} without a long setup.`;
+  return `<div class="callout offer-native"><div class="callout-title">${ru ? "Совет редакции" : "Editor’s pick"}</div><p>${body}</p></div>`;
 }
 
 /** Recover owner CTA URL from art-directed chrome when seoConfig.targetUrl was never saved. */
@@ -1869,6 +1940,7 @@ async function persistUniqueSkin(
     !!existing?.code &&
     (existing.code.includes("magazine-art-v6") ||
       existing.code.includes("magazine-art-v7") ||
+      existing.code.includes("structural-guard-v15") ||
       existing.code.includes("structural-guard-v14") ||
       existing.code.includes("structural-guard-v8") ||
       existing.code.includes("structural-guard-v9") ||
@@ -2482,7 +2554,7 @@ function ensureStructuralGuardCss(css: string, cfg?: SeoConfig): string {
   if (cfg && isArtDirectedSeo(cfg)) {
     return ensureSoftMagazineGuardCss(css, { shellOwned });
   }
-  if (css.includes("structural-guard-v8") || css.includes("structural-guard-v9") || css.includes("structural-guard-v10") || css.includes("structural-guard-v11") || css.includes("structural-guard-v12") || css.includes("structural-guard-v13") || css.includes("magazine-art-v6") || css.includes("magazine-art-v7")) {
+  if (css.includes("structural-guard-v8") || css.includes("structural-guard-v9") || css.includes("structural-guard-v10") || css.includes("structural-guard-v11") || css.includes("structural-guard-v12") || css.includes("structural-guard-v13") || css.includes("structural-guard-v14") || css.includes("structural-guard-v15") || css.includes("magazine-art-v6") || css.includes("magazine-art-v7")) {
     return ensureSoftMagazineGuardCss(css, { shellOwned });
   }
   if (css.includes("structural-guard-v7")) return css;
@@ -2994,7 +3066,7 @@ function getContentTypeInstructions(contentType: string | undefined, keyQuestion
 - Strong lead, then prerequisites (1-2 sentences)
 - Number each step using <div class="step-box"><div class="step-num">1</div><div class="step-content"><h3>Step title</h3><p>Clear action + expected result</p></div></div>
 - "Частые ошибки" H2 section
-- Short reference table at the end`,
+- End with a short "что проверить перед стартом" checklist (list, not a table)`,
 
     comparison: `CONTENT TYPE: Comparison Article
 - Strong lead with a one-sentence verdict in prose
@@ -3173,6 +3245,17 @@ async function generateArticleHtml(
   const today = new Date().toLocaleDateString("ru-RU");
   const writerKit = String(cfg.articleKit || "").trim();
 
+  const resolvedType = kw.contentType || cluster.contentType || "guide";
+  // A comparison grid only earns its place where the reader is actually choosing
+  // between options — everywhere else it reads as filler.
+  const tableFits = ["comparison", "review", "listicle", "pricing"].includes(resolvedType)
+    || /\b(vs|или|сравнени|лучш|топ|рейтинг|отличи|разниц|тариф|цен|стоимост|выбрат|альтернатив)/i.test(
+      `${kw.keyword} ${kw.title}`,
+    );
+  const tableRule = tableFits
+    ? `TABLES: at most ONE <table class="comparison-table"> in the whole article, only where the reader is genuinely choosing between options. Give it a real <thead> with a header row, 3-5 rows, short cells (max ~7 words). Never wrap a table in another table, never use it for prose.`
+    : `TABLES: this article is a "${resolvedType}" — do NOT insert a comparison table or a «Сравнительный анализ» section. Explain in prose, lists and the kit components instead. A table is allowed ONLY if the topic literally requires a data grid (units, timings, doses) — max one, with a real <thead>.`;
+
   const offer = resolveSeoOffer(kw, cluster, cfg);
   const safeUrl = safeHref(offer.targetUrl);
   const offerNiche = offer.niche || cfg.niche;
@@ -3219,6 +3302,7 @@ ${writerKit.slice(0, 5000)}
 ────────────────
 - The VERY FIRST paragraph MUST be <p class="lead">…</p>.
 - Follow the kit's rhythm and meta rules exactly. Do not fall back to generic 💡/⚠️/📌 callouts if the kit does not define them.
+- {{IMG:...}} and {{OFFER:...}} markers are NOT kit components — they are server pipelines and stay mandatory even though the kit does not list them.
 - NO SVG, NO CSS animations, NO decorative flourish lines, NO Lottie. Typography + photos + kit components only.`
     : `VISUAL RHYTHM — RICH MAGAZINE LAYOUT WITHOUT SVG (CRITICAL):
 - The VERY FIRST paragraph MUST be <p class="lead">…</p> (bold larger intro with drop-cap).
@@ -3226,7 +3310,7 @@ ${writerKit.slice(0, 5000)}
   • Pull quote: <blockquote class="pull-quote">Memorable insight in 10-18 words.</blockquote>
   • Callout box: <div class="callout"><div class="callout-title">💡 Совет</div><p>Actionable tip.</p></div> (also ⚠️ Важно / 📌 Запомните)
   • Stat grid (2-4 cards): <div class="stat-grid"><div class="stat-card"><div class="stat-num">73%</div><div class="stat-label">short description</div></div>…</div>
-  • Comparison table, numbered steps, pros/cons — when they genuinely help
+  • Numbered steps or pros/cons — when they genuinely help
 - Use these elements at least 4 times. Never put two of the same type back-to-back.
 - NO SVG, NO CSS animations, NO decorative flourish lines, NO Lottie. Typography + photos + callouts only.`}
 - DO NOT output any <img> tags yourself. Cover is {{COVER}}. For in-article photos use ONLY markers:
@@ -3242,7 +3326,8 @@ ${hasReferral ? `- OWNER OFFER uses the SAME marker idea as photos. Place EXACTL
   • Another example: section comparing two tools → show both products side by side in a clean studio scene relevant to the niche.
   • Prompts in English, concrete, no text/watermarks/logos in the image description.
   • Place the marker BETWEEN paragraphs where the photo would illustrate that section — never inside a heading.
-- 5-6 H2 sections; vary paragraph length; use <ul>/<ol> and <table> where helpful.
+- 5-6 H2 sections; vary paragraph length; use <ul>/<ol> where helpful.
+${tableRule}
 - Keep text readable: never put body copy on busy photo backgrounds without a solid overlay block.
 
 INTERNAL LINKS (use naturally in body text as real <a href="..."> — ONLY URLs from this list):
@@ -3328,6 +3413,7 @@ Output ONLY the HTML fragment above — no markdown, no explanations, no page-le
     .replace(/<svg\b[\s\S]*?<\/svg>/gi, "");
   articleContent = await ensureNativeOfferInArticle(articleContent, kw, cluster, cfg);
   articleContent = polishArticleLists(articleContent);
+  articleContent = capArticleTables(articleContent, 1);
 
   const shell = isUsableArticleShell(cfg.articleShell) ? String(cfg.articleShell) : "";
   const relatedBlock = buildRelatedArticlesHtml(kw, cluster, cfgAll);
@@ -3488,7 +3574,8 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
       if (isArtDirectedSeo(cfg) && (cfg.pagesGenerated || 0) > 0) {
         const cssFileArt = await storage.getProjectFile(proj.id, "assets/style.css");
         const shellOwned = isUsableArticleShell(cfg.articleShell);
-        const currentGuard = shellOwned ? "structural-guard-v14-shell" : "structural-guard-v13";
+        // Trailing space keeps the non-shell marker from matching "…-v15-shell".
+        const currentGuard = shellOwned ? "structural-guard-v15-shell" : "structural-guard-v15 ";
         if (cssFileArt?.code && !cssFileArt.code.includes(currentGuard)) {
           await storage.upsertProjectFile({
             projectId: proj.id,
@@ -4499,7 +4586,7 @@ ${offerBlock}
 - Основной текст 17–19px, line-height 1.65–1.85, ширина 62–76ch; контраст WCAG AA. Текст на фото — .on-media + overlay.
 - Сохраняй data-seo-article-feed и .article-card на главной (сервер обновляет карточки).
 - Статьи: без SVG-анимаций; до 3 фото. Если задан оффер владельца — в КАЖДОЙ статье две нативные рекомендации (callout.offer-native + ссылка), текст пишешь сам под тему материала. Не засоряй главную. Не .cta-block и не шаблонные aside.ref-offer.
-- Маркеры magazine-art-v6 / structural-guard-v13 не удаляй. Запрещены горизонтальный скролл и микротекст.
+- Маркеры magazine-art-v6 / structural-guard-v15 не удаляй. Запрещены горизонтальный скролл и микротекст.
 - Для фото — точные URL из вложений. Не выдумывай стоки.
 - Краткий итог после патчей, без огромного HTML в чат.
 - Пользователь смотрит файл «${safeActive}».`;
