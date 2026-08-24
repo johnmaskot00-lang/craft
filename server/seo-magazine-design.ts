@@ -60,11 +60,48 @@ export const SEO_TITLE_TREATMENTS = [
 ] as const;
 export type SeoTitleTreatment = (typeof SEO_TITLE_TREATMENTS)[number];
 
+/**
+ * Left free, the model reaches for the same dark editorial skin every time, so
+ * the palette, type voice and homepage rhythm are assigned per project too.
+ */
+export const SEO_PALETTES = [
+  "paper-light",
+  "ink-dark",
+  "warm-cream",
+  "cold-editorial",
+  "duotone-accent",
+  "high-contrast-mono",
+  "muted-pastel",
+] as const;
+export type SeoPalette = (typeof SEO_PALETTES)[number];
+
+export const SEO_TYPE_VOICES = [
+  "serif-display",
+  "grotesque-bold",
+  "condensed-news",
+  "humanist-soft",
+  "mono-accent",
+  "mixed-serif-sans",
+] as const;
+export type SeoTypeVoice = (typeof SEO_TYPE_VOICES)[number];
+
+export const SEO_HOME_RHYTHMS = [
+  "hero-then-feed",
+  "categories-first",
+  "editors-picks-band",
+  "index-column-list",
+  "alternating-bands",
+] as const;
+export type SeoHomeRhythm = (typeof SEO_HOME_RHYTHMS)[number];
+
 export type SeoLayoutDna = {
   hero: SeoHeroVariant;
   reading: SeoReadingLayout;
   cover: SeoCoverTreatment;
   title: SeoTitleTreatment;
+  palette: SeoPalette;
+  type: SeoTypeVoice;
+  rhythm: SeoHomeRhythm;
 };
 
 function seedHash(seed: string, salt: string): number {
@@ -83,7 +120,67 @@ export function pickLayoutDna(seed: string): SeoLayoutDna {
     reading: SEO_READING_LAYOUTS[seedHash(seed, "reading") % SEO_READING_LAYOUTS.length],
     cover: SEO_COVER_TREATMENTS[seedHash(seed, "cover") % SEO_COVER_TREATMENTS.length],
     title: SEO_TITLE_TREATMENTS[seedHash(seed, "title") % SEO_TITLE_TREATMENTS.length],
+    palette: SEO_PALETTES[seedHash(seed, "palette") % SEO_PALETTES.length],
+    type: SEO_TYPE_VOICES[seedHash(seed, "type") % SEO_TYPE_VOICES.length],
+    rhythm: SEO_HOME_RHYTHMS[seedHash(seed, "rhythm") % SEO_HOME_RHYTHMS.length],
   };
+}
+
+function paletteDescription(v: SeoPalette): string {
+  switch (v) {
+    case "paper-light":
+      return "light paper background, near-black text, one saturated accent. Bright and airy — NOT a dark theme.";
+    case "ink-dark":
+      return "deep ink background with warm off-white text and a single glowing accent.";
+    case "warm-cream":
+      return "cream/sand background, brown-black text, terracotta or olive accent. Print magazine warmth.";
+    case "cold-editorial":
+      return "cool grey-white surfaces, steel blue or slate accent, crisp hairlines.";
+    case "duotone-accent":
+      return "two strong brand colours carrying the whole site (background tint + accent), minimal neutrals.";
+    case "high-contrast-mono":
+      return "black and white with one tiny accent used sparingly — brutal editorial contrast.";
+    case "muted-pastel":
+      return "soft desaturated pastel surfaces with a deep text colour; gentle, boutique feel.";
+    default:
+      return String(v);
+  }
+}
+
+function typeVoiceDescription(v: SeoTypeVoice): string {
+  switch (v) {
+    case "serif-display":
+      return "expressive Cyrillic serif for headlines (e.g. Playfair Display, PT Serif, Cormorant), quiet sans for body.";
+    case "grotesque-bold":
+      return "heavy neo-grotesque headlines with tight tracking; same family lighter for body.";
+    case "condensed-news":
+      return "condensed newspaper headlines, wide-set body text — dense masthead energy.";
+    case "humanist-soft":
+      return "friendly humanist sans throughout, generous line height, rounded shapes.";
+    case "mono-accent":
+      return "sans body with monospace kickers, meta and numbers as the signature detail.";
+    case "mixed-serif-sans":
+      return "serif deck/lead against sans headlines — deliberate mismatch as the house style.";
+    default:
+      return String(v);
+  }
+}
+
+function homeRhythmDescription(v: SeoHomeRhythm): string {
+  switch (v) {
+    case "hero-then-feed":
+      return "hero, then straight into the article feed; categories live in the footer/menu.";
+    case "categories-first":
+      return "a strong category index sits above the hero — the site reads as a directory first.";
+    case "editors-picks-band":
+      return "hero, then a hand-picked band of 2–3 highlighted stories, then the feed.";
+    case "index-column-list":
+      return "the homepage is a numbered index list of material rather than a card grid (the feed block still exists below).";
+    case "alternating-bands":
+      return "full-width alternating colour bands, each section on its own surface.";
+    default:
+      return String(v);
+  }
 }
 
 function readingLayoutDescription(v: SeoReadingLayout): string {
@@ -213,9 +310,13 @@ PUBLICATION
 
 ASSIGNED SHAPE FOR THIS PUBLICATION (mandatory — design inside it, never substitute another):
 - Hero: "${heroVariant}" (do not mix other archetypes)
+- Palette: "${dna.palette}" — ${paletteDescription(dna.palette)}
+- Type voice: "${dna.type}" — ${typeVoiceDescription(dna.type)}
+- Homepage rhythm: "${dna.rhythm}" — ${homeRhythmDescription(dna.rhythm)}
 - Reading layout: "${dna.reading}" — ${readingLayoutDescription(dna.reading)}
 - Cover treatment: "${dna.cover}" — ${coverTreatmentDescription(dna.cover)}
 - Headline treatment: "${dna.title}" — ${titleTreatmentDescription(dna.title)}
+The palette and type voice are NOT suggestions: two sites from this generator must not be recognisable as siblings. If the assigned palette is light, ship a light site.
 
 ${critique ? `PREVIOUS ATTEMPT REJECTED — fix this:\n${critique}\n` : ""}
 ${tasteBrief ? `TASTE REFERENCES (principles only, never copy layouts):\n${tasteBrief.slice(0, 10000)}\n` : ""}
@@ -239,6 +340,7 @@ Compose it however the publication demands — order, rhythm and section count a
 - link href="/assets/style.css" exactly; GEO meta + JSON-LD in <head>
 - Mobile-first; no horizontal scroll; real photo covers, not decorative SVG loops
 - Only REAL article/category hrefs from the lists above
+- IMAGES: use ONLY the "image" URLs from REAL ARTICLES above (and the logo). Unsplash, Pexels, Picsum, placeholder services and any other external host are FORBIDDEN — those pictures are blocked for our readers and the server overwrites them anyway. If an article has no image yet, use a CSS gradient/colour block instead of an <img>.
 
 ════════════════════════════════════
 3) FEED CONTRACT (short — server paginates)
@@ -253,7 +355,12 @@ Compose it however the publication demands — order, rhythm and section count a
 Define --bg --text --text2 --muted --brand --border --heading-font --body-font --r --w
 and style: header, hero, category entries, .articles-grid, .article-card, .ac-*, .seo-feed-pager,
 the article reading layout for "${dna.reading}", .article-body typography, .article-header h1/.article-deck/.article-meta,
-.breadcrumb, .sidebar, .related-articles/.related-card, .faq-*, .author-box, footer.
+.breadcrumb (+ .sep/.cur), footer.
+These EXACT class names are emitted by the server or by our writers on every article — style all of them or the pages ship broken:
+.sidebar .sb-block .sb-head .sb-body .sb-list .sb-num · .related-articles .related-grid .related-card .rc-title .tag ·
+.faq-section .faq-item .faq-question .faq-answer · .author-box .author-avatar .author-info .author-name .author-bio ·
+.callout .callout-title .callout.offer-native · .stat-grid .stat-card .stat-num .stat-label · .pull-quote ·
+.table-scroll table.comparison-table (th/td/.ct-winner) · .pros-cons .pros .cons · .step-box .step-num · .verdict-box · .reading-time
 A second pass will ask you for the article and category page markup — the classes you write here are the ones it will use.
 
 OUTPUT — exactly two FILE blocks, nothing else:
@@ -315,6 +422,7 @@ Return the full <body> markup with these tokens left VERBATIM (the server substi
 - {{RELATED}} is one real related-articles block — place it ONCE at the end of the reading flow.
 - Use your own containers and classes. Do NOT ship a generic .article-page + .article-layout sidebar grid unless it genuinely is the assigned layout.
 - Keep <body class="…"> — the server merges its own runtime classes into it.
+- NEVER put a token inside an HTML comment (\`<!-- … {{ARTICLE}} … -->\`). The server substitutes text literally, so the whole article would end up commented out and invisible. No explanatory comments in the template at all.
 
 ════════════════════════════════════
 2) CATEGORY PAGE
@@ -380,6 +488,16 @@ export type MagazineDesignFiles = {
 const ARTICLE_SHELL_TOKENS = ["{{ARTICLE}}", "{{HEADER}}", "{{FOOTER}}"] as const;
 const CATEGORY_SHELL_TOKENS = ["{{CARDS}}", "{{HEADER}}", "{{FOOTER}}", "{{CATEGORY_NAME}}"] as const;
 
+/** Tokens the agent parked inside an explanatory comment would render invisible content. */
+export function shellTokensInsideComments(shell: string | undefined): string[] {
+  if (!shell) return [];
+  const buried = new Set<string>();
+  for (const comment of shell.match(/<!--[\s\S]*?-->/g) || []) {
+    for (const token of comment.match(/\{\{[A-Z_]+\}\}/g) || []) buried.add(token);
+  }
+  return [...buried];
+}
+
 /** A shell we can actually render into — missing tokens mean we fall back to the server skeleton. */
 export function isUsableArticleShell(shell: string | undefined): boolean {
   if (!shell || shell.length < 200) return false;
@@ -436,6 +554,17 @@ export function articleTemplateIssues(files: MagazineDesignFiles): string[] {
   }
   if (!files.writerKit || files.writerKit.length < 400) {
     issues.push("templates/writer-kit.md missing or too short — define the in-body components with exact HTML snippets.");
+  }
+  for (const [name, shell] of [
+    ["templates/article.html", files.articleShell],
+    ["templates/category.html", files.categoryShell],
+  ] as const) {
+    const buried = shellTokensInsideComments(shell);
+    if (buried.length) {
+      issues.push(
+        `${name} places ${buried.join(", ")} inside an HTML comment — the whole page would be commented out. Put tokens in real markup and keep notes out of the template.`,
+      );
+    }
   }
   return issues;
 }
@@ -777,6 +906,32 @@ img,video,canvas,svg{max-width:100%;height:auto}
 :where(.callout-title){font-size:.72rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;margin:0 0 .35rem;color:var(--brand,inherit)}
 :where(.callout.offer-native) p{margin:0;line-height:1.65}
 :where(.callout.offer-native) a{font-weight:750;color:var(--brand,inherit);text-decoration:underline;text-underline-offset:.16em}
+
+/* Blocks the server or the writer emits by contract. The art director does not
+   always style them, and an unstyled sidebar or stat grid ruins the page. */
+:where(.tag){display:inline-flex;padding:.18rem .55rem;border-radius:999px;background:color-mix(in srgb,var(--brand,currentColor) 16%,transparent);color:var(--brand,inherit);font-size:.62rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase}
+:where(.reading-time),:where(.article-meta) span{font-size:.76rem;opacity:.75}
+:where(.breadcrumb) .sep{opacity:.4;padding:0 .1rem}
+:where(.breadcrumb) .cur{opacity:.65}
+:where(.stat-grid){display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:.75rem;margin:1.4rem 0}
+:where(.stat-card){padding:1rem .85rem;text-align:center;border-radius:var(--r,12px);border:1px solid var(--border,rgba(127,127,127,.2))}
+:where(.stat-num){font-family:var(--heading-font,inherit);font-size:1.65rem;font-weight:850;line-height:1;color:var(--brand,inherit)}
+:where(.stat-label){display:block;font-size:.76rem;margin-top:.35rem;opacity:.8}
+:where(.pull-quote),:where(.article-body) blockquote{margin:1.6rem 0;padding:.15rem 0 .15rem 1.15rem;border-left:4px solid var(--brand,currentColor);font-size:1.18rem;line-height:1.5;font-weight:700;font-style:normal}
+:where(.key-takeaways),:where(.toc){margin:1.25rem 0 1.5rem;padding:1.05rem 1.2rem;border-radius:var(--r,14px);border:1px solid var(--border,rgba(127,127,127,.22))}
+:where(.sidebar){display:block}
+:where(.sb-block){margin:0 0 1.15rem;border:1px solid var(--border,rgba(127,127,127,.2));border-radius:var(--r,14px);overflow:hidden}
+:where(.sb-head){padding:.55rem .9rem;font-size:.68rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;background:color-mix(in srgb,var(--brand,currentColor) 12%,transparent)}
+:where(.sb-body){padding:.7rem .9rem}
+:where(.sb-list) li{padding:.4rem 0;border-bottom:1px solid var(--border,rgba(127,127,127,.14));font-size:.82rem;line-height:1.4}
+:where(.sb-list) li:last-child{border-bottom:0}
+:where(.sb-num){font-size:.62rem;font-weight:800;color:var(--brand,inherit);margin-right:.35rem}
+:where(.related-card) .rc-title,:where(h3.rc-title){font-size:.86rem;line-height:1.35;margin:.3rem 0 0;font-weight:700}
+:where(.faq-item){border:1px solid var(--border,rgba(127,127,127,.2));border-radius:var(--r,12px);margin:0 0 .45rem;overflow:hidden}
+:where(.faq-item) .faq-question{padding:.8rem 1rem;font-weight:700}
+:where(.faq-item) .faq-answer{padding:.15rem 1rem 1rem;line-height:1.65}
+:where(.author-info) .author-name{font-weight:750}
+:where(.author-info) .author-bio{font-size:.82rem;opacity:.75;line-height:1.5}
 ${articleComponentRules((sel) => `:where(${sel})`)}
 @media(max-width:1024px){:where([data-seo-article-feed]){grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:720px){
@@ -1061,9 +1216,42 @@ export function homeFeedNeedsRepair(homeHtml: string, articleCount: number): boo
   return countFeedCards(homeHtml) === 0;
 }
 
+const STOCK_IMAGE_HOST_RE =
+  /https?:\/\/[^"'\s)]*(?:unsplash\.com|pexels\.com|picsum\.photos|placehold\.co|placeholder\.com|dummyimage\.com|pixabay\.com|loremflickr|placekitten|source\.unsplash)[^"'\s)]*/gi;
+
+/**
+ * The art director designs before the covers exist, so it fills the hero with
+ * stock URLs — which are also unreliable from Russia. Every picture on the site
+ * must be one we generated, so stock links are swapped for real covers: the one
+ * belonging to the linked article when we can tell, otherwise the next unused.
+ */
+export function replaceStockImagesWithCovers(homeHtml: string, articles: SeoArticleBrief[]): string {
+  if (!homeHtml || !STOCK_IMAGE_HOST_RE.test(homeHtml)) return homeHtml;
+  STOCK_IMAGE_HOST_RE.lastIndex = 0;
+
+  const covers = articles.map((a) => a.image).filter((x): x is string => !!x);
+  if (!covers.length) return homeHtml;
+  const byHref = new Map(articles.filter((a) => a.image).map((a) => [a.href, a.image!]));
+
+  let cursor = 0;
+  const nextCover = () => covers[cursor++ % covers.length];
+
+  // Anything carrying an href/data-href gets that article's own cover.
+  const scoped = homeHtml.replace(
+    /<(a|div|li|article|section)\b[^>]*\b(?:data-)?href=["']([^"']+)["'][\s\S]*?<\/\1>/gi,
+    (block: string, _tag: string, href: string) => {
+      const cover = byHref.get(href);
+      if (!cover) return block;
+      return block.replace(STOCK_IMAGE_HOST_RE, cover);
+    },
+  );
+
+  return scoped.replace(STOCK_IMAGE_HOST_RE, () => nextCover());
+}
+
 export function patchHomeArticleFeed(homeHtml: string, articles: SeoArticleBrief[]): string {
   if (!homeHtml || articles.length === 0) return homeHtml;
-  let html = stripOrphanHomeArticleCards(homeHtml);
+  let html = replaceStockImagesWithCovers(stripOrphanHomeArticleCards(homeHtml), articles);
   const feed = refreshArticleFeedHtml(articles);
 
   // Fill visible empty «Статьи» / «Материалы» blocks the art director left blank.
@@ -1234,6 +1422,20 @@ const RELATED_MARK_CLOSE = "<!--/seo-related-->";
 export function stripInlineAlsoParagraphs(html: string): string {
   if (!html) return html;
   return html.replace(/\s*<p\s+class=["'][^"']*article-also[^"']*["'][^>]*>[\s\S]*?<\/p>/gi, "");
+}
+
+/**
+ * Repair for pages built from a shell that annotated its {{ARTICLE}} slot with
+ * an HTML comment: the substituted article ended up inside the comment, so the
+ * page rendered as chrome around nothing. Keeps the markup, drops the note.
+ */
+export function uncommentBuriedArticle(html: string): string {
+  if (!html) return html;
+  return html.replace(/<!--([\s\S]*?)-->/g, (whole: string, inner: string) => {
+    if (!/class=["'][^"']*\barticle-(?:header|body)\b/i.test(inner)) return whole;
+    const firstTag = inner.indexOf("<");
+    return firstTag >= 0 ? inner.slice(firstTag) : whole;
+  });
 }
 
 export function stripRelatedArticleBlocks(html: string): string {

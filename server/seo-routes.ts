@@ -45,7 +45,9 @@ import {
   patchHomeArticleFeed,
   pickLayoutDna,
   relabelHeaderCategoryLinks,
+  replaceStockImagesWithCovers,
   stripInlineAlsoParagraphs,
+  uncommentBuriedArticle,
   type MagazineDesignFiles,
 } from "./seo-magazine-design";
 import { loadProfessionalTastePack, truncateSkillsForStudy } from "./taste-skill-loader";
@@ -1679,12 +1681,34 @@ async function repairSeoSiteLayout(storage: IStorage, projectId: number, cfg: Se
   }
 
   const files = await storage.getProjectFiles(projectId);
+  const briefs = collectSeoArticleBriefs(cfg);
   for (const f of files) {
     if (!f.filename.toLowerCase().endsWith(".html") || !f.code) continue;
     let next = normalizeSeoMediaUrls(f.code);
     next = stripPageAds(next);
+    next = replaceStockImagesWithCovers(next, briefs);
+    next = uncommentBuriedArticle(next);
     if (next !== f.code) {
       await storage.upsertProjectFile({ projectId, filename: f.filename, code: next });
+    }
+  }
+}
+
+/**
+ * Heals pages already on disk: articles commented out by an annotated shell and
+ * stock photos left over from a design pass that ran before the covers existed.
+ */
+async function repairSeoPageMarkup(storage: IStorage, projectId: number, cfg: SeoConfig): Promise<void> {
+  const briefs = collectSeoArticleBriefs(cfg);
+  const files = await storage.getProjectFiles(projectId);
+  for (const f of files) {
+    if (!f.filename.toLowerCase().endsWith(".html") || !f.code) continue;
+    const next = replaceStockImagesWithCovers(uncommentBuriedArticle(f.code), briefs);
+    if (next !== f.code) {
+      await storage.upsertProjectFile({ projectId, filename: f.filename, code: next });
+      if (f.filename === "index.html") {
+        await storage.updateProject(projectId, { generatedCode: next } as any);
+      }
     }
   }
 }
@@ -3206,6 +3230,14 @@ function renderSeoShell(
   if (!/^<body\b/i.test(out)) out = `<body>\n${out}\n</body>`;
   if (!/<\/body>/i.test(out)) out = `${out}\n</body>`;
 
+  // Art directors like to annotate their templates: "<!-- article is projected
+  // here: {{ARTICLE}} -->". Substituting inside that comment buries the whole
+  // page in it, so a commented region keeps its tokens and loses the prose.
+  out = out.replace(/<!--[\s\S]*?-->/g, (comment) => {
+    const found = comment.match(/\{\{[A-Z_]+\}\}/g);
+    return found ? found.join("\n") : comment;
+  });
+
   const required = bodyClass(cfg);
   out = out.replace(/^<body\b([^>]*)>/i, (_m, attrs: string) => {
     const existing = /class=["']([^"']*)["']/i.exec(attrs)?.[1] || "";
@@ -3594,6 +3626,7 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
         }
         await refreshArticleReferralOffers(storage, proj.id, cfg);
         await refreshArticleSidebars(storage, proj.id, cfg);
+        await repairSeoPageMarkup(storage, proj.id, cfg);
         await syncSeoShellAcrossPages(storage, proj.id, cfg);
       }
       (proj as any).seoConfig = cfg;
