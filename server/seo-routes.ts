@@ -1713,6 +1713,51 @@ async function repairSeoPageMarkup(storage: IStorage, projectId: number, cfg: Se
   }
 }
 
+function articleCoverPrompt(kw: SeoKeyword, cluster: SeoCluster, cfg: SeoConfig): string {
+  return `Premium editorial magazine cover image for the article "${kw.title}" about ${cluster.name}, ${cfg.niche}. Cinematic, photorealistic, high-end, 16:9, no text, no watermark.`;
+}
+
+/** Covers the art director needs on hand before it can compose a homepage. */
+const SEO_DESIGN_COVER_SEED = 8;
+
+/**
+ * Art direction happens before any article is written, so without this the
+ * designer has no photography to build a hero from and falls back to flat
+ * gradient tiles. These covers belong to real articles and are reused when
+ * those articles are generated, so nothing is spent twice.
+ */
+async function pregenerateDesignCovers(
+  storage: IStorage,
+  projectId: number,
+  cfg: SeoConfig,
+  onStatus?: (msg: string) => void,
+): Promise<void> {
+  const pending: Array<{ kw: SeoKeyword; cluster: SeoCluster }> = [];
+  for (const cluster of cfg.clusters) {
+    if (isSeoDumpCluster(cluster)) continue;
+    for (const kw of cluster.keywords) {
+      if (kw.image) continue;
+      pending.push({ kw, cluster });
+      if (pending.length >= SEO_DESIGN_COVER_SEED) break;
+    }
+    if (pending.length >= SEO_DESIGN_COVER_SEED) break;
+  }
+  if (!pending.length) return;
+
+  onStatus?.(`Готовлю обложки для главной (${pending.length})`);
+  await Promise.all(
+    pending.map(async ({ kw, cluster }) => {
+      try {
+        const url = await generateCoverWithRetry(articleCoverPrompt(kw, cluster, cfg));
+        if (url) kw.image = url;
+      } catch {
+        // The article run generates its own cover later.
+      }
+    }),
+  );
+  await storage.updateProject(projectId, { seoConfig: cfg } as any);
+}
+
 /** True when this project already has an agent-designed homepage + stylesheet. */
 async function hasArtDirectedSeoFiles(storage: IStorage, projectId: number): Promise<boolean> {
   const [home, css] = await Promise.all([
@@ -3202,6 +3247,43 @@ function getContentTypeInstructions(contentType: string | undefined, keyQuestion
   return (structures[qt] || structures.guide) + qBlock;
 }
 
+export function extractArticleH1(html: string): string {
+  const m = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+  if (!m) return "";
+  return m[1]
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeForMatch(s: string): string {
+  return s.toLowerCase().replace(/ё/g, "е").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+/** The writer may rephrase the headline, but the query has to survive in it. */
+function headlineCoversKeyword(headline: string, keyword: string): boolean {
+  const hay = normalizeForMatch(headline);
+  const tokens = normalizeForMatch(keyword).split(" ").filter((t) => t.length > 2);
+  if (!tokens.length) return true;
+  // Prefix matching tolerates Russian inflection ("нейросеть" → "нейросети").
+  const hits = tokens.filter((t) => hay.includes(t.slice(0, Math.max(4, t.length - 2)))).length;
+  return hits / tokens.length >= 0.6;
+}
+
+/**
+ * A raw query makes a poor H1 ("Nano banana 2 нейросеть"), so the writer composes
+ * the headline. We only keep it when it still carries the keyword and reads like
+ * a headline — otherwise the original title stands.
+ */
+function resolveArticleHeadline(fragment: string, kw: SeoKeyword): string {
+  const written = extractArticleH1(fragment);
+  if (!written || written.length < 14 || written.length > 120) return kw.title;
+  if (!headlineCoversKeyword(written, kw.keyword)) return kw.title;
+  return written;
+}
+
 /** Article deck → meta description, so pages stop sharing one site-wide blurb. */
 function articleMetaDescription(articleHtml: string, kw: SeoKeyword, cfg: SeoConfig): string {
   const deck = articleHtml.match(/<p class="article-deck"[^>]*>([\s\S]*?)<\/p>/i)?.[1]
@@ -3263,7 +3345,6 @@ async function generateArticleHtml(
   idx: number,
 ): Promise<string> {
   const cfgAll: SeoConfig = { ...cfg, clusters: allClusters };
-  const sidebar = buildArticleSidebar(kw, cluster, cfgAll);
 
   // ── Internal links for AI ──
   const relatedLinks = allClusters
@@ -3297,7 +3378,11 @@ async function generateArticleHtml(
   const prompt = `You are a world-class editorial designer + SEO writer creating a PREMIUM WEB MAGAZINE article. Write ONLY the inner article HTML fragment — NO <!DOCTYPE>, NO <html>, NO <head>, NO <nav>, NO <footer>, NO <body>.
 
 KEYWORD: "${kw.keyword}"
-TITLE (H1): "${kw.title}"
+HEADLINE — YOU WRITE IT (this is the H1 readers and search engines see):
+- It MUST contain the keyword. You may fix capitalisation and grammar: brand names get their official spelling (Nano Banana 2, ElevenLabs, HeyGen, Midjourney), and the phrase must read like Russian written by a human, not a search query.
+- Then add what the raw query does not say: the angle, the outcome, the audience, a number or the year. "${kw.keyword}" alone is NOT an acceptable headline.
+- 45–75 characters, sentence case, no ALL CAPS, no ellipsis, no "полное руководство"/"всё, что нужно знать"/"секреты" clichés, no invented statistics.
+- Every word of the keyword stays in the headline; you add words around them. Examples of the shape: "Nano Banana 2: нейросеть для карточек товара на маркетплейсах", "ElevenLabs: озвучка на русском без акцента за 15 минут".
 CATEGORY: "${cluster.name}"
 SITE: "${cfg.siteTitle}" — ${cfg.siteDescription}
 PUBLICATION DESIGN BRIEF:
@@ -3376,7 +3461,7 @@ Product: "${productName}" · essence: "${offerNiche}" · URL ${safeUrl}
 
 OUTPUT EXACTLY THIS STRUCTURE (no outer wrappers, no page-level tags):
 <div class="article-header">
-  <h1>${kw.title}</h1>
+  <h1>[the headline you wrote — keyword inside, plus the angle]</h1>
   <p class="article-deck">[One concise 140-220 character summary that promises a clear reader benefit without repeating H1]</p>
 ${writerKit
     ? `  <div class="article-meta">[compose exactly as this publication's kit specifies — not a generic time+date line]</div>`
@@ -3415,6 +3500,16 @@ Output ONLY the HTML fragment above — no markdown, no explanations, no page-le
     console.warn(`[SEO] Article gen failed for ${kw.keyword}:`, e?.message);
     return "";
   }
+
+  // The writer's headline becomes the page title everywhere: H1, <title>, og,
+  // breadcrumb, schema, and later the feed card via the caller.
+  const headline = resolveArticleHeadline(articleContent, kw);
+  kw = { ...kw, title: headline };
+  articleContent = articleContent.replace(
+    /(<h1\b[^>]*>)([\s\S]*?)(<\/h1>)/i,
+    (_m, open: string, _inner: string, close: string) => `${open}${esc(headline)}${close}`,
+  );
+  const sidebar = buildArticleSidebar(kw, cluster, cfgAll);
 
   // ── Cover image block (one per article, GPT-image-2 1K) with graceful fallback ──
   const coverUrl = cssUrl(cover);
@@ -3926,6 +4021,9 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
     if (!(await hasArtDirectedSeoFiles(storage, proj.id))) {
       send({ type: "progress", keyword: "Арт-директор: придумываю дизайн издания", status: "generating" });
       try {
+        await pregenerateDesignCovers(storage, proj.id, cfg, (msg) =>
+          send({ type: "progress", keyword: msg, status: "generating" }),
+        );
         cfg = await designSeoMagazineSite(storage, proj.id, cfg, (msg) =>
           send({ type: "progress", keyword: msg, status: "generating" }),
         );
@@ -4006,9 +4104,12 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
           return;
         }
 
-        const coverPrompt = `Premium editorial magazine cover image for the article "${kw.title}" about ${cluster.name}, ${cfg.niche}. Cinematic, photorealistic, high-end, 16:9, no text, no watermark.`;
-        let cover = "";
-        try { cover = await generateCoverWithRetry(coverPrompt); } catch { cover = ""; }
+        const coverPrompt = articleCoverPrompt(kw, cluster, cfg);
+        // Seeded before art direction for the homepage — do not pay for it twice.
+        let cover = kw.image || "";
+        if (!cover) {
+          try { cover = await generateCoverWithRetry(coverPrompt); } catch { cover = ""; }
+        }
         if (!cover) {
           send({ type: "progress", keyword: `${kw.keyword} — повтор обложки`, status: "generating", generated, total: cfg.pagesTotal });
           try {
@@ -4026,6 +4127,10 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
             console.warn(`[SEO] Article attempt ${attempt} failed for "${kw.keyword}":`, artErr?.message);
           }
         }
+        // The writer composes the real headline; keep it so feed cards, related
+        // links and schema stop showing the raw search query.
+        const writtenHeadline = html ? extractArticleH1(html) : "";
+        if (writtenHeadline) kw.title = writtenHeadline;
         if (html && cover) html = injectCoverIntoArticleHtml(html, cover, kw.title, cfg);
 
         if (liveFlight()?.stopRequested || liveFlight()?.skipKeywordIds?.has(kw.id)) {

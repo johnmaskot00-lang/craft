@@ -340,7 +340,8 @@ Compose it however the publication demands — order, rhythm and section count a
 - link href="/assets/style.css" exactly; GEO meta + JSON-LD in <head>
 - Mobile-first; no horizontal scroll; real photo covers, not decorative SVG loops
 - Only REAL article/category hrefs from the lists above
-- IMAGES: use ONLY the "image" URLs from REAL ARTICLES above (and the logo). Unsplash, Pexels, Picsum, placeholder services and any other external host are FORBIDDEN — those pictures are blocked for our readers and the server overwrites them anyway. If an article has no image yet, use a CSS gradient/colour block instead of an <img>.
+- IMAGES: use ONLY the "image" URLs from REAL ARTICLES above (and the logo). Unsplash, Pexels, Picsum, placeholder services and any other external host are FORBIDDEN — those pictures are blocked for our readers and the server overwrites them anyway.
+- This publication is photo-led: the hero and every card MUST show a real <img> from that list. Articles that already have an "image" are listed first — build the hero from those. A flat gradient tile with only text on it is a failed homepage; use a gradient only for entries that genuinely have no image.
 
 ════════════════════════════════════
 3) FEED CONTRACT (short — server paginates)
@@ -1249,9 +1250,37 @@ export function replaceStockImagesWithCovers(homeHtml: string, articles: SeoArti
   return scoped.replace(STOCK_IMAGE_HOST_RE, () => nextCover());
 }
 
+const MEDIA_SLOT_RE =
+  /<(div|figure|span|picture)\b([^>]*\bclass=["'][^"']*\b(?:ac-img-wrap|img|image|thumb|cover|photo|media|visual|poster|art)[\w-]*[^"']*["'][^>]*)>/i;
+
+/**
+ * Safety net for hero tiles the designer left as empty photo frames: if a card
+ * links to an article we have a cover for and has a media slot but no picture,
+ * put the cover in. Cards without a slot are left alone — inserting an image
+ * into an unknown composition does more harm than an image-less card.
+ */
+export function hydrateHomeCoverSlots(homeHtml: string, articles: SeoArticleBrief[]): string {
+  const byHref = new Map(articles.filter((a) => a.image).map((a) => [a.href, a]));
+  if (!homeHtml || !byHref.size) return homeHtml;
+
+  return homeHtml.replace(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi, (whole: string, attrs: string, inner: string) => {
+    const href = /(?:^|\s)href=["']([^"']+)["']/i.exec(attrs)?.[1];
+    const article = href ? byHref.get(href) : undefined;
+    if (!article || /<img\b/i.test(inner)) return whole;
+    const slot = MEDIA_SLOT_RE.exec(inner);
+    if (!slot) return whole;
+    const img = `<img src="${escapeHtml(article.image!)}" alt="${escapeHtml(article.title)}" loading="lazy" decoding="async">`;
+    const at = slot.index + slot[0].length;
+    return `<a${attrs}>${inner.slice(0, at)}${img}${inner.slice(at)}</a>`;
+  });
+}
+
 export function patchHomeArticleFeed(homeHtml: string, articles: SeoArticleBrief[]): string {
   if (!homeHtml || articles.length === 0) return homeHtml;
-  let html = replaceStockImagesWithCovers(stripOrphanHomeArticleCards(homeHtml), articles);
+  let html = hydrateHomeCoverSlots(
+    replaceStockImagesWithCovers(stripOrphanHomeArticleCards(homeHtml), articles),
+    articles,
+  );
   const feed = refreshArticleFeedHtml(articles);
 
   // Fill visible empty «Статьи» / «Материалы» blocks the art director left blank.
