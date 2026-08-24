@@ -335,6 +335,12 @@ Everything else is yours. Specify in short bullets (Russian is fine):
 - the author box wording style for this publication
 Every class named in the kit MUST exist in the CSS — put any new ones in the extra CSS file.
 
+Two server-owned blocks are injected into every article — the kit must NOT redefine them, and your CSS MUST style them so they look native here:
+- \`<div class="callout offer-native"><div class="callout-title">…</div><p>… <a>…</a></p></div>\` — the editorial recommendation. Make it read like a staff pick, not a banner.
+- \`<div class="table-scroll"><table class="comparison-table"><thead>…</thead><tbody>…</tbody></table></div>\` — used only in comparison-style articles. Style thead, cell padding, row separation and \`.ct-winner\`; it must stay readable at 360px width.
+Also style \`.pros-cons\`/\`.pros\`/\`.cons\`, \`.step-box\`/\`.step-num\`, \`.verdict-box\` — the writer uses them for how-to and review formats.
+In the kit, tell writers plainly: a comparison table belongs ONLY in articles where the reader is choosing between options, at most one per article.
+
 OUTPUT — exactly four FILE blocks, nothing else:
 --- FILE: templates/article.html ---
 \`\`\`html
@@ -481,10 +487,51 @@ export function parseMagazineDesignFiles(raw: string): MagazineDesignFiles {
   return out;
 }
 
+/**
+ * Components the article writer is told to use (tables, steps, pros/cons,
+ * verdicts, editorial offer callout). They are server-driven, so every site
+ * needs at least a readable default — the agent stylesheet may restyle them.
+ *
+ * `w` wraps each selector: plain for legacy sites, :where() for v7 sites where
+ * the art director's own CSS must always win.
+ */
+function articleComponentRules(w: (sel: string) => string): string {
+  return `
+${w(".article-body table")},${w("table.comparison-table")}{width:100%;border-collapse:collapse;margin:1.75rem 0;font-size:.92rem;line-height:1.45;text-align:left}
+${w(".article-body table th")},${w("table.comparison-table th")}{padding:.7rem .9rem;font-weight:750;font-size:.82rem;letter-spacing:.01em;background:color-mix(in srgb,var(--brand,currentColor) 16%,transparent);color:var(--text,inherit);border-bottom:2px solid color-mix(in srgb,var(--brand,currentColor) 45%,transparent);vertical-align:bottom}
+${w(".article-body table td")},${w("table.comparison-table td")}{padding:.65rem .9rem;border-bottom:1px solid var(--border,rgba(127,127,127,.22));vertical-align:top;color:var(--text2,inherit)}
+${w(".article-body table tbody tr:last-child td")},${w("table.comparison-table tbody tr:last-child td")}{border-bottom:0}
+${w(".article-body table tbody tr:nth-child(even) td")},${w("table.comparison-table tbody tr:nth-child(even) td")}{background:color-mix(in srgb,var(--text,currentColor) 5%,transparent)}
+${w(".article-body table td:first-child")},${w("table.comparison-table td:first-child")}{font-weight:700;color:var(--text,inherit)}
+${w("table .ct-winner")},${w(".comparison-table .ct-winner")}{color:var(--brand,inherit);font-weight:750}
+${w(".table-scroll")}{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:1.75rem 0;border:1px solid var(--border,rgba(127,127,127,.22));border-radius:var(--r,12px)}
+${w(".table-scroll table")}{margin:0;min-width:34rem}
+${w(".pros-cons")}{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:.9rem;margin:1.5rem 0}
+${w(".pros")},${w(".cons")}{padding:1rem 1.1rem;border-radius:var(--r,12px);border:1px solid var(--border,rgba(127,127,127,.22))}
+${w(".pros")}{background:color-mix(in srgb,#16a34a 9%,transparent)}
+${w(".cons")}{background:color-mix(in srgb,#dc2626 9%,transparent)}
+${w(".pros h4")},${w(".cons h4")}{margin:0 0 .5rem;font-size:.76rem;font-weight:800;letter-spacing:.07em;text-transform:uppercase}
+${w(".pros ul")},${w(".cons ul")}{margin:0;padding-left:1.1rem}
+${w(".step-box")}{display:flex;gap:.9rem;align-items:flex-start;margin:1.1rem 0;padding:1rem 1.1rem;border-radius:var(--r,12px);border:1px solid var(--border,rgba(127,127,127,.22))}
+${w(".step-num")}{flex:0 0 auto;width:2rem;height:2rem;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--brand,currentColor);color:#fff;font-weight:800}
+${w(".step-content h3")}{margin:0 0 .35rem}
+${w(".verdict-box")}{margin:1.75rem 0;padding:1.2rem 1.3rem;border-radius:var(--r,14px);border:1px solid color-mix(in srgb,var(--brand,currentColor) 35%,transparent);background:color-mix(in srgb,var(--brand,currentColor) 10%,transparent)}
+${w(".verdict-box h3")}{margin:0 0 .5rem;font-size:.78rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--brand,inherit)}
+${w(".article-photo")}{margin:1.7rem 0}
+${w(".article-photo img")}{width:100%;border-radius:var(--r,14px);display:block}
+@media(max-width:640px){
+  ${w(".article-body table")},${w("table.comparison-table")}{font-size:.82rem}
+  ${w(".article-body table th")},${w(".article-body table td")}{padding:.5rem .55rem}
+  ${w(".pros-cons")}{grid-template-columns:1fr}
+  ${w(".step-box")}{flex-direction:column;gap:.6rem}
+}
+`;
+}
+
 /** Safety net: unique chrome stays agent-owned; articles/menu/offer always look finished. */
 export function buildSoftMagazineGuardCss(): string {
   return `
-/* structural-guard-v13 — article magazine kit + compact feed + agent-written native offer */
+/* structural-guard-v15 — article magazine kit + compact feed + agent-written native offer */
 html,body{overflow-x:hidden!important;max-width:100%!important}
 img,video,canvas,svg{max-width:100%;height:auto}
 .cta-block{display:none!important}
@@ -635,6 +682,9 @@ footer{padding:2.2rem clamp(.9rem,3vw,2.1rem) 2.6rem;margin-top:2rem;border-top:
 [data-seo-article-feed] .ac-content{padding:.7rem .8rem .85rem!important;flex:1 1 auto!important}
 [data-seo-article-feed] .ac-cat{display:block!important;font-size:.62rem!important;font-weight:800!important;letter-spacing:.06em!important;text-transform:uppercase!important;opacity:.75!important;margin:0 0 .3rem!important}
 [data-seo-article-feed] .ac-title{font-family:var(--heading-font,inherit)!important;font-size:clamp(.82rem,.7rem + .35vw,.98rem)!important;font-weight:750!important;line-height:1.3!important;margin:0!important;display:-webkit-box!important;-webkit-line-clamp:3!important;-webkit-box-orient:vertical!important;overflow:hidden!important}
+/* Pager hides cards with [hidden] — author display rules above would defeat it */
+[data-seo-article-feed]>[hidden],[data-seo-article-feed] .article-card[hidden]{display:none!important}
+${articleComponentRules((sel) => sel)}
 
 /* Native referral offer — always visible at article start */
 .ref-offer{display:block!important;position:relative!important;margin:1.5rem 0 1.75rem!important;border-radius:calc(var(--r,14px) + 4px)!important;overflow:hidden!important;border:1px solid color-mix(in srgb,var(--brand,currentColor) 32%,var(--border,rgba(127,127,127,.35)))!important;background:linear-gradient(160deg,color-mix(in srgb,var(--brand,currentColor) 12%,var(--bg,transparent)) 0%,var(--bg,transparent) 55%)!important}
@@ -679,7 +729,7 @@ footer{padding:2.2rem clamp(.9rem,3vw,2.1rem) 2.6rem;margin-top:2rem;border-top:
  */
 export function buildArticleShellGuardCss(): string {
   return `
-/* structural-guard-v14-shell — safety only; layout belongs to the art director */
+/* structural-guard-v15-shell — safety only; layout belongs to the art director */
 html,body{overflow-x:hidden!important;max-width:100%!important}
 img,video,canvas,svg{max-width:100%;height:auto}
 .cta-block{display:none!important}
@@ -709,6 +759,8 @@ img,video,canvas,svg{max-width:100%;height:auto}
 :where([data-seo-article-feed] .ac-img-wrap img),:where([data-seo-article-feed] .ac-img-grad){width:100%;height:100%;object-fit:cover;display:block}
 :where([data-seo-article-feed] .ac-body),:where([data-seo-article-feed] .ac-content){padding:.7rem .8rem .85rem;flex:1 1 auto}
 :where([data-seo-article-feed] .ac-title){font-family:var(--heading-font,inherit);font-size:clamp(.82rem,.7rem + .35vw,.98rem);font-weight:750;line-height:1.3;margin:0;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+/* Pager hides cards with [hidden] — author display rules above would defeat it */
+[data-seo-article-feed]>[hidden],[data-seo-article-feed] .article-card[hidden]{display:none!important}
 .seo-feed-pager{display:flex;align-items:center;justify-content:center;gap:.65rem;flex-wrap:wrap;margin:1.25rem 0 2.5rem;font-family:var(--heading-font,inherit)}
 .seo-feed-pager[hidden]{display:none!important}
 .seo-feed-pager button{appearance:none;border:1px solid var(--border,currentColor);background:transparent;color:inherit;font:inherit;font-weight:700;padding:.55rem .9rem;border-radius:999px;cursor:pointer;opacity:.9}
@@ -720,7 +772,12 @@ img,video,canvas,svg{max-width:100%;height:auto}
 :where(.ref-offer){display:block;position:relative;margin:1.5rem 0 1.75rem;border-radius:calc(var(--r,14px) + 4px);overflow:hidden;border:1px solid color-mix(in srgb,var(--brand,currentColor) 32%,var(--border,rgba(127,127,127,.35)))}
 :where(.ref-offer-inner){display:grid;grid-template-columns:minmax(0,1fr) auto;gap:1.1rem;align-items:center;padding:clamp(1rem,2vw,1.45rem)}
 :where(.ref-offer-btn){display:inline-flex;align-items:center;justify-content:center;min-height:48px;padding:.85rem 1.35rem;border-radius:999px;text-decoration:none;font-weight:800;white-space:nowrap;color:#fff;background:var(--brand,#2563eb)}
-
+/* The editorial recommendation is server-materialised — never leave it bare text */
+:where(.callout){margin:1.35rem 0;padding:1rem 1.15rem;border-radius:var(--r,12px);border:1px solid color-mix(in srgb,var(--brand,currentColor) 22%,var(--border,rgba(127,127,127,.25)));background:color-mix(in srgb,var(--brand,currentColor) 8%,transparent)}
+:where(.callout-title){font-size:.72rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;margin:0 0 .35rem;color:var(--brand,inherit)}
+:where(.callout.offer-native) p{margin:0;line-height:1.65}
+:where(.callout.offer-native) a{font-weight:750;color:var(--brand,inherit);text-decoration:underline;text-underline-offset:.16em}
+${articleComponentRules((sel) => `:where(${sel})`)}
 @media(max-width:1024px){:where([data-seo-article-feed]){grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:720px){
   :where([data-seo-article-feed]){grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -945,7 +1002,13 @@ export function buildHomeFeedPagerBlock(pageSize = SEO_HOME_FEED_PAGE_SIZE): str
   var pages=Math.ceil(cards.length/size)||1;
   function show(){
     var start=(page-1)*size;
-    cards.forEach(function(c,i){c.hidden=!(i>=start&&i<start+size);});
+    cards.forEach(function(c,i){
+      var on=(i>=start&&i<start+size);
+      c.hidden=!on;
+      // Art-directed stylesheets set display on cards, which beats [hidden].
+      if(on)c.style.removeProperty('display');
+      else c.style.setProperty('display','none','important');
+    });
     pager.hidden=false;
     pager.innerHTML='';
     function btn(label,disabled,go){
