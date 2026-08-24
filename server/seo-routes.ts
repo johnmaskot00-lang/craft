@@ -75,7 +75,56 @@ function slugify(text: string): string {
 }
 
 function keywordKey(s: string): string {
-  return String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+  return String(s || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[\u2018\u2019\u201A\u201B\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"')
+    .replace(/[\u2010-\u2015\u2212]/g, "-")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isSeoDumpCluster(c: { slug?: string; name?: string }): boolean {
+  const slug = String(c.slug || "").toLowerCase();
+  const name = String(c.name || "").trim().toLowerCase().replace(/ё/g, "е");
+  return (
+    slug === "more-topics" ||
+    slug === "other" ||
+    slug === "misc" ||
+    slug === "prochie-temy" ||
+    /^ещ[её]?\s+темы$/.test(name) ||
+    name === "other" ||
+    name === "more topics" ||
+    name === "прочие темы"
+  );
+}
+
+function findOriginalKeyword(input: string[], raw: string): string | undefined {
+  const key = keywordKey(raw);
+  if (!key) return undefined;
+  const exact = input.find((i) => keywordKey(i) === key);
+  if (exact) return exact;
+  const slug = slugify(raw);
+  if (!slug || slug === "page") return undefined;
+  return input.find((i) => slugify(i) === slug);
+}
+
+function pickHostCluster<T extends { name: string; keywords: string[] }>(clusters: T[], kw: string): T {
+  const tokens = keywordKey(kw).split(" ").filter((t) => t.length > 2);
+  let best = clusters[0];
+  let bestScore = -1;
+  for (const c of clusters) {
+    const blob = keywordKey(`${c.name} ${c.keywords.slice(0, 12).join(" ")}`);
+    let score = 0;
+    for (const t of tokens) if (blob.includes(t)) score++;
+    if (score > bestScore || (score === bestScore && c.keywords.length > best.keywords.length)) {
+      bestScore = score;
+      best = c;
+    }
+  }
+  return best;
 }
 
 function inferSeoContentType(keyword: string): SeoKeyword["contentType"] {
@@ -118,15 +167,15 @@ function fallbackClusterKeywords(keywords: string[], niche: string): CompactAnal
       keywords: kws,
     });
   }
-  if (tiny.length) {
-    const extra = kept.find((c) => c.slug === "more-topics") || {
-      name: "Ещё темы",
-      slug: "more-topics",
-      description: `Дополнительные запросы: ${niche}`.slice(0, 180),
-      keywords: [] as string[],
-    };
-    extra.keywords.push(...tiny);
-    if (!kept.includes(extra)) kept.push(extra);
+  if (tiny.length && kept.length) {
+    for (const kw of tiny) pickHostCluster(kept, kw).keywords.push(kw);
+  } else if (tiny.length) {
+    kept.push({
+      name: niche.slice(0, 60) || "Раздел",
+      slug: slugify(niche || "topics"),
+      description: `Материалы по теме ${niche}`.slice(0, 180),
+      keywords: tiny,
+    });
   }
   return kept.slice(0, 14);
 }
@@ -143,9 +192,11 @@ function coverAllKeywords(clusters: CompactAnalyzeCluster[], input: string[]): C
   const used = new Set<string>();
   const out: CompactAnalyzeCluster[] = [];
   for (const c of clusters) {
+    if (isSeoDumpCluster(c)) continue;
     const mapped: string[] = [];
     for (const k of c.keywords) {
-      const original = input.find((i) => keywordKey(i) === keywordKey(k)) || k;
+      const original = findOriginalKeyword(input, k);
+      if (!original) continue;
       const key = keywordKey(original);
       if (!key || used.has(key)) continue;
       used.add(key);
@@ -154,15 +205,93 @@ function coverAllKeywords(clusters: CompactAnalyzeCluster[], input: string[]): C
     if (mapped.length) out.push({ ...c, slug: slugify(c.slug || c.name), keywords: mapped });
   }
   const missing = input.filter((k) => !used.has(keywordKey(k)));
-  if (missing.length) {
-    out.push({
-      name: "Ещё темы",
-      slug: "more-topics",
-      description: "Запросы, которые не вошли в основные разделы",
-      keywords: missing,
-    });
+  if (missing.length && out.length) {
+    for (const kw of missing) {
+      const key = keywordKey(kw);
+      if (!key || used.has(key)) continue;
+      used.add(key);
+      pickHostCluster(out, kw).keywords.push(kw);
+    }
+  } else if (missing.length && !out.length) {
+    return [];
   }
   return out.filter((c) => c.keywords.length > 0);
+}
+
+function repairDuplicateSeoClusters(cfg: SeoConfig): { cfg: SeoConfig; changed: boolean; dropped: number } {
+  const clusters = Array.isArray(cfg.clusters) ? cfg.clusters : [];
+  if (!clusters.length) return { cfg, changed: false, dropped: 0 };
+
+  const seenKeys = new Set<string>();
+  const seenSlugs = new Set<string>();
+  const real: SeoCluster[] = [];
+  const dumpKeywords: SeoKeyword[] = [];
+  let dropped = 0;
+
+  const consider = (kw: SeoKeyword): boolean => {
+    const key = keywordKey(kw.keyword);
+    const slug = String(kw.slug || slugify(kw.keyword));
+    if ((key && seenKeys.has(key)) || (slug && seenSlugs.has(slug))) return false;
+    if (key) seenKeys.add(key);
+    if (slug) seenSlugs.add(slug);
+    return true;
+  };
+
+  for (const c of clusters) {
+    if (isSeoDumpCluster(c)) continue;
+    const keywords = c.keywords.filter(consider);
+    dropped += c.keywords.length - keywords.length;
+    if (keywords.length) real.push({ ...c, keywords });
+  }
+  for (const c of clusters) {
+    if (!isSeoDumpCluster(c)) continue;
+    for (const kw of c.keywords) {
+      if (consider(kw)) dumpKeywords.push(kw);
+      else dropped++;
+    }
+  }
+
+  if (dumpKeywords.length && real.length) {
+    for (const kw of dumpKeywords) {
+      const host = real.reduce((a, b) => (a.keywords.length >= b.keywords.length ? a : b));
+      // Prefer a topical host when the leftover is unique (not a duplicate dump).
+      const tokens = keywordKey(kw.keyword).split(" ").filter((t) => t.length > 2);
+      let best = host;
+      let bestScore = -1;
+      for (const c of real) {
+        const blob = keywordKey(`${c.name} ${c.keywords.slice(0, 12).map((k) => k.keyword).join(" ")}`);
+        let score = 0;
+        for (const t of tokens) if (blob.includes(t)) score++;
+        if (score > bestScore) {
+          bestScore = score;
+          best = c;
+        }
+      }
+      (bestScore > 0 ? best : host).keywords.push(kw);
+    }
+  } else if (dumpKeywords.length && !real.length) {
+    real.push({
+      ...clusters.find(isSeoDumpCluster)!,
+      name: cfg.niche?.slice(0, 60) || "Раздел",
+      slug: slugify(cfg.niche || "topics"),
+      keywords: dumpKeywords,
+    });
+  }
+
+  const pagesTotal = real.reduce((s, c) => s + c.keywords.length, 0);
+  const pagesGenerated = real.reduce((s, c) => s + c.keywords.filter((k) => k.status === "done").length, 0);
+  const changed =
+    dropped > 0 ||
+    real.length !== clusters.length ||
+    pagesTotal !== cfg.pagesTotal ||
+    pagesGenerated !== cfg.pagesGenerated ||
+    clusters.some(isSeoDumpCluster);
+
+  return {
+    cfg: { ...cfg, clusters: real, pagesTotal, pagesGenerated },
+    changed,
+    dropped,
+  };
 }
 
 function parseAnalyzeJson(raw: string): any {
@@ -190,7 +319,8 @@ async function compactAnalyzeClusters(keywords: string[], niche: string): Promis
 RULES:
 - Every keyword MUST appear in exactly one category, copied EXACTLY from the list (do not rewrite).
 - Return compact JSON only: category name/slug/description + keyword STRINGS. No article titles, no questions, no contentType.
-- Max 80 keywords per category; merge leftovers.
+- Max 80 keywords per category; merge leftovers into the closest topical category.
+- Never create a catch-all category named Other, More, Misc, Ещё темы, or similar.
 - 4-12 categories.
 
 KEYWORDS:
@@ -204,7 +334,7 @@ JSON shape:
       {
         role: "system",
         content:
-          "You are an SEO information architect. Output ONLY valid compact JSON. Copy keywords verbatim. Never omit keywords.",
+          "You are an SEO information architect. Output ONLY valid compact JSON. Copy keywords verbatim. Never omit keywords. Never create a dump/other/more-topics category.",
       },
       { role: "user", content: prompt },
     ],
@@ -2996,6 +3126,14 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
     if (!proj || proj.userId !== userId) return res.status(404).json({ message: "Not found" });
     let cfg = proj.seoConfig as SeoConfig | undefined;
     if (cfg?.clusters?.length) {
+      const repaired = repairDuplicateSeoClusters(cfg);
+      if (repaired.changed) {
+        cfg = repaired.cfg;
+        await storage.updateProject(proj.id, { seoConfig: cfg } as any);
+        console.warn(
+          `[SEO] removed duplicate dump cluster for project ${proj.id}: dropped=${repaired.dropped} pagesTotal=${cfg.pagesTotal}`,
+        );
+      }
       if (!cfg.theme?.layout) cfg = await persistUniqueSkin(storage, proj.id, cfg);
       const architecture = await upgradeSeoArchitectureV5(storage, proj.id, cfg);
       cfg = architecture.config;
@@ -3186,10 +3324,11 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
         pagesTotal: totalPages,
         pagesGenerated: 0,
       };
+      const cleaned = repairDuplicateSeoClusters(updatedConfig).cfg;
 
-      await storage.updateProject(proj.id, { seoConfig: updatedConfig, title: finalName } as any);
+      await storage.updateProject(proj.id, { seoConfig: cleaned, title: finalName } as any);
       // Lightweight bootstrap CSS only — final magazine skin is agent-designed after articles generate.
-      const withSkin = await persistUniqueSkin(storage, proj.id, updatedConfig, "fast");
+      const withSkin = await persistUniqueSkin(storage, proj.id, cleaned, "fast");
       res.json({ config: withSkin });
     } catch (e: any) {
       await storage.updateProject(proj.id, {
@@ -3210,6 +3349,13 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
 
     let cfg = proj.seoConfig as SeoConfig;
     if (!cfg || cfg.clusters.length === 0) return res.status(400).json({ message: "Run analyze first" });
+    const cleanedCfg = repairDuplicateSeoClusters(cfg);
+    if (cleanedCfg.changed) {
+      cfg = cleanedCfg.cfg;
+      await storage.updateProject(proj.id, { seoConfig: cfg } as any);
+    } else {
+      cfg = cleanedCfg.cfg;
+    }
     const normalizedOffer = normalizeHttpUrl(cfg.targetUrl);
     if (normalizedOffer && normalizedOffer !== cfg.targetUrl) {
       cfg = { ...cfg, targetUrl: normalizedOffer };
@@ -3323,7 +3469,8 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
     }
 
     let articleIdx = 0;
-    const allClusters = cfg.clusters;
+    const allClusters = cfg.clusters.filter((c) => !isSeoDumpCluster(c));
+    cfg = { ...cfg, clusters: allClusters, pagesTotal: allClusters.reduce((s, c) => s + c.keywords.length, 0) };
     const jobs: Array<{ kw: SeoKeyword; cluster: SeoCluster; idx: number; filename: string }> = [];
     for (const cluster of allClusters) {
       for (const kw of cluster.keywords) {
@@ -3332,6 +3479,11 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
         jobs.push({ kw, cluster, idx, filename: `${cluster.slug}/${kw.slug}/index.html` });
       }
     }
+    seoGenerateInFlight.set(projectId, {
+      startedAt: seoGenerateInFlight.get(projectId)?.startedAt || Date.now(),
+      total: cfg.pagesTotal,
+    });
+    send({ type: "start", total: cfg.pagesTotal, generated });
 
     let persistChain = Promise.resolve();
     const persistProgress = () => {
@@ -3341,6 +3493,7 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
             ...cfg,
             clusters: allClusters,
             pagesGenerated: generated,
+            pagesTotal: allClusters.reduce((s, c) => s + c.keywords.length, 0),
             status: "generating",
           };
           await storage.updateProject(proj.id, { seoConfig: progressCfg } as any);
@@ -3356,6 +3509,7 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
       shouldStop: () => creditsDepleted,
       worker: async ({ kw, cluster, idx, filename }) => {
         if (creditsDepleted) return;
+        if (isSeoDumpCluster(cluster)) return;
         send({ type: "progress", keyword: kw.keyword, status: "generating", generated, total: cfg.pagesTotal });
 
         const ikey = `seo-article-${proj.id}-${kw.id}`;
@@ -3422,6 +3576,7 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
         ...cfg,
         clusters: allClusters,
         pagesGenerated: generated,
+        pagesTotal: allClusters.reduce((s, c) => s + c.keywords.length, 0),
         status: doneStatus,
         architectureVersion: 6,
       };
