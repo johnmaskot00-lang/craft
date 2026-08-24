@@ -37,6 +37,7 @@ import {
   extractHomeShell,
   findMatchingTagClose,
   homeFeedNeedsRepair,
+  hydrateHomeCoverSlots,
   isArtDirectedSeo,
   isUsableArticleShell,
   isUsableCategoryShell,
@@ -1703,7 +1704,8 @@ async function repairSeoPageMarkup(storage: IStorage, projectId: number, cfg: Se
   const files = await storage.getProjectFiles(projectId);
   for (const f of files) {
     if (!f.filename.toLowerCase().endsWith(".html") || !f.code) continue;
-    const next = replaceStockImagesWithCovers(uncommentBuriedArticle(f.code), briefs);
+    let next = replaceStockImagesWithCovers(uncommentBuriedArticle(f.code), briefs);
+    if (f.filename === "index.html") next = hydrateHomeCoverSlots(next, briefs);
     if (next !== f.code) {
       await storage.upsertProjectFile({ projectId, filename: f.filename, code: next });
       if (f.filename === "index.html") {
