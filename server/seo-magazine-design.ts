@@ -26,6 +26,119 @@ export function pickHeroVariant(seed: string): SeoHeroVariant {
   return SEO_HERO_VARIANTS[h % SEO_HERO_VARIANTS.length];
 }
 
+/**
+ * Mechanical variety for the reading layout. The model gravitates to one
+ * "safe" article page (sticky sidebar right, inset cover, drop-cap lead) no
+ * matter the niche, so the shape is assigned from the project seed and the
+ * agent designs *within* it.
+ */
+export const SEO_READING_LAYOUTS = [
+  "sidebar-right",
+  "sidebar-left",
+  "wide-no-sidebar",
+  "narrow-margin-notes",
+  "two-column-opening",
+  "rail-toc",
+] as const;
+export type SeoReadingLayout = (typeof SEO_READING_LAYOUTS)[number];
+
+export const SEO_COVER_TREATMENTS = [
+  "full-bleed",
+  "inset-rounded",
+  "split-with-title",
+  "framed-caption",
+  "no-cover-typographic",
+] as const;
+export type SeoCoverTreatment = (typeof SEO_COVER_TREATMENTS)[number];
+
+export const SEO_TITLE_TREATMENTS = [
+  "oversized-flush-left",
+  "centered-serif-rule",
+  "kicker-over-title",
+  "numbered-editorial",
+  "title-over-cover",
+] as const;
+export type SeoTitleTreatment = (typeof SEO_TITLE_TREATMENTS)[number];
+
+export type SeoLayoutDna = {
+  hero: SeoHeroVariant;
+  reading: SeoReadingLayout;
+  cover: SeoCoverTreatment;
+  title: SeoTitleTreatment;
+};
+
+function seedHash(seed: string, salt: string): number {
+  let h = 2166136261 >>> 0;
+  const s = `${salt}::${seed}`;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+export function pickLayoutDna(seed: string): SeoLayoutDna {
+  return {
+    hero: SEO_HERO_VARIANTS[seedHash(seed, "hero") % SEO_HERO_VARIANTS.length],
+    reading: SEO_READING_LAYOUTS[seedHash(seed, "reading") % SEO_READING_LAYOUTS.length],
+    cover: SEO_COVER_TREATMENTS[seedHash(seed, "cover") % SEO_COVER_TREATMENTS.length],
+    title: SEO_TITLE_TREATMENTS[seedHash(seed, "title") % SEO_TITLE_TREATMENTS.length],
+  };
+}
+
+function readingLayoutDescription(v: SeoReadingLayout): string {
+  switch (v) {
+    case "sidebar-right":
+      return "main column + sticky right rail (related, category index, offer).";
+    case "sidebar-left":
+      return "sticky left rail carrying navigation/context, text column on the right.";
+    case "wide-no-sidebar":
+      return "no rail at all — one wide centred measure, section dividers do the structuring work.";
+    case "narrow-margin-notes":
+      return "narrow text measure with margin notes / pull elements hanging into the outer margin (desktop only).";
+    case "two-column-opening":
+      return "opening spread is two columns (deck + meta beside the lead), then the body collapses to one measure.";
+    case "rail-toc":
+      return "slim vertical section rail that tracks scroll position beside the text.";
+    default:
+      return String(v);
+  }
+}
+
+function coverTreatmentDescription(v: SeoCoverTreatment): string {
+  switch (v) {
+    case "full-bleed":
+      return "cover runs edge to edge above the text.";
+    case "inset-rounded":
+      return "cover sits inside the measure with generous whitespace.";
+    case "split-with-title":
+      return "cover and title share a split composition side by side.";
+    case "framed-caption":
+      return "cover is framed with a visible caption/credit line, print style.";
+    case "no-cover-typographic":
+      return "no big cover — the opening is purely typographic; the photo appears later in the body.";
+    default:
+      return String(v);
+  }
+}
+
+function titleTreatmentDescription(v: SeoTitleTreatment): string {
+  switch (v) {
+    case "oversized-flush-left":
+      return "very large flush-left headline, tight tracking.";
+    case "centered-serif-rule":
+      return "centred headline with a rule above/below, classic print.";
+    case "kicker-over-title":
+      return "small kicker line above a medium headline.";
+    case "numbered-editorial":
+      return "issue/section number set beside the headline.";
+    case "title-over-cover":
+      return "headline overlaid on the cover with a readable scrim.";
+    default:
+      return String(v);
+  }
+}
+
 export type SeoArticleBrief = {
   title: string;
   href: string;
@@ -35,11 +148,15 @@ export type SeoArticleBrief = {
 
 export const SEO_HOME_FEED_PAGE_SIZE = 12;
 
-export function collectSeoArticleBriefs(cfg: SeoConfig, limit = 500): SeoArticleBrief[] {
+export function collectSeoArticleBriefs(
+  cfg: SeoConfig,
+  limit = 500,
+  opts?: { includePlanned?: boolean },
+): SeoArticleBrief[] {
   const out: SeoArticleBrief[] = [];
   for (const c of cfg.clusters) {
     for (const kw of c.keywords) {
-      if (kw.status !== "done") continue;
+      if (kw.status !== "done" && !opts?.includePlanned) continue;
       out.push({
         title: kw.title,
         href: `/${c.slug}/${kw.slug}/`,
@@ -54,13 +171,14 @@ export function collectSeoArticleBriefs(cfg: SeoConfig, limit = 500): SeoArticle
 
 export function buildMagazineDesignPrompt(opts: {
   cfg: SeoConfig;
-  heroVariant: SeoHeroVariant;
+  dna: SeoLayoutDna;
   articles: SeoArticleBrief[];
   logoUrl?: string;
   tasteBrief?: string;
   critique?: string;
 }): string {
-  const { cfg, heroVariant, articles, logoUrl, tasteBrief, critique } = opts;
+  const { cfg, dna, articles, logoUrl, tasteBrief, critique } = opts;
+  const heroVariant = dna.hero;
   const cats = cfg.clusters.map((c) => ({
     name: c.name,
     slug: c.slug,
@@ -71,12 +189,13 @@ export function buildMagazineDesignPrompt(opts: {
   const feedPreview = articles.slice(0, 12);
 
   return `You are a world-class digital magazine art director (Russian UI).
-Build ONE complete, breathtakingly original homepage + stylesheet — the same bar as Craft multipage «по описанию».
+Design ONE complete publication: stylesheet + homepage + ARTICLE PAGE TEMPLATE + CATEGORY PAGE TEMPLATE + the component kit its writers must use.
 Beauty and uniqueness come FIRST. Technical contracts are short and at the end.
 
 ════════════════════════════════════
 1) CREATIVE NORTH STAR (non-negotiable)
 ════════════════════════════════════
+- First decide WHAT KIND OF PUBLICATION this niche deserves — cookbook, field guide, trade journal, city guide, buyer's lab, almanac, fanzine, clinical reference… The niche picks the format, not a generic "tech blog" default.
 - Invent a visual system that could ONLY belong to THIS niche after removing the logo.
 - Custom masthead/menu (editorial, numbered, side rail, oversized type, underline tabs — YOUR call). Forbidden: generic sticky dark glass bar + cyan pills + identical dark cards.
 - Expressive Cyrillic Google Fonts pair unique to this brief (never Inter/Roboto/Arial/Onest+cyan default).
@@ -92,7 +211,11 @@ PUBLICATION
 - Description: ${JSON.stringify(cfg.siteDescription)}
 - Logo: ${logoUrl ? JSON.stringify(logoUrl) : "(text mark OK)"}
 
-ASSIGNED HERO ONLY: "${heroVariant}" (do not mix other archetypes).
+ASSIGNED SHAPE FOR THIS PUBLICATION (mandatory — design inside it, never substitute another):
+- Hero: "${heroVariant}" (do not mix other archetypes)
+- Reading layout: "${dna.reading}" — ${readingLayoutDescription(dna.reading)}
+- Cover treatment: "${dna.cover}" — ${coverTreatmentDescription(dna.cover)}
+- Headline treatment: "${dna.title}" — ${titleTreatmentDescription(dna.title)}
 
 ${critique ? `PREVIOUS ATTEMPT REJECTED — fix this:\n${critique}\n` : ""}
 ${tasteBrief ? `TASTE REFERENCES (principles only, never copy layouts):\n${tasteBrief.slice(0, 10000)}\n` : ""}
@@ -104,33 +227,39 @@ CATEGORIES:
 ${JSON.stringify(cats, null, 2)}
 
 ════════════════════════════════════
-2) PAGE STRUCTURE
+2) HOMEPAGE
 ════════════════════════════════════
-- <header class="site-header"> brand + <nav> category links + optional CTA (copied to all pages)
-- Hero (${heroVariant}) with brand + short description + interactivity via inline <script>
-- Topic/section cards for categories
-- Article feed section with a visible heading (e.g. «Статьи») AND a filled feed (never an empty heading)
-- Footer with niche line + category links
+Compose it however the publication demands — order, rhythm and section count are YOURS. It only must contain:
+- <header class="site-header"> with brand + <nav> category links + optional CTA (copied to every page)
+- the assigned interactive hero, driven by an inline <script>
+- some way into the categories (cards, index, rail, table of contents — your call)
+- the article feed (contract in §5)
+- a footer with a niche line + category links
 - body class: structure-v2 art-directed hero-${heroVariant}
 - link href="/assets/style.css" exactly; GEO meta + JSON-LD in <head>
 - Mobile-first; no horizontal scroll; real photo covers, not decorative SVG loops
 - Only REAL article/category hrefs from the lists above
 
-FULL-SITE CSS: define --bg --text --text2 --muted --brand --border --heading-font --body-font --r --w
-and style header, hero, topics, .articles-grid, .article-card, .ac-*, .seo-feed-pager,
-.article-page, .article-layout, .article-body, .breadcrumb, .cat-header, .sidebar, related, faq, footer.
-
 ════════════════════════════════════
 3) FEED CONTRACT (short — server paginates)
 ════════════════════════════════════
-- Exactly ONE: <div data-seo-article-feed data-page-size="12" class="articles-grid">…up to 12 sample cards…</div>
+- Exactly ONE on the homepage: <div data-seo-article-feed data-page-size="12" class="articles-grid">…up to 12 sample cards…</div>
 - Cards ONLY inside it: <a class="article-card" href="…"> with .ac-img-wrap + .ac-title (+ optional .ac-cat)
 - Compact equal cards (photo top / title below). No /page/2/ URLs. No empty «Статьи» section.
+
+════════════════════════════════════
+4) FULL-SITE CSS
+════════════════════════════════════
+Define --bg --text --text2 --muted --brand --border --heading-font --body-font --r --w
+and style: header, hero, category entries, .articles-grid, .article-card, .ac-*, .seo-feed-pager,
+the article reading layout for "${dna.reading}", .article-body typography, .article-header h1/.article-deck/.article-meta,
+.breadcrumb, .sidebar, .related-articles/.related-card, .faq-*, .author-box, footer.
+A second pass will ask you for the article and category page markup — the classes you write here are the ones it will use.
 
 OUTPUT — exactly two FILE blocks, nothing else:
 --- FILE: assets/style.css ---
 \`\`\`css
-/* magazine-art-v6 */
+/* magazine-art-v7 */
 ...
 \`\`\`
 
@@ -142,8 +271,127 @@ OUTPUT — exactly two FILE blocks, nothing else:
 `;
 }
 
+/**
+ * Second art-direction pass. Asking for five files in one response truncated the
+ * stylesheet, so the page templates and the writer kit are generated separately
+ * against the CSS the first pass produced.
+ */
+export function buildArticleTemplatePrompt(opts: {
+  cfg: SeoConfig;
+  dna: SeoLayoutDna;
+  css: string;
+  homeHtml: string;
+  critique?: string;
+}): string {
+  const { cfg, dna, css, homeHtml, critique } = opts;
+  const headerSample = homeHtml.match(/<header[\s\S]*?<\/header>/i)?.[0]?.slice(0, 2500) || "";
+
+  return `You are the same art director who just designed this publication. Now build its ARTICLE and CATEGORY pages, plus the component kit its writers must follow.
+
+PUBLICATION: ${JSON.stringify(cfg.siteTitle)} — ${JSON.stringify(cfg.niche)}
+ASSIGNED SHAPE (mandatory):
+- Reading layout: "${dna.reading}" — ${readingLayoutDescription(dna.reading)}
+- Cover treatment: "${dna.cover}" — ${coverTreatmentDescription(dna.cover)}
+- Headline treatment: "${dna.title}" — ${titleTreatmentDescription(dna.title)}
+
+${critique ? `PREVIOUS ATTEMPT REJECTED — fix this:\n${critique}\n` : ""}
+YOUR STYLESHEET (use these exact class names; you may add new classes only if you also return the extra CSS):
+\`\`\`css
+${css.slice(0, 14000)}
+\`\`\`
+
+YOUR HOMEPAGE MASTHEAD (for visual continuity — the server copies the real one in):
+\`\`\`html
+${headerSample}
+\`\`\`
+
+════════════════════════════════════
+1) ARTICLE PAGE — this is where readers actually spend their time
+════════════════════════════════════
+Return the full <body> markup with these tokens left VERBATIM (the server substitutes them):
+  {{HEADER}} {{BREADCRUMB}} {{ARTICLE}} {{SIDEBAR}} {{RELATED}} {{FOOTER}}
+- {{ARTICLE}} is the writer's fragment: .article-header (h1 + .article-deck + .article-meta), the cover image, .article-body, .author-box, .faq-section.
+- {{SIDEBAR}} renders as <aside class="sidebar">…</aside>. Place it per the assigned reading layout. If that layout has no rail, still leave the token in a sensible spot and style/hide .sidebar accordingly.
+- {{RELATED}} is one real related-articles block — place it ONCE at the end of the reading flow.
+- Use your own containers and classes. Do NOT ship a generic .article-page + .article-layout sidebar grid unless it genuinely is the assigned layout.
+- Keep <body class="…"> — the server merges its own runtime classes into it.
+
+════════════════════════════════════
+2) CATEGORY PAGE
+════════════════════════════════════
+Full <body> markup with tokens: {{HEADER}} {{BREADCRUMB}} {{CATEGORY_NAME}} {{CATEGORY_DESCRIPTION}} {{CATEGORY_NUMBER}} {{ARTICLE_COUNT}} {{CARDS}} {{FOOTER}}
+- {{CARDS}} is a list of <a class="article-card"> blocks — wrap it in your own grid/list container.
+- Give the category header its own identity, not the gradient band every SEO template ships.
+
+════════════════════════════════════
+3) WRITER KIT — drives every article on this site
+════════════════════════════════════
+Mandatory anchors the server depends on (exact class names):
+  .article-header > h1 · p.article-deck · .article-meta · .article-body · p.lead (first paragraph) · .author-box · .faq-section with .faq-item/.faq-question/.faq-answer
+Everything else is yours. Specify in short bullets (Russian is fine):
+- how .article-meta is composed for THIS publication — what facts belong there. Never a generic "⏱ N мин · Обновлено" line unless it truly fits the niche.
+- 4–6 in-body components with their EXACT HTML snippet and when to use each. Invent components this niche actually needs (ингредиенты, шаги, врезка эксперта, таблица, предупреждение, цифра, цитата, чек-лист…). Do NOT reuse the generic 💡 Совет / ⚠️ Важно / 📌 Запомните trio.
+- whether the lead uses a drop cap, and how often a visual element should appear
+- the author box wording style for this publication
+Every class named in the kit MUST exist in the CSS — put any new ones in the extra CSS file.
+
+OUTPUT — exactly four FILE blocks, nothing else:
+--- FILE: templates/article.html ---
+\`\`\`html
+<body class="read-${dna.reading}">
+...
+</body>
+\`\`\`
+
+--- FILE: templates/category.html ---
+\`\`\`html
+<body>
+...
+</body>
+\`\`\`
+
+--- FILE: templates/writer-kit.md ---
+\`\`\`md
+...
+\`\`\`
+
+--- FILE: assets/extra.css ---
+\`\`\`css
+/* only the NEW classes used by the templates and the kit */
+\`\`\`
+`;
+}
+
+export type MagazineDesignFiles = {
+  css?: string;
+  html?: string;
+  articleShell?: string;
+  categoryShell?: string;
+  writerKit?: string;
+  extraCss?: string;
+};
+
+const ARTICLE_SHELL_TOKENS = ["{{ARTICLE}}", "{{HEADER}}", "{{FOOTER}}"] as const;
+const CATEGORY_SHELL_TOKENS = ["{{CARDS}}", "{{HEADER}}", "{{FOOTER}}", "{{CATEGORY_NAME}}"] as const;
+
+/** A shell we can actually render into — missing tokens mean we fall back to the server skeleton. */
+export function isUsableArticleShell(shell: string | undefined): boolean {
+  if (!shell || shell.length < 200) return false;
+  return ARTICLE_SHELL_TOKENS.every((t) => shell.includes(t));
+}
+
+export function isUsableCategoryShell(shell: string | undefined): boolean {
+  if (!shell || shell.length < 150) return false;
+  return CATEGORY_SHELL_TOKENS.every((t) => shell.includes(t));
+}
+
 /** Reject weak / truncated / empty-feed magazine drafts so we retry instead of shipping bland shells. */
-export function magazineDesignQualityIssues(css: string, html: string, articleCount: number): string[] {
+export function magazineDesignQualityIssues(
+  css: string,
+  html: string,
+  articleCount: number,
+  files?: Pick<MagazineDesignFiles, "articleShell" | "categoryShell" | "writerKit">,
+): string[] {
   const issues: string[] = [];
   if (!css || css.length < 2500) issues.push("CSS too short — invent a full magazine system (fonts, header, hero, cards, article pages).");
   if (!html || html.length < 3500) issues.push("HTML too short — complete homepage with hero, topics, and article feed.");
@@ -160,6 +408,28 @@ export function magazineDesignQualityIssues(css: string, html: string, articleCo
   // Common bland defaults we keep rejecting
   if (/onest/i.test(css) && /#22d3ee|#06b6d4|cyan/i.test(css)) {
     issues.push("Too generic Onest+cyan look — invent a niche-specific type+palette.");
+  }
+  if (files) issues.push(...articleTemplateIssues(files));
+  return issues;
+}
+
+/** Validation for the second art-direction pass (article/category shells + kit). */
+export function articleTemplateIssues(files: MagazineDesignFiles): string[] {
+  const issues: string[] = [];
+  if (!isUsableArticleShell(files.articleShell)) {
+    issues.push(
+      `templates/article.html missing or incomplete — return the full article <body> containing ${ARTICLE_SHELL_TOKENS.join(" ")} verbatim.`,
+    );
+  } else if (!files.articleShell!.includes("{{RELATED}}")) {
+    issues.push("templates/article.html must place {{RELATED}} once at the end of the reading flow.");
+  }
+  if (!isUsableCategoryShell(files.categoryShell)) {
+    issues.push(
+      `templates/category.html missing or incomplete — return the full category <body> containing ${CATEGORY_SHELL_TOKENS.join(" ")} verbatim.`,
+    );
+  }
+  if (!files.writerKit || files.writerKit.length < 400) {
+    issues.push("templates/writer-kit.md missing or too short — define the in-body components with exact HTML snippets.");
   }
   return issues;
 }
@@ -185,16 +455,20 @@ function heroVariantDescription(v: SeoHeroVariant): string {
   }
 }
 
-export function parseMagazineDesignFiles(raw: string): { css?: string; html?: string } {
-  const out: { css?: string; html?: string } = {};
+export function parseMagazineDesignFiles(raw: string): MagazineDesignFiles {
+  const out: MagazineDesignFiles = {};
   const re =
-    /---\s*FILE:\s*([^\n-]+?)\s*---\s*```(?:css|html|HTML|CSS)?\s*([\s\S]*?)```/gi;
+    /---\s*FILE:\s*([^\n-]+?)\s*---\s*```(?:css|html|HTML|CSS|md|markdown)?\s*([\s\S]*?)```/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(raw))) {
     const name = m[1].trim().replace(/^\.\//, "");
     const body = m[2].trim();
-    if (/style\.css/i.test(name)) out.css = body;
-    if (/index\.html/i.test(name)) out.html = body;
+    if (/extra\.css/i.test(name)) out.extraCss = body;
+    else if (/style\.css/i.test(name)) out.css = body;
+    else if (/article\.html/i.test(name)) out.articleShell = body;
+    else if (/category\.html/i.test(name)) out.categoryShell = body;
+    else if (/writer-kit|article-kit/i.test(name)) out.writerKit = body;
+    else if (/index\.html/i.test(name)) out.html = body;
   }
   if (!out.css) {
     const cssOnly = raw.match(/```css\s*([\s\S]*?)```/i);
@@ -397,10 +671,72 @@ footer{padding:2.2rem clamp(.9rem,3vw,2.1rem) 2.6rem;margin-top:2rem;border-top:
 `;
 }
 
-export function ensureSoftMagazineGuardCss(css: string): string {
-  if (!css) return buildSoftMagazineGuardCss();
+/**
+ * Guard for v7 sites where the art director owns the article/category shells.
+ * Every cosmetic rule sits in :where() so its specificity is 0 — the agent's
+ * own stylesheet always wins, and this only keeps unstyled server blocks
+ * (offer, related, FAQ, feed) from looking broken.
+ */
+export function buildArticleShellGuardCss(): string {
+  return `
+/* structural-guard-v14-shell — safety only; layout belongs to the art director */
+html,body{overflow-x:hidden!important;max-width:100%!important}
+img,video,canvas,svg{max-width:100%;height:auto}
+.cta-block{display:none!important}
+:where(.on-media){color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.45)}
+:where(.site-header) a{color:inherit;text-decoration:none}
+
+/* Server-generated blocks — neutral fallbacks, zero specificity */
+:where(.article-body) img,:where(.article-img),:where(.hero-article-img){display:block;width:100%;border-radius:var(--r,14px)}
+:where(.hero-cover-fallback){width:100%;height:min(340px,52vw);border-radius:var(--r,14px)}
+:where(.breadcrumb){display:flex;flex-wrap:wrap;gap:.35rem;align-items:center;font-size:.78rem;opacity:.75}
+:where(.breadcrumb) a{color:inherit;text-decoration:none}
+:where(.sidebar) .sb-list{list-style:none;margin:0;padding:0}
+:where(.sidebar) .sb-list a{color:inherit;text-decoration:none}
+:where(.related-articles){margin:2.2rem 0 1rem}
+:where(.related-grid){display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:.7rem}
+:where(.related-card){display:block;padding:.85rem;border:1px solid var(--border,rgba(127,127,127,.2));border-radius:var(--r,12px);text-decoration:none;color:inherit}
+:where(.faq-answer){display:none}
+:where(.faq-question){cursor:pointer;display:flex;justify-content:space-between;gap:.75rem}
+:where(.author-box){display:flex;gap:.85rem;align-items:flex-start;margin:2rem 0 1.25rem}
+:where(.author-avatar){width:2.4rem;height:2.4rem;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--brand,currentColor);color:#fff;font-weight:800;flex:0 0 auto}
+:where(.reading-progress){position:fixed;left:0;top:0;z-index:90;height:3px;width:0;background:var(--brand,currentColor)}
+
+/* Home feed — server paginates 12 per page; the agent may restyle freely */
+:where([data-seo-article-feed]){display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:clamp(.85rem,1.5vw,1.15rem);align-items:stretch}
+:where([data-seo-article-feed]>.article-card){display:flex;flex-direction:column;text-decoration:none;color:inherit;overflow:hidden}
+:where([data-seo-article-feed] .ac-img-wrap){position:relative;width:100%;aspect-ratio:16/10;overflow:hidden;background:rgba(0,0,0,.2)}
+:where([data-seo-article-feed] .ac-img-wrap img),:where([data-seo-article-feed] .ac-img-grad){width:100%;height:100%;object-fit:cover;display:block}
+:where([data-seo-article-feed] .ac-body),:where([data-seo-article-feed] .ac-content){padding:.7rem .8rem .85rem;flex:1 1 auto}
+:where([data-seo-article-feed] .ac-title){font-family:var(--heading-font,inherit);font-size:clamp(.82rem,.7rem + .35vw,.98rem);font-weight:750;line-height:1.3;margin:0;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.seo-feed-pager{display:flex;align-items:center;justify-content:center;gap:.65rem;flex-wrap:wrap;margin:1.25rem 0 2.5rem;font-family:var(--heading-font,inherit)}
+.seo-feed-pager[hidden]{display:none!important}
+.seo-feed-pager button{appearance:none;border:1px solid var(--border,currentColor);background:transparent;color:inherit;font:inherit;font-weight:700;padding:.55rem .9rem;border-radius:999px;cursor:pointer;opacity:.9}
+.seo-feed-pager button:disabled{opacity:.35;cursor:default}
+
+/* Native referral offer — server-injected, must stay readable on any theme */
+:where(.offer-inline-tip){margin:.85rem 0 1.1rem;padding:.75rem 1rem;border-left:3px solid var(--brand,currentColor);background:color-mix(in srgb,var(--brand,currentColor) 8%,transparent);border-radius:0 var(--r,10px) var(--r,10px) 0;line-height:1.55}
+:where(.offer-inline-tip) a{font-weight:700;text-decoration:underline;text-underline-offset:2px}
+:where(.ref-offer){display:block;position:relative;margin:1.5rem 0 1.75rem;border-radius:calc(var(--r,14px) + 4px);overflow:hidden;border:1px solid color-mix(in srgb,var(--brand,currentColor) 32%,var(--border,rgba(127,127,127,.35)))}
+:where(.ref-offer-inner){display:grid;grid-template-columns:minmax(0,1fr) auto;gap:1.1rem;align-items:center;padding:clamp(1rem,2vw,1.45rem)}
+:where(.ref-offer-btn){display:inline-flex;align-items:center;justify-content:center;min-height:48px;padding:.85rem 1.35rem;border-radius:999px;text-decoration:none;font-weight:800;white-space:nowrap;color:#fff;background:var(--brand,#2563eb)}
+
+@media(max-width:1024px){:where([data-seo-article-feed]){grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:720px){
+  :where([data-seo-article-feed]){grid-template-columns:repeat(2,minmax(0,1fr))}
+  :where(.ref-offer-inner){grid-template-columns:1fr}
+  :where(.sidebar){position:static}
+  .site-header nav,.site-header .nav-links{max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+}
+@media(max-width:420px){:where([data-seo-article-feed]){grid-template-columns:1fr}}
+`;
+}
+
+export function ensureSoftMagazineGuardCss(css: string, opts?: { shellOwned?: boolean }): string {
+  const guard = opts?.shellOwned ? buildArticleShellGuardCss() : buildSoftMagazineGuardCss();
+  if (!css) return guard;
   const stripped = css.replace(/\n?\/\*\s*structural-guard(?:-v\d+)?[\s\S]*$/i, "").trim();
-  return `${stripped}\n${buildSoftMagazineGuardCss()}`;
+  return `${stripped}\n${guard}`;
 }
 
 export function applyHeroVariantToTheme(theme: SeoTheme | undefined, hero: SeoHeroVariant): SeoTheme {
@@ -813,14 +1149,39 @@ export function buildRelatedArticlesHtml(
     </a>`,
     )
     .join("\n    ");
-  return `<div class="related-articles">
+  return `${RELATED_MARK_OPEN}<div class="related-articles">
   <h2>Читайте также</h2>
   <div class="related-grid">
     ${cards}
   </div>
-</div>`;
+</div>${RELATED_MARK_CLOSE}`;
 }
 
+const RELATED_BLOCK_RE =
+  /<div\s+class=["'][^"']*related-articles[^"']*["'][^>]*>[\s\S]*?<div\s+class=["'][^"']*related-grid[^"']*["'][^>]*>[\s\S]*?<\/div>\s*<\/div>/gi;
+const RELATED_MARKED_RE = /<!--seo-related-->[\s\S]*?<!--\/seo-related-->/gi;
+const RELATED_MARK_OPEN = "<!--seo-related-->";
+const RELATED_MARK_CLOSE = "<!--/seo-related-->";
+
+/**
+ * Legacy inline «Читайте также» paragraph. It was injected after the lead on
+ * every project load, so articles accumulated several of them right where the
+ * reader starts. Real related links now live in one block at the end.
+ */
+export function stripInlineAlsoParagraphs(html: string): string {
+  if (!html) return html;
+  return html.replace(/\s*<p\s+class=["'][^"']*article-also[^"']*["'][^>]*>[\s\S]*?<\/p>/gi, "");
+}
+
+export function stripRelatedArticleBlocks(html: string): string {
+  if (!html) return html;
+  return html.replace(RELATED_MARKED_RE, "").replace(RELATED_BLOCK_RE, "");
+}
+
+/**
+ * Keeps exactly ONE related block per article and, once it has been placed,
+ * refreshes it where it already sits instead of appending another copy.
+ */
 export function ensureRealRelatedArticles(
   html: string,
   kw: Pick<SeoKeyword, "slug" | "title">,
@@ -829,17 +1190,25 @@ export function ensureRealRelatedArticles(
 ): string {
   if (!html) return html;
   const block = buildRelatedArticlesHtml(kw, cluster, cfg);
-  if (/class=["'][^"']*related-articles/i.test(html)) {
-    return html.replace(
-      /<div\s+class=["'][^"']*related-articles[^"']*["'][^>]*>[\s\S]*?<div\s+class=["'][^"']*related-grid[^"']*["'][^>]*>[\s\S]*?<\/div>\s*<\/div>/i,
-      block || "",
-    );
+  const noAlso = stripInlineAlsoParagraphs(html);
+
+  if (RELATED_MARKED_RE.test(noAlso)) {
+    RELATED_MARKED_RE.lastIndex = 0;
+    let first = true;
+    return noAlso.replace(RELATED_MARKED_RE, () => {
+      if (!first) return "";
+      first = false;
+      return block;
+    });
   }
-  if (!block) return html;
-  if (/<\/main>/i.test(html)) return html.replace(/<\/main>/i, `${block}\n</main>`);
-  if (/<aside\s+class=["']sidebar["']/i.test(html)) {
-    return html.replace(/<aside\s+class=["']sidebar["']/i, `${block}\n<aside class="sidebar"`);
+
+  const cleaned = stripRelatedArticleBlocks(noAlso);
+  if (!block) return cleaned;
+  if (cleaned.includes("{{RELATED}}")) return cleaned.replace("{{RELATED}}", block);
+  if (/<\/main>/i.test(cleaned)) return cleaned.replace(/<\/main>/i, `${block}\n</main>`);
+  if (/<aside\s+class=["']sidebar["']/i.test(cleaned)) {
+    return cleaned.replace(/<aside\s+class=["']sidebar["']/i, `${block}\n<aside class="sidebar"`);
   }
   // Inner article fragment (no page chrome) — append after FAQ / body
-  return `${html.trim()}\n${block}`;
+  return `${cleaned.trim()}\n${block}`;
 }

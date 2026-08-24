@@ -2,8 +2,15 @@ import { type Express } from "express";
 import type { IStorage } from "./storage";
 import { deployToYandex, type DeployFile } from "./yandex-deploy";
 import { isInternalAgentFile } from "@shared/project-files";
-import type { SeoConfig, SeoCluster, SeoKeyword, SeoLayoutFamily, SeoTheme } from "@shared/schema";
-import { resolveSeoOffer, seoOfferProductName } from "@shared/schema";
+import type {
+  SeoConfig,
+  SeoCluster,
+  SeoContentType,
+  SeoKeyword,
+  SeoLayoutFamily,
+  SeoTheme,
+} from "@shared/schema";
+import { resolveSeoOffer, seoOfferProductName, SEO_CONTENT_TYPES } from "@shared/schema";
 import crypto from "crypto";
 import { withKieCallback, waitForKieJob, kieResultUrl, type KieTaskData } from "./kie-jobs";
 import { tryAcquireGenerate, withImageSlot } from "./resource-guards";
@@ -19,7 +26,10 @@ import { bundleSeoMediaForDeploy, normalizeSeoMediaUrls, persistSeoCoverFromUrl 
 import { KIE_GEMINI_MODEL, KIE_GEMINI_SYNC_URL, withKieGeminiRetry } from "./kie-gemini";
 import {
   applyHeroVariantToTheme,
+  articleTemplateIssues,
+  buildArticleTemplatePrompt,
   buildMagazineDesignPrompt,
+  buildRelatedArticlesHtml,
   collectSeoArticleBriefs,
   demoteHeaderBrandH1,
   ensureRealRelatedArticles,
@@ -28,12 +38,15 @@ import {
   findMatchingTagClose,
   homeFeedNeedsRepair,
   isArtDirectedSeo,
+  isUsableArticleShell,
+  isUsableCategoryShell,
   magazineDesignQualityIssues,
   parseMagazineDesignFiles,
   patchHomeArticleFeed,
-  pickHeroVariant,
+  pickLayoutDna,
   relabelHeaderCategoryLinks,
-  type SeoHeroVariant,
+  stripInlineAlsoParagraphs,
+  type MagazineDesignFiles,
 } from "./seo-magazine-design";
 import { loadProfessionalTastePack, truncateSkillsForStudy } from "./taste-skill-loader";
 
@@ -45,12 +58,24 @@ const KIE_JOBS_STATUS = "https://api.kie.ai/api/v1/jobs/recordInfo";
 const SEO_ARTICLE_COST = 70;
 const SEO_EDIT_COST = 30;
 const SEO_LOGO_COST = 15;
-/** How many articles to generate at once (text + cover). */
-const SEO_ARTICLE_CONCURRENCY = 4;
+
+function seoEnvInt(name: string, fallback: number, max: number): number {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? Math.min(max, Math.floor(n)) : fallback;
+}
+
+/**
+ * How many articles to generate at once (text + cover). Article generation is
+ * network-bound on KIE, not local CPU, so the old value of 4 left the pipeline
+ * idle: a 500-keyword site took hours.
+ */
+const SEO_ARTICLE_CONCURRENCY = seoEnvInt("SEO_ARTICLE_CONCURRENCY", 12, 32);
 /** Pause between launching the next article — avoids bursting KIE. */
-const SEO_ARTICLE_STAGGER_MS = 2000;
+const SEO_ARTICLE_STAGGER_MS = seoEnvInt("SEO_ARTICLE_STAGGER_MS", 400, 10_000);
 /** Cover image retries if KIE returns empty / error. */
-const SEO_COVER_RETRIES = 3;
+const SEO_COVER_RETRIES = seoEnvInt("SEO_COVER_RETRIES", 2, 5);
+/** In-body photos per article (cover is separate) — each one is a full image job. */
+const SEO_INLINE_IMAGES_MAX = Number(process.env.SEO_INLINE_IMAGES_MAX ?? 1);
 
 /** In-flight SEO generate jobs — survive SSE disconnects so all articles finish. */
 const seoGenerateInFlight = new Map<number, {
@@ -146,16 +171,41 @@ function pickHostCluster<T extends { name: string; keywords: string[] }>(cluster
   return best;
 }
 
-function inferSeoContentType(keyword: string): SeoKeyword["contentType"] {
+/**
+ * Search intent visible in the keyword itself. Only strong signals win here —
+ * anything else defers to the category format the clustering agent picked,
+ * because a recipe site should never fall back to "comprehensive guide".
+ */
+function inferSeoContentType(
+  keyword: string,
+  clusterDefault?: SeoContentType,
+): SeoContentType {
   const s = String(keyword || "").toLowerCase();
-  if (/\bvs\b|против|\bили\b|\bor\b|сравнен/.test(s)) return "comparison";
-  if (/(^|\s)как\s|how to|пошаг|инструкц/.test(s)) return "tutorial";
+  if (/\bvs\b|против|\bили\b|\bor\b|сравнен|отличия|разница/.test(s)) return "comparison";
+  if (/рецепт|как приготовить|как испечь|как сварить/.test(s)) return "recipe";
+  if (/лучшие|топ[- ]?\d|\bbest\b|подборк|рейтинг|список/.test(s)) return "listicle";
   if (/обзор|review|стоит ли|отзыв/.test(s)) return "review";
-  if (/лучшие|топ[- ]?\d|\bbest\b|\b10\b|список/.test(s)) return "listicle";
-  return "guide";
+  if (/цена|стоимость|сколько стоит|тариф|price|бесплатн/.test(s)) return "pricing";
+  if (/не работает|ошибк|проблем|почему не|исправить|fix/.test(s)) return "troubleshooting";
+  if (/что такое|что значит|кто такой|определение|простыми словами/.test(s)) return "explainer";
+  if (/чек-?лист|checklist|что взять|что нужно для/.test(s)) return "checklist";
+  if (/(^|\s)как\s|how to|пошаг|инструкц|настроить|установить/.test(s)) return "tutorial";
+  if (/куда|где поесть|где остановиться|маршрут|достопримечательност/.test(s)) return "place-guide";
+  return clusterDefault || "guide";
 }
 
-type CompactAnalyzeCluster = { name: string; slug: string; description: string; keywords: string[] };
+type CompactAnalyzeCluster = {
+  name: string;
+  slug: string;
+  description: string;
+  keywords: string[];
+  contentType?: SeoContentType;
+};
+
+function normalizeContentType(raw: unknown): SeoContentType | undefined {
+  const v = String(raw || "").trim().toLowerCase().replace(/[_\s]+/g, "-");
+  return (SEO_CONTENT_TYPES as string[]).includes(v) ? (v as SeoContentType) : undefined;
+}
 
 function fallbackClusterKeywords(keywords: string[], niche: string): CompactAnalyzeCluster[] {
   const stop = new Set(["vs", "или", "and", "the", "для", "как", "что", "про", "это", "best", "top"]);
@@ -337,16 +387,21 @@ async function compactAnalyzeClusters(keywords: string[], niche: string): Promis
 
 RULES:
 - Every keyword MUST appear in exactly one category, copied EXACTLY from the list (do not rewrite).
-- Return compact JSON only: category name/slug/description + keyword STRINGS. No article titles, no questions, no contentType.
+- Return compact JSON only: category name/slug/description + contentType + keyword STRINGS. No article titles, no questions.
 - Max 80 keywords per category; merge leftovers into the closest topical category.
 - Never create a catch-all category named Other, More, Misc, Ещё темы, or similar.
 - 4-12 categories.
+- contentType = the article format this category actually needs, ONE of:
+  ${SEO_CONTENT_TYPES.join(" | ")}
+  Pick by real search intent, not habit: a cooking category is "recipe", a "что такое X" category is "explainer",
+  a price category is "pricing", a fault/error category is "troubleshooting", a travel category is "place-guide".
+  Do NOT default everything to "guide".
 
 KEYWORDS:
 ${keywords.join("\n")}
 
 JSON shape:
-{"siteDescription":"120-160 chars","visualIdentity":{"mood":"...","layoutFamily":"magazine","typographyVibe":"...","backgroundEnergy":"calm|living-deep|cinematic|airy"},"clusters":[{"name":"...","slug":"...","description":"...","keywords":["exact keyword", "..."]}]}`;
+{"siteDescription":"120-160 chars","visualIdentity":{"mood":"...","layoutFamily":"magazine","typographyVibe":"...","backgroundEnergy":"calm|living-deep|cinematic|airy"},"clusters":[{"name":"...","slug":"...","description":"...","contentType":"recipe","keywords":["exact keyword", "..."]}]}`;
 
   const responseText = await kieSync(
     [
@@ -365,6 +420,7 @@ JSON shape:
       name: String(c.name || "Раздел"),
       slug: slugify(c.slug || c.name || "category"),
       description: String(c.description || ""),
+      contentType: normalizeContentType(c.contentType),
       keywords: extractClusterKeywordList(c.keywords),
     })),
     keywords,
@@ -484,7 +540,11 @@ async function generateCoverWithRetry(prompt: string): Promise<string> {
 }
 
 
-async function resolveInlineArticleImages(html: string, maxInline = 2): Promise<string> {
+async function resolveInlineArticleImages(
+  html: string,
+  maxInline = 2,
+  altFallback = "",
+): Promise<string> {
   if (!html) return html;
   const re = /\{\{IMG:([\s\S]*?)\}\}/gi;
   const markers: Array<{ full: string; prompt: string }> = [];
@@ -506,7 +566,9 @@ async function resolveInlineArticleImages(html: string, maxInline = 2): Promise<
       url = "";
     }
     const safe = cssUrl(url);
-    const alt = esc(marker.prompt.replace(/\s+/g, " ").slice(0, 140));
+    // The marker prompt is English photo direction — useless as alt text on a
+    // Russian page, so prefer the article title when we have it.
+    const alt = esc((altFallback || marker.prompt).replace(/\s+/g, " ").slice(0, 140));
     const fig = safe
       ? `<figure class="article-photo"><img src="${safe}" alt="${alt}" loading="lazy" decoding="async" width="1200" height="800"></figure>`
       : "";
@@ -868,7 +930,7 @@ async function ensureNativeOfferInArticle(
   cluster: SeoCluster,
   cfg: SeoConfig,
 ): Promise<string> {
-  let out = stripArticlePreambleBoxes(html);
+  let out = stripInlineAlsoParagraphs(stripArticlePreambleBoxes(html));
   const offer = resolveSeoOffer(kw, cluster, cfg);
   if (!normalizeHttpUrl(offer.targetUrl)) return out;
   out = resolveInlineOfferMarkers(out, offer);
@@ -879,7 +941,6 @@ async function ensureNativeOfferInArticle(
     out = stripArticlePreambleBoxes(out);
   }
   out = moveFirstNativeOfferNearStart(out);
-  out = ensureInlineInternalLinks(out, kw, cluster, cfg);
   return out;
 }
 
@@ -918,40 +979,6 @@ function parseRefCopyMarker(html: string, slot: "top" | "bottom"): { title: stri
 
 function polishArticleLists(html: string): string {
   return stripArticlePreambleBoxes(html);
-}
-
-function ensureInlineInternalLinks(
-  html: string,
-  kw: SeoKeyword,
-  cluster: SeoCluster,
-  cfg: SeoConfig,
-): string {
-  if (!html) return html;
-  const others = (cfg.clusters || [])
-    .flatMap((c) =>
-      c.keywords
-        .filter((k) => k.slug !== kw.slug && (k.status === "done" || k.filename))
-        .slice(0, 2)
-        .map((k) => ({ title: k.title, href: `/${c.slug}/${k.slug}/` })),
-    )
-    .filter((it) => it.href !== `/${cluster.slug}/${kw.slug}/`)
-    .slice(0, 4);
-  if (others.length === 0) return html;
-  const bodyMatch = html.match(/<div class="article-body"[^>]*>([\s\S]*?)<\/div>/i);
-  const probe = bodyMatch?.[1] || html;
-  const existing = (probe.match(/<a\b[^>]*href=["']\/[^"']+["']/gi) || []).length;
-  if (existing >= 2) return html;
-  const pick = others.slice(0, 2);
-  const line = `<p class="article-also">Читайте также: ${pick
-    .map((it) => `<a href="${esc(it.href)}">${esc(it.title)}</a>`)
-    .join(" · ")}.</p>`;
-  if (/<p class="lead"[\s\S]*?<\/p>/i.test(html)) {
-    return html.replace(/(<p class="lead"[\s\S]*?<\/p>)/i, `$1\n${line}`);
-  }
-  if (/<div class="article-body"[^>]*>/i.test(html)) {
-    return html.replace(/(<div class="article-body"[^>]*>)/i, `$1\n${line}`);
-  }
-  return html;
 }
 
 async function refreshArticleReferralOffers(storage: IStorage, projectId: number, cfg: SeoConfig): Promise<void> {
@@ -1304,7 +1331,7 @@ function articleJsonLd(
       "@id": `${path}#article`,
       headline: kw.title,
       name: kw.title,
-      description: `${kw.title}. ${cfg.siteDescription}`.slice(0, 180),
+      description: articleMetaDescription(articleHtml, kw, cfg),
       keywords: kw.keyword,
       inLanguage: lang,
       datePublished: published,
@@ -1497,7 +1524,7 @@ function seoPreviewAppBase(): string {
   return (process.env.APP_BASE_URL || "https://craft-ai.ru").replace(/\/$/, "");
 }
 
-function prepareSeoPreviewHtml(html: string, css: string): string {
+function prepareSeoPreviewHtml(html: string, css: string, cfg?: SeoConfig): string {
   const appBase = seoPreviewAppBase();
   let out = normalizeSeoMediaUrls(html);
   out = out.replace(
@@ -1508,7 +1535,7 @@ function prepareSeoPreviewHtml(html: string, css: string): string {
     /url\s*\(\s*(['"]?)(\/objects\/[^'")]+)\1\s*\)/gi,
     (_m, q: string, path: string) => `url(${q}${appBase}${path}${q})`,
   );
-  const guarded = ensureStructuralGuardCss(css);
+  const guarded = ensureStructuralGuardCss(css, cfg);
   const styleTag = `<style>html,body{overflow-x:hidden!important;max-width:100%!important;min-width:0!important}${guarded}</style>`;
   const linked = out.replace(/<link[^>]+href=["'][^"']*assets\/style\.css["'][^>]*\/?>/gi, styleTag);
   if (linked === out) {
@@ -1591,6 +1618,21 @@ async function repairSeoSiteLayout(storage: IStorage, projectId: number, cfg: Se
   }
 }
 
+/** True when this project already has an agent-designed homepage + stylesheet. */
+async function hasArtDirectedSeoFiles(storage: IStorage, projectId: number): Promise<boolean> {
+  const [home, css] = await Promise.all([
+    storage.getProjectFile(projectId, "index.html"),
+    storage.getProjectFile(projectId, "assets/style.css"),
+  ]);
+  return !!(
+    css?.code &&
+    /magazine-art-v[67]/i.test(css.code) &&
+    home?.code &&
+    home.code.length > 800 &&
+    (/art-directed/i.test(home.code) || /data-seo-article-feed/i.test(home.code) || /site-header/i.test(home.code))
+  );
+}
+
 /**
  * Gemini art-director pass: invents magazine CSS + interactive hero homepage.
  * Same ownership idea as multipage «по описанию»: agent owns unique chrome.
@@ -1602,9 +1644,13 @@ async function designSeoMagazineSite(
   onStatus?: (msg: string) => void,
 ): Promise<SeoConfig> {
   const seed = `${cfg.siteTitle}|${cfg.niche}|${projectId}|${cfg.clusters.map((c) => c.slug).join(",")}`;
-  const heroVariant: SeoHeroVariant = pickHeroVariant(seed);
-  const articles = collectSeoArticleBriefs(cfg);
-  onStatus?.(`Арт-директор: hero «${heroVariant}»`);
+  const dna = pickLayoutDna(seed);
+  const heroVariant = dna.hero;
+  // Design runs before the articles exist so every article can use this site's
+  // own layout and component kit — seed the brief with the planned titles.
+  const done = collectSeoArticleBriefs(cfg);
+  const articles = done.length ? done : collectSeoArticleBriefs(cfg, 24, { includePlanned: true });
+  onStatus?.(`Арт-директор: hero «${heroVariant}», вёрстка статьи «${dna.reading}»`);
 
   let tasteBrief = "";
   try {
@@ -1617,34 +1663,35 @@ async function designSeoMagazineSite(
 
   const promptBase = {
     cfg,
-    heroVariant,
+    dna,
     articles,
     logoUrl: cfg.logoUrl,
     tasteBrief: tasteBrief || undefined,
   };
 
-  const runDesignOnce = async (critique?: string): Promise<{ css?: string; html?: string }> => {
+  const runDesignOnce = async (critique?: string): Promise<MagazineDesignFiles> => {
     const raw = await kieSync(
       [
         {
           role: "system",
           content:
-            "You are a world-class digital magazine art director. Invent a UNIQUE premium masthead/menu/hero/visual system for this niche — never a shared SEO template. Beauty first. Output only the two FILE blocks requested. No preamble.",
+            "You are a world-class digital magazine art director. Invent a UNIQUE premium visual system for this niche — masthead, hero, reading layout and in-article components — never a shared SEO template. Beauty first. Output only the FILE blocks requested. No preamble.",
         },
         { role: "user", content: buildMagazineDesignPrompt({ ...promptBase, critique }) },
       ],
-      210000,
+      240000,
     );
     return parseMagazineDesignFiles(raw);
   };
 
-  let parsed: { css?: string; html?: string } = {};
+  let parsed: MagazineDesignFiles = {};
   try {
     parsed = await runDesignOnce();
     let issues = magazineDesignQualityIssues(parsed.css || "", parsed.html || "", articles.length);
     if (issues.length) {
       onStatus?.("Арт-директор: усиливаю уникальность дизайна…");
-      parsed = await runDesignOnce(issues.join("\n"));
+      const retry = await runDesignOnce(issues.join("\n"));
+      parsed = { css: retry.css || parsed.css, html: retry.html || parsed.html };
       issues = magazineDesignQualityIssues(parsed.css || "", parsed.html || "", articles.length);
       if (issues.length) {
         console.warn("[SEO] magazine design still weak after retry:", issues.join("; "));
@@ -1681,9 +1728,60 @@ async function designSeoMagazineSite(
     return fallbackCfg;
   }
 
+  // Second pass: the article/category shells and the writer kit, designed
+  // against the stylesheet the first pass produced.
+  onStatus?.("Арт-директор: рисую страницу статьи…");
+  let templates: MagazineDesignFiles = {};
+  try {
+    const runTemplatesOnce = async (critique?: string): Promise<MagazineDesignFiles> => {
+      const raw = await kieSync(
+        [
+          {
+            role: "system",
+            content:
+              "You are the art director of this publication. Output only the FILE blocks requested — full page markup with the tokens left verbatim. No preamble.",
+          },
+          {
+            role: "user",
+            content: buildArticleTemplatePrompt({
+              cfg,
+              dna,
+              css: parsed.css,
+              homeHtml: parsed.html,
+              critique,
+            }),
+          },
+        ],
+        180000,
+      );
+      return parseMagazineDesignFiles(raw);
+    };
+    templates = await runTemplatesOnce();
+    const tIssues = articleTemplateIssues(templates);
+    if (tIssues.length) {
+      const retry = await runTemplatesOnce(tIssues.join("\n"));
+      templates = {
+        articleShell: isUsableArticleShell(retry.articleShell) ? retry.articleShell : templates.articleShell,
+        categoryShell: isUsableCategoryShell(retry.categoryShell) ? retry.categoryShell : templates.categoryShell,
+        writerKit: retry.writerKit || templates.writerKit,
+        extraCss: retry.extraCss || templates.extraCss,
+      };
+    }
+  } catch (err: any) {
+    console.warn("[SEO] article template pass failed:", err?.message || err);
+    templates = {};
+  }
+
+  const articleShell = isUsableArticleShell(templates.articleShell) ? String(templates.articleShell) : undefined;
+  const categoryShell = isUsableCategoryShell(templates.categoryShell) ? String(templates.categoryShell) : undefined;
+  const writerKit = articleShell ? (templates.writerKit || "").slice(0, 8000) : "";
+
   let css = parsed.css;
-  if (!/magazine-art-v6/i.test(css)) css = `/* magazine-art-v6 */\n${css}`;
-  css = ensureSoftMagazineGuardCss(css);
+  if (articleShell && templates.extraCss) {
+    css = `${css}\n/* art-directed article components */\n${templates.extraCss}`;
+  }
+  if (!/magazine-art-v[67]/i.test(css)) css = `/* magazine-art-v7 */\n${css}`;
+  css = ensureSoftMagazineGuardCss(css, { shellOwned: !!articleShell });
 
   let html = parsed.html;
   if (!/^<!DOCTYPE/i.test(html) && !/^<html/i.test(html)) {
@@ -1697,11 +1795,17 @@ async function designSeoMagazineSite(
 
   const next: SeoConfig = {
     ...cfg,
-    architectureVersion: 6,
+    architectureVersion: articleShell ? 7 : 6,
     theme: applyHeroVariantToTheme(themeOf(cfg), heroVariant),
+    ...(articleShell ? { articleShell } : {}),
+    ...(categoryShell ? { categoryShell } : {}),
+    ...(writerKit ? { articleKit: writerKit } : {}),
   };
   await storage.updateProject(projectId, { seoConfig: next, generatedCode: html } as any);
-  console.log(`[SEO] magazine art-directed home ready (hero=${heroVariant}, css=${css.length}, html=${html.length})`);
+  console.log(
+    `[SEO] art-directed site ready (hero=${heroVariant}, read=${dna.reading}, css=${css.length}, html=${html.length}, `
+      + `articleShell=${articleShell ? articleShell.length : 0}, categoryShell=${categoryShell ? categoryShell.length : 0}, kit=${writerKit.length})`,
+  );
   return next;
 }
 
@@ -1764,6 +1868,8 @@ async function persistUniqueSkin(
   const hasAgentCss =
     !!existing?.code &&
     (existing.code.includes("magazine-art-v6") ||
+      existing.code.includes("magazine-art-v7") ||
+      existing.code.includes("structural-guard-v14") ||
       existing.code.includes("structural-guard-v8") ||
       existing.code.includes("structural-guard-v9") ||
       existing.code.includes("structural-guard-v10") ||
@@ -2372,11 +2478,12 @@ body.structure-v2 .cta-block{display:none!important}
 
 function ensureStructuralGuardCss(css: string, cfg?: SeoConfig): string {
   if (!css) return css;
+  const shellOwned = isUsableArticleShell(cfg?.articleShell);
   if (cfg && isArtDirectedSeo(cfg)) {
-    return ensureSoftMagazineGuardCss(css);
+    return ensureSoftMagazineGuardCss(css, { shellOwned });
   }
-  if (css.includes("structural-guard-v8") || css.includes("structural-guard-v9") || css.includes("structural-guard-v10") || css.includes("structural-guard-v11") || css.includes("structural-guard-v12") || css.includes("structural-guard-v13") || css.includes("magazine-art-v6")) {
-    return ensureSoftMagazineGuardCss(css);
+  if (css.includes("structural-guard-v8") || css.includes("structural-guard-v9") || css.includes("structural-guard-v10") || css.includes("structural-guard-v11") || css.includes("structural-guard-v12") || css.includes("structural-guard-v13") || css.includes("magazine-art-v6") || css.includes("magazine-art-v7")) {
+    return ensureSoftMagazineGuardCss(css, { shellOwned });
   }
   if (css.includes("structural-guard-v7")) return css;
   const withoutOldGuard = css.replace(/\n?\/\*\s*structural-guard(?:-v\d+)?[\s\S]*$/i, "").trim();
@@ -2680,6 +2787,39 @@ function buildCategoryPage(cluster: SeoCluster, cfg: SeoConfig): string {
 
   const lang = htmlLang(`${cluster.name} ${cfg.siteTitle} ${cfg.niche}`);
 
+  const catHead = `<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(cluster.name)} | ${esc(cfg.siteTitle)}</title>
+<meta name="description" content="${esc(cluster.description || `${cluster.name} — ${cfg.siteTitle}`)}">
+<meta property="og:title" content="${esc(cluster.name)} | ${esc(cfg.siteTitle)}">
+<meta property="og:description" content="${esc(cluster.description || cfg.siteDescription)}">
+<meta property="og:type" content="website">
+<meta property="og:url" content="${esc(seoUrl(cfg, `/${cluster.slug}/`))}">
+<link rel="stylesheet" href="/assets/style.css">
+${geoHead(cfg)}
+<link rel="canonical" href="${esc(seoUrl(cfg, `/${cluster.slug}/`))}">
+<script type="application/ld+json">${schema}</script>`;
+
+  if (isUsableCategoryShell(cfg.categoryShell)) {
+    const body = renderSeoShell(String(cfg.categoryShell), cfg, {
+      HEADER: nav,
+      FOOTER: footer,
+      BREADCRUMB: `<div class="breadcrumb"><a href="/">Главная</a><span class="sep">›</span><span class="cur">${esc(cluster.name)}</span></div>`,
+      CATEGORY_NAME: esc(cluster.name),
+      CATEGORY_DESCRIPTION: esc(cluster.description || ""),
+      CATEGORY_NUMBER: String(cfg.clusters.findIndex((c) => c.id === cluster.id) + 1).padStart(2, "0"),
+      ARTICLE_COUNT: String(done.length),
+      CARDS: cards || `<p class="category-empty">Статьи генерируются...</p>`,
+    });
+    return `<!DOCTYPE html>
+<html lang="${lang}">
+<head>
+${catHead}
+</head>
+${body}
+</html>`;
+  }
+
   if (cfg.structuralVersion === 2) {
     const theme = themeOf(cfg);
     const family = theme.layoutFamily || "magazine";
@@ -2847,46 +2987,167 @@ function getContentTypeInstructions(contentType: string | undefined, keyQuestion
   const structures: Record<string, string> = {
     guide: `CONTENT TYPE: Comprehensive Guide
 - Start with a strong lead paragraph, then go straight into 5-6 H2 sections (beginner-friendly first, advanced last)
-- NO Key Takeaways box, NO «Короткий ответ», NO table of contents / «Содержание»
 - Each section has practical examples, data points, or real-world scenarios
-- Add 1-2 <blockquote> with expert-sounding insights
-- Author box before FAQ: <div class="author-box"><div class="author-avatar">✍</div><div class="author-info"><div class="author-name">Editorial Team</div><div class="author-bio">Verified by experts with 10+ years in the field. Last updated: ${new Date().toLocaleDateString("ru-RU")}.</div></div></div>`,
+- Add 1-2 <blockquote> with expert-sounding insights`,
 
     tutorial: `CONTENT TYPE: Step-by-Step Tutorial
-- Strong lead, then prerequisites (1-2 sentences). NO takeaways box, NO table of contents.
+- Strong lead, then prerequisites (1-2 sentences)
 - Number each step using <div class="step-box"><div class="step-num">1</div><div class="step-content"><h3>Step title</h3><p>Clear action + expected result</p></div></div>
-- "Common Mistakes to Avoid" H2 section
-- "Quick Reference" summary table at the end
-- Author box before FAQ`,
+- "Частые ошибки" H2 section
+- Short reference table at the end`,
 
     comparison: `CONTENT TYPE: Comparison Article
-- Strong lead with a one-sentence verdict in prose (NOT a Key Takeaways / Quick Verdict box). NO table of contents.
+- Strong lead with a one-sentence verdict in prose
 - Comparison table with HTML <table class="comparison-table">: columns for each option, rows for key features, mark winners with class="ct-winner"
-- One H2 per option with deep dive + <div class="pros-cons"><div class="pros"><h4>Pros</h4><ul>…</ul></div><div class="cons"><h4>Cons</h4><ul>…</ul></div></div>
-- "Which Should You Choose?" H2 with use-case matrix ("Choose X if… / Choose Y if…")
-- Verdict box: <div class="verdict-box"><h3>Our Verdict</h3><p>…</p></div>
-- Author box before FAQ`,
+- One H2 per option with deep dive + <div class="pros-cons"><div class="pros"><h4>Плюсы</h4><ul>…</ul></div><div class="cons"><h4>Минусы</h4><ul>…</ul></div></div>
+- "Что выбрать" H2 with a use-case matrix ("Берите X, если… / Берите Y, если…")
+- Verdict box: <div class="verdict-box"><h3>Вывод</h3><p>…</p></div>`,
 
     review: `CONTENT TYPE: Review
-- Strong lead with rating/verdict in prose. NO Key Takeaways box, NO TOC.
+- Strong lead with the verdict in prose
 - Key features H2 with numbered highlights
 - <div class="pros-cons"> grid
-- "Who It's For / Who Should Avoid It" H2
-- Pricing & Value H2
-- Comparison with 2-3 top alternatives
-- Verdict box: <div class="verdict-box"><h3>Final Verdict</h3><p>…</p></div>
-- Author box before FAQ`,
+- "Кому подойдёт и кому нет" H2
+- Цена и ценность H2
+- Comparison with 2-3 real alternatives
+- Verdict box: <div class="verdict-box"><h3>Итог</h3><p>…</p></div>`,
 
     listicle: `CONTENT TYPE: Listicle / Best-Of Article
-- Brief intro (2-3 sentences): methodology, what was tested, time/experience basis. NO table of contents.
-- One H2 per list item (numbered: "1. Best X for Y", "2. …")
-- Each item: 150-200 words + pros/cons mini list + "Best for: …" sentence
+- Brief intro (2-3 sentences): methodology, what was tested, time/experience basis
+- One H2 per list item (numbered: "1. …", "2. …")
+- Each item: 150-200 words + pros/cons mini list + "Кому подойдёт: …" sentence
 - Summary comparison table (class="comparison-table") after all items
-- "How to Choose" H2 with decision framework
-- Author box before FAQ`,
+- "Как выбрать" H2 with a decision framework`,
+
+    recipe: `CONTENT TYPE: Recipe
+- Lead: what the dish tastes like, who it is for, active time and total time — no life story before the recipe
+- Facts row right after the lead: порции, время, сложность, калорийность (use the publication's own component for this)
+- "Ингредиенты" H2 as a precise <ul> with grams/ml — no vague "по вкусу" unless it genuinely is
+- "Как готовить" H2 with numbered steps; each step is one action plus the sensory cue that tells the reader it worked ("до золотистой корочки, ~4 минуты")
+- "Частые ошибки" and "Варианты и замены" H2 sections
+- Storage / serving note at the end
+- NEVER write a generic "guide" intro about the history of the dish before the practical part`,
+
+    explainer: `CONTENT TYPE: Explainer («что это такое»)
+- The lead defines the subject in two sentences a beginner can repeat out loud
+- "Простыми словами" H2 with an analogy
+- "Как это работает" H2 with the mechanism broken into parts
+- "Где применяется" H2 with concrete named examples
+- "Что путают" H2 — the neighbouring terms people confuse it with, and the actual difference
+- Short glossary of related terms at the end`,
+
+    pricing: `CONTENT TYPE: Prices / Tariffs
+- Lead answers the money question in the first two sentences (range + what drives it)
+- Price table <table class="comparison-table"> with tiers/options and what each includes
+- "Из чего складывается цена" H2 with the real cost drivers
+- "Как сэкономить" H2 with concrete tactics
+- "Скрытые расходы" H2
+- State clearly that prices are indicative and change — never invent exact figures you do not know`,
+
+    checklist: `CONTENT TYPE: Checklist
+- Lead: what this checklist prevents you from forgetting
+- The checklist itself early in the article, grouped into 3-5 labelled blocks
+- Each item: what to do + why it matters in one line
+- "Что часто забывают" H2
+- Printable-style summary at the end`,
+
+    "case-study": `CONTENT TYPE: Case Study
+- Lead states the outcome up front (what changed, over what period)
+- "Исходная ситуация" H2 with the starting numbers/context
+- "Что сделали" H2 as a chronological sequence of decisions
+- "Результат" H2 with before/after
+- "Что бы сделали иначе" H2 — honest, this is what makes it credible
+- Never fabricate specific client names or numbers; keep them qualitative if unknown`,
+
+    news: `CONTENT TYPE: News / Update
+- Inverted pyramid: what happened, who is affected, when — all in the lead
+- "Что изменилось" H2 with the concrete deltas
+- "Кого это касается" H2
+- "Что делать" H2 with practical next steps
+- Context section for readers new to the topic`,
+
+    opinion: `CONTENT TYPE: Editorial / Opinion
+- Lead states the thesis without hedging
+- Each H2 advances one argument backed by a concrete example
+- One H2 honestly steel-mans the opposing view before answering it
+- Close with what the reader should do differently
+- This is the piece where the publication's voice is strongest`,
+
+    profile: `CONTENT TYPE: Profile
+- Lead: why this subject matters right now
+- "Кратко" facts block (using the publication's component)
+- Background, defining work, current status as separate H2 sections
+- "Почему о нём говорят" H2
+- Stick to verifiable, widely known facts`,
+
+    "place-guide": `CONTENT TYPE: Place Guide
+- Lead: what the place is actually like and who will enjoy it
+- "Как добраться" H2 with practical transport detail
+- "Что посмотреть" H2 — named spots, each with why it is worth the detour
+- "Когда ехать" H2 with seasonality
+- "Сколько стоит" and "Где остановиться" H2 sections
+- Practical warnings a first-timer would not expect`,
+
+    troubleshooting: `CONTENT TYPE: Troubleshooting
+- Lead names the symptom exactly as the reader would describe it
+- "Быстрая проверка" H2 — the three things that fix it most of the time
+- One H2 per cause: как понять, что дело в этом → как починить
+- Order causes from most to least likely
+- "Если ничего не помогло" H2 with escalation steps`,
+
+    glossary: `CONTENT TYPE: Glossary / Term
+- Lead is a citable one-paragraph definition
+- "Определение" H2 with the precise formulation
+- "Пример" H2 with the term used in a real sentence/context
+- "Связанные термины" H2 with short distinctions
+- "Частые заблуждения" H2`,
   };
 
   return (structures[qt] || structures.guide) + qBlock;
+}
+
+/** Article deck → meta description, so pages stop sharing one site-wide blurb. */
+function articleMetaDescription(articleHtml: string, kw: SeoKeyword, cfg: SeoConfig): string {
+  const deck = articleHtml.match(/<p class="article-deck"[^>]*>([\s\S]*?)<\/p>/i)?.[1]
+    || articleHtml.match(/<p class="lead"[^>]*>([\s\S]*?)<\/p>/i)?.[1]
+    || "";
+  const text = deck
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length >= 70) return text.slice(0, 158);
+  return `${kw.title}: ${cfg.siteDescription}`.slice(0, 158);
+}
+
+/**
+ * Render an agent-designed page shell. The art director owns the markup; we
+ * only substitute server-generated regions and keep the body classes the
+ * runtime CSS relies on.
+ */
+function renderSeoShell(
+  shell: string,
+  cfg: SeoConfig,
+  tokens: Record<string, string>,
+): string {
+  let out = shell.trim();
+  if (!/^<body\b/i.test(out)) out = `<body>\n${out}\n</body>`;
+  if (!/<\/body>/i.test(out)) out = `${out}\n</body>`;
+
+  const required = bodyClass(cfg);
+  out = out.replace(/^<body\b([^>]*)>/i, (_m, attrs: string) => {
+    const existing = /class=["']([^"']*)["']/i.exec(attrs)?.[1] || "";
+    const merged = Array.from(new Set(`${existing} ${required}`.split(/\s+/).filter(Boolean))).join(" ");
+    const rest = attrs.replace(/\s*class=["'][^"']*["']/i, "");
+    return `<body class="${merged}"${rest}>`;
+  });
+
+  for (const [key, value] of Object.entries(tokens)) {
+    out = out.split(`{{${key}}}`).join(value);
+  }
+  // Any token the agent forgot must not leak to readers.
+  out = out.replace(/\{\{[A-Z_]+\}\}/g, "");
+  return out;
 }
 
 async function generateArticleHtml(
@@ -2905,8 +3166,12 @@ async function generateArticleHtml(
     .flatMap(c => c.keywords.filter(k => k.slug !== kw.slug && (k.status === "done" || k.filename)).slice(0, 2).map(k => `/${c.slug}/${k.slug}/ → ${k.title}`))
     .slice(0, 8).join("\n");
 
-  const contentTypeBlock = getContentTypeInstructions(kw.contentType, kw.keyQuestions);
+  const contentTypeBlock = getContentTypeInstructions(
+    kw.contentType || cluster.contentType,
+    kw.keyQuestions,
+  );
   const today = new Date().toLocaleDateString("ru-RU");
+  const writerKit = String(cfg.articleKit || "").trim();
 
   const offer = resolveSeoOffer(kw, cluster, cfg);
   const safeUrl = safeHref(offer.targetUrl);
@@ -2946,7 +3211,16 @@ GEO / AI CITATION (ChatGPT, Perplexity, Gemini, Claude, YandexGPT, Alice):
 - FAQ questions should match how people actually ask AI assistants, not stuffed keywords
 - Author box: publication name "${cfg.siteTitle}", not "Editorial Team"
 
-VISUAL RHYTHM — RICH MAGAZINE LAYOUT WITHOUT SVG (CRITICAL):
+${writerKit
+    ? `THIS PUBLICATION'S COMPONENT KIT — the art director designed these for this magazine and styled them in its stylesheet.
+Use ONLY these components for visual rhythm. Any class you invent outside the kit will render unstyled.
+────────────────
+${writerKit.slice(0, 5000)}
+────────────────
+- The VERY FIRST paragraph MUST be <p class="lead">…</p>.
+- Follow the kit's rhythm and meta rules exactly. Do not fall back to generic 💡/⚠️/📌 callouts if the kit does not define them.
+- NO SVG, NO CSS animations, NO decorative flourish lines, NO Lottie. Typography + photos + kit components only.`
+    : `VISUAL RHYTHM — RICH MAGAZINE LAYOUT WITHOUT SVG (CRITICAL):
 - The VERY FIRST paragraph MUST be <p class="lead">…</p> (bold larger intro with drop-cap).
 - After every 2-3 paragraphs, insert ONE rich visual element. Choose from:
   • Pull quote: <blockquote class="pull-quote">Memorable insight in 10-18 words.</blockquote>
@@ -2954,7 +3228,7 @@ VISUAL RHYTHM — RICH MAGAZINE LAYOUT WITHOUT SVG (CRITICAL):
   • Stat grid (2-4 cards): <div class="stat-grid"><div class="stat-card"><div class="stat-num">73%</div><div class="stat-label">short description</div></div>…</div>
   • Comparison table, numbered steps, pros/cons — when they genuinely help
 - Use these elements at least 4 times. Never put two of the same type back-to-back.
-- NO SVG, NO CSS animations, NO decorative flourish lines, NO Lottie. Typography + photos + callouts only.
+- NO SVG, NO CSS animations, NO decorative flourish lines, NO Lottie. Typography + photos + callouts only.`}
 - DO NOT output any <img> tags yourself. Cover is {{COVER}}. For in-article photos use ONLY markers:
   {{IMG:English photo prompt describing EXACTLY what this section needs}}
 ${hasReferral ? `- OWNER OFFER uses the SAME marker idea as photos. Place EXACTLY TWO {{OFFER:...}} markers:
@@ -2963,7 +3237,7 @@ ${hasReferral ? `- OWNER OFFER uses the SAME marker idea as photos. Place EXACTL
   {{OFFER:2–4 original sentences in the article language: why ${productName} helps THIS keyword / this section. Staff-writer voice, concrete, not an ad template.}}
 ` : ""}
   Rules for {{IMG:...}}:
-  • You may place 0, 1, or 2 markers total (agent decides based on article needs; max 2). Cover counts separately as photo #1 of up to 3.
+  • You may place at most ${SEO_INLINE_IMAGES_MAX} marker${SEO_INLINE_IMAGES_MAX === 1 ? "" : "s"} in total (0 is fine when the text does not need a photo). The cover is generated separately.
   • Prompt must match the surrounding section content and niche. Example: article about borscht, section about ingredients → {{IMG:Fresh raw ingredients for Ukrainian borscht arranged on a rustic table: beets, cabbage, potatoes, carrots, garlic, dill, beef bones — photorealistic food photography}}
   • Another example: section comparing two tools → show both products side by side in a clean studio scene relevant to the niche.
   • Prompts in English, concrete, no text/watermarks/logos in the image description.
@@ -2987,11 +3261,13 @@ OUTPUT EXACTLY THIS STRUCTURE (no outer wrappers, no page-level tags):
 <div class="article-header">
   <h1>${kw.title}</h1>
   <p class="article-deck">[One concise 140-220 character summary that promises a clear reader benefit without repeating H1]</p>
-  <div class="article-meta">
+${writerKit
+    ? `  <div class="article-meta">[compose exactly as this publication's kit specifies — not a generic time+date line]</div>`
+    : `  <div class="article-meta">
     <span class="tag">${cluster.name}</span>
     <span class="reading-time">⏱ ~[N] мин чтения</span>
     <span>Обновлено: ${today}</span>
-  </div>
+  </div>`}
 </div>
 {{COVER}}
 <div class="article-body">
@@ -2999,7 +3275,9 @@ OUTPUT EXACTLY THIS STRUCTURE (no outer wrappers, no page-level tags):
   ${hasReferral ? `{{OFFER:native rec #1 about ${productName} for this keyword — FIRST thing after the lead}}` : ""}
   [h2 sections; visual elements; optional {{IMG:...}}; ${hasReferral ? `second {{OFFER:...}} later in the body` : "no referral"}]
 </div>
-<div class="author-box"><div class="author-avatar">${esc((cfg.siteTitle || "R").slice(0, 1))}</div><div class="author-info"><div class="author-name">${esc(cfg.siteTitle)}</div><div class="author-bio">Редакция издания. Тема: ${esc(cfg.niche || cluster.name)}. Обновлено: ${today}.</div></div></div>
+${writerKit
+    ? `<div class="author-box">[author box for «${esc(cfg.siteTitle)}» written in the voice the kit describes; keep the .author-box class]</div>`
+    : `<div class="author-box"><div class="author-avatar">${esc((cfg.siteTitle || "R").slice(0, 1))}</div><div class="author-info"><div class="author-name">${esc(cfg.siteTitle)}</div><div class="author-bio">Редакция издания. Тема: ${esc(cfg.niche || cluster.name)}. Обновлено: ${today}.</div></div></div>`}
 <div class="faq-section">
   <h2>Часто задаваемые вопросы</h2>
   [5 faq-items: <div class="faq-item"><div class="faq-question">Question<span>+</span></div><div class="faq-answer">Answer text</div></div>]
@@ -3023,8 +3301,9 @@ Output ONLY the HTML fragment above — no markdown, no explanations, no page-le
 
   // ── Cover image block (one per article, GPT-image-2 1K) with graceful fallback ──
   const coverUrl = cssUrl(cover);
+  // Cover is the LCP element — never lazy.
   const coverImg = coverUrl
-    ? `<img class="hero-article-img" src="${coverUrl}" alt="${esc(kw.title)}" loading="lazy">`
+    ? `<img class="hero-article-img" src="${coverUrl}" alt="${esc(kw.title)}" fetchpriority="high" decoding="async">`
     : `<div class="hero-cover-fallback" style="background:${CARD_GRADS[idx % CARD_GRADS.length]}"><span>${esc(cluster.name)}</span></div>`;
   const coverBlock = coverImg;
   // Strip any stray <img> the model may have emitted despite instructions
@@ -3041,7 +3320,7 @@ Output ONLY the HTML fragment above — no markdown, no explanations, no page-le
     }
   }
 
-  articleContent = await resolveInlineArticleImages(articleContent, 2);
+  articleContent = await resolveInlineArticleImages(articleContent, SEO_INLINE_IMAGES_MAX, kw.title);
   // Strip decorative SVG / flourish the model may still emit
   articleContent = articleContent
     .replace(/<div class="article-flourish"[\s\S]*?<\/div>/gi, "")
@@ -3049,7 +3328,12 @@ Output ONLY the HTML fragment above — no markdown, no explanations, no page-le
     .replace(/<svg\b[\s\S]*?<\/svg>/gi, "");
   articleContent = await ensureNativeOfferInArticle(articleContent, kw, cluster, cfg);
   articleContent = polishArticleLists(articleContent);
-  articleContent = ensureRealRelatedArticles(articleContent, kw, cluster, cfgAll);
+
+  const shell = isUsableArticleShell(cfg.articleShell) ? String(cfg.articleShell) : "";
+  const relatedBlock = buildRelatedArticlesHtml(kw, cluster, cfgAll);
+  if (!shell) {
+    articleContent = ensureRealRelatedArticles(articleContent, kw, cluster, cfgAll);
+  }
 
   // ── Schema.org + GEO ──
   const schema = JSON.stringify(articleJsonLd(kw, cluster, cfg, articleContent, coverUrl || undefined));
@@ -3059,38 +3343,25 @@ Output ONLY the HTML fragment above — no markdown, no explanations, no page-le
     : buildNav(cfg);
   const footer = art ? `<footer data-seo-shell="1"></footer>` : buildFooter(cfg);
   const lang = htmlLang(`${kw.keyword} ${kw.title} ${cfg.niche} ${cfg.siteTitle}`);
-  const metaDesc = esc(`${kw.title}: ${cfg.siteDescription}`.slice(0, 160));
+  // Prefer the article's own deck — a site-wide description on every page is a
+  // duplicate-meta signal for both Yandex and Google.
+  const metaDesc = esc(articleMetaDescription(articleContent, kw, cfg));
   const ogImageUrl = seoAssetUrl(cfg, coverUrl);
   const ogImage = ogImageUrl
     ? `<meta property="og:image" content="${esc(ogImageUrl)}">`
     : "";
 
-  return `<!DOCTYPE html>
-<html lang="${lang}">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(kw.title)} | ${esc(cfg.siteTitle)}</title>
-<meta name="description" content="${metaDesc}">
-<meta property="og:title" content="${esc(kw.title)} | ${esc(cfg.siteTitle)}">
-<meta property="og:description" content="${metaDesc}">
-<meta property="og:type" content="article">
-<meta property="og:url" content="${esc(seoUrl(cfg, `/${cluster.slug}/${kw.slug}/`))}">
-${ogImage}
-<link rel="canonical" href="${esc(seoUrl(cfg, `/${cluster.slug}/${kw.slug}/`))}">
-<link rel="stylesheet" href="/assets/style.css">
-${geoHead(cfg)}
-<script type="application/ld+json">${schema}</script>
-</head>
-<body class="${bodyClass(cfg)}">
+  const breadcrumb = `<div class="breadcrumb">
+    <a href="/">Главная</a><span class="sep">›</span>
+    <a href="/${cluster.slug}/">${esc(cluster.name)}</a><span class="sep">›</span>
+    <span class="cur">${esc(kw.title)}</span>
+  </div>`;
+
+  const defaultBody = `<body class="${bodyClass(cfg)}">
 <div class="reading-progress" aria-hidden="true"></div>
 ${nav}
 <div class="article-page">
-  <div class="breadcrumb">
-    <a href="/">Главная</a><span class="sep">›</span>
-    <a href="/${cluster.slug}/">${cluster.name}</a><span class="sep">›</span>
-    <span class="cur">${kw.title}</span>
-  </div>
+  ${breadcrumb}
   <div class="article-layout article-layout-${themeOf(cfg).articleVariant || "sidebar-right"}">
     <main class="article-main">
       ${articleContent}
@@ -3099,7 +3370,24 @@ ${nav}
   </div>
 </div>
 ${footer}
-<script>
+</body>`;
+
+  let bodyMarkup = defaultBody;
+  if (shell) {
+    bodyMarkup = renderSeoShell(shell, cfg, {
+      HEADER: nav,
+      FOOTER: footer,
+      BREADCRUMB: breadcrumb,
+      ARTICLE: articleContent,
+      SIDEBAR: sidebar,
+      RELATED: relatedBlock,
+    });
+    if (relatedBlock && !bodyMarkup.includes("related-articles")) {
+      bodyMarkup = bodyMarkup.replace(/<\/body>\s*$/i, `${relatedBlock}\n</body>`);
+    }
+  }
+
+  const pageScripts = `<script>
 document.querySelectorAll('.faq-question').forEach(function(q){
   q.addEventListener('click',function(){
     var a=this.nextElementSibling;
@@ -3126,8 +3414,26 @@ function updateReadingProgress(){
 window.addEventListener('scroll',updateReadingProgress,{passive:true});
 window.addEventListener('resize',updateReadingProgress);
 updateReadingProgress();
-</script>
-</body>
+</script>`;
+
+  return `<!DOCTYPE html>
+<html lang="${lang}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(kw.title)} | ${esc(cfg.siteTitle)}</title>
+<meta name="description" content="${metaDesc}">
+<meta property="og:title" content="${esc(kw.title)} | ${esc(cfg.siteTitle)}">
+<meta property="og:description" content="${metaDesc}">
+<meta property="og:type" content="article">
+<meta property="og:url" content="${esc(seoUrl(cfg, `/${cluster.slug}/${kw.slug}/`))}">
+${ogImage}
+<link rel="canonical" href="${esc(seoUrl(cfg, `/${cluster.slug}/${kw.slug}/`))}">
+<link rel="stylesheet" href="/assets/style.css">
+${geoHead(cfg)}
+<script type="application/ld+json">${schema}</script>
+</head>
+${bodyMarkup.replace(/<\/body>\s*$/i, `${pageScripts}\n</body>`)}
 </html>`;
 }
 
@@ -3181,11 +3487,13 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
       // Keep magazine CSS + native offers current on already generated sites.
       if (isArtDirectedSeo(cfg) && (cfg.pagesGenerated || 0) > 0) {
         const cssFileArt = await storage.getProjectFile(proj.id, "assets/style.css");
-        if (cssFileArt?.code && !cssFileArt.code.includes("structural-guard-v13")) {
+        const shellOwned = isUsableArticleShell(cfg.articleShell);
+        const currentGuard = shellOwned ? "structural-guard-v14-shell" : "structural-guard-v13";
+        if (cssFileArt?.code && !cssFileArt.code.includes(currentGuard)) {
           await storage.upsertProjectFile({
             projectId: proj.id,
             filename: "assets/style.css",
-            code: ensureSoftMagazineGuardCss(cssFileArt.code),
+            code: ensureSoftMagazineGuardCss(cssFileArt.code, { shellOwned }),
           });
         }
         const home = await storage.getProjectFile(proj.id, "index.html");
@@ -3293,6 +3601,7 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
         name: c.name || "Category",
         slug: slugify(c.slug || c.name || "category"),
         description: c.description || "",
+        contentType: c.contentType,
         niche: siteNiche,
         targetUrl: siteTargetUrl || undefined,
         ctaLabel: siteCtaLabel,
@@ -3302,7 +3611,7 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
           slug: slugify(kw),
           title: kw.slice(0, 70),
           status: "pending" as const,
-          contentType: inferSeoContentType(kw),
+          contentType: inferSeoContentType(kw, c.contentType),
           keyQuestions: [],
           niche: siteNiche,
           targetUrl: siteTargetUrl || undefined,
@@ -3492,6 +3801,20 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
       }
     }
 
+    // Art direction must happen BEFORE the articles are written: it defines the
+    // article page shell and the component kit each article is written against.
+    if (!(await hasArtDirectedSeoFiles(storage, proj.id))) {
+      send({ type: "progress", keyword: "Арт-директор: придумываю дизайн издания", status: "generating" });
+      try {
+        cfg = await designSeoMagazineSite(storage, proj.id, cfg, (msg) =>
+          send({ type: "progress", keyword: msg, status: "generating" }),
+        );
+        await storage.updateProject(proj.id, { seoConfig: cfg } as any);
+      } catch (designErr: any) {
+        console.warn("[SEO] pre-generation design failed:", designErr?.message || designErr);
+      }
+    }
+
     let articleIdx = 0;
     const allClusters = cfg.clusters.filter((c) => !isSeoDumpCluster(c));
     cfg = { ...cfg, clusters: allClusters, pagesTotal: allClusters.reduce((s, c) => s + c.keywords.length, 0) };
@@ -3633,15 +3956,7 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
 
       // Do NOT re-invent the whole magazine on every «Продолжить» — that looked like a design rollback.
       // Redesign only when there is no art-directed home/CSS yet.
-      const homeExisting = await storage.getProjectFile(proj.id, "index.html");
-      const cssExisting = await storage.getProjectFile(proj.id, "assets/style.css");
-      const hasArtDirectedHome = !!(
-        cssExisting?.code &&
-        /magazine-art-v6/i.test(cssExisting.code) &&
-        homeExisting?.code &&
-        homeExisting.code.length > 800 &&
-        (/art-directed/i.test(homeExisting.code) || /data-seo-article-feed/i.test(homeExisting.code) || /site-header/i.test(homeExisting.code))
-      );
+      const hasArtDirectedHome = await hasArtDirectedSeoFiles(storage, proj.id);
 
       if (!stopped && !hasArtDirectedHome) {
         send({ type: "progress", keyword: "Арт-директор: интерактивный журналный Hero", status: "generating" });
@@ -3966,7 +4281,7 @@ ${packOfferBlock}
 RULES:
 1. Map each keyword to the MOST RELEVANT existing category if it fits naturally${nicheDiffers ? " AND shares this pack's niche" : ""}
 2. If a keyword doesn't fit any existing category well${nicheDiffers ? " (or existing categories are for another niche)" : ""}, create a NEW category (new slug, name, description) with isNew=true
-3. For each keyword, generate: title (50-60 chars, SEO-optimized), slug (Latin, URL-safe), contentType (guide|tutorial|comparison|review|listicle), keyQuestions (3 real searcher questions)
+3. For each keyword, generate: title (50-60 chars, SEO-optimized), slug (Latin, URL-safe), contentType (one of: ${SEO_CONTENT_TYPES.join("|")} — pick by real search intent, never default everything to "guide"), keyQuestions (3 real searcher questions)
 4. Avoid duplicating existing keywords/slugs
 
 Respond ONLY with valid JSON (no markdown):
@@ -4054,7 +4369,7 @@ Respond ONLY with valid JSON (no markdown):
         slug: slugify(a.slug),
         title: a.title || a.keyword,
         status: "pending",
-        contentType: a.contentType,
+        contentType: normalizeContentType(a.contentType) || inferSeoContentType(a.keyword, cluster.contentType),
         keyQuestions: Array.isArray(a.keyQuestions) ? a.keyQuestions : [],
         ...(stampNiche ? { niche: stampNiche } : {}),
         ...(stampUrl ? { targetUrl: stampUrl } : {}),
@@ -4375,7 +4690,7 @@ ${offerBlock}
       await storage.upsertProjectFile({ projectId: proj.id, filename: "assets/style.css", code: css });
       cssFile = { code: css } as any;
     }
-    const html = prepareSeoPreviewHtml(file.code, cssFile?.code || "");
+    const html = prepareSeoPreviewHtml(file.code, cssFile?.code || "", proj.seoConfig as SeoConfig);
     res.type("text/html").send(html);
   });
 
