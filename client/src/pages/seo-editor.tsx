@@ -11,7 +11,7 @@ import {
   CheckCircle2, XCircle, Clock, Loader2, ArrowLeft,
   BarChart2, FileText, Layers, PlusCircle, X,
   MessageSquare, Send, ExternalLink, Download, Copy,
-  Sparkles, Paperclip,
+  Sparkles, Paperclip, Trash2, Square,
 } from "lucide-react";
 import { DnsInstructions } from "@/components/dns-instructions";
 
@@ -113,12 +113,15 @@ export default function SeoEditorPage() {
   const [genLog, setGenLog]         = useState<string[]>([]);
   const [genProgress, setGenProgress] = useState({ done: 0, total: 0 });
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
+  const [removingPageId, setRemovingPageId] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing]   = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [analyzeElapsed, setAnalyzeElapsed] = useState(0);
   const analyzeTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const genAutoResumeRef = useRef(0);
   const genActiveRef = useRef(false);
+  const userStoppedRef = useRef(false);
 
   const [targetUrl, setTargetUrl]     = useState("");
   const [ctaLabel, setCtaLabel]       = useState("Попробовать →");
@@ -254,6 +257,7 @@ export default function SeoEditorPage() {
   /* ── generate (SSE) — auto-resumes until all articles are done ── */
   function startGeneration(opts?: { auto?: boolean }) {
     if (genActiveRef.current) return;
+    if (userStoppedRef.current && opts?.auto) return;
     if (isGenerating && !opts?.auto) return;
     genActiveRef.current = true;
     setIsGenerating(true);
@@ -261,6 +265,8 @@ export default function SeoEditorPage() {
     if (!opts?.auto) {
       setGenLog([]);
       genAutoResumeRef.current = 0;
+      userStoppedRef.current = false;
+      setIsStopping(false);
     }
     setGenProgress({ done: cfg?.pagesGenerated || 0, total: cfg?.pagesTotal || 0 });
 
@@ -321,12 +327,19 @@ export default function SeoEditorPage() {
               lastGenerated = evt.generated ?? lastGenerated;
               lastTotal = evt.total || lastTotal;
               setGenProgress({ done: lastGenerated, total: lastTotal });
+              if (evt.stopped) {
+                userStoppedRef.current = true;
+                setIsStopping(false);
+                setLeftTab("pages");
+                setGenLog((l) => [...l.slice(-99), "⏹ Генерация остановлена"]);
+                toast({ title: "Генерация остановлена", description: "Уже готовые статьи сохранены. Можно удалить лишние страницы и нажать «Продолжить»." });
+              }
               await refetch();
               if (!partial) {
                 setPhase("done");
                 await loadPreview("index.html");
               }
-              if (partial) toast({ title: "Токены закончились", description: "Пополните баланс и нажмите «Продолжить»", variant: "destructive" });
+              if (partial && !evt.stopped && !userStoppedRef.current) toast({ title: "Токены закончились", description: "Пополните баланс и нажмите «Продолжить»", variant: "destructive" });
             }
             if (evt.type === "error") toast({ title: evt.message, variant: "destructive" });
           } catch {}
@@ -345,7 +358,7 @@ export default function SeoEditorPage() {
       const status = latest?.status;
       const incomplete = pagesTotal > 0 && pagesGenerated < pagesTotal;
       const stillRunning = status === "generating";
-      if (!partial && (incomplete || stillRunning || !sawDone) && genAutoResumeRef.current < 40) {
+      if (!userStoppedRef.current && !partial && (incomplete || stillRunning || !sawDone) && genAutoResumeRef.current < 40) {
         genAutoResumeRef.current += 1;
         setGenLog((l) => [...l.slice(-99), `↻ Автопродолжение ${genAutoResumeRef.current}… (${pagesGenerated}/${pagesTotal})`]);
         genActiveRef.current = false;
@@ -360,7 +373,7 @@ export default function SeoEditorPage() {
       }
     }).catch((e) => {
       if (e.name !== "AbortError") toast({ title: "Ошибка генерации", description: e.message, variant: "destructive" });
-      if (genAutoResumeRef.current < 40) {
+      if (!userStoppedRef.current && genAutoResumeRef.current < 40) {
         genAutoResumeRef.current += 1;
         genActiveRef.current = false;
         setIsGenerating(false);
@@ -370,8 +383,52 @@ export default function SeoEditorPage() {
     }).finally(() => {
       genActiveRef.current = false;
       setIsGenerating(false);
+      setIsStopping(false);
       void refetch();
     });
+  }
+
+  async function stopGeneration() {
+    if (!id || userStoppedRef.current) return;
+    userStoppedRef.current = true;
+    setIsStopping(true);
+    setLeftTab("pages");
+    setGenLog((l) => [...l.slice(-99), "⏹ Останавливаю — допишу текущие статьи и выйду…"]);
+    try {
+      const res = await fetch(`/api/seo/${id}/stop`, { method: "POST", credentials: "include" });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.message || "Не удалось остановить");
+    } catch (e: any) {
+      userStoppedRef.current = false;
+      setIsStopping(false);
+      toast({ title: "Не удалось остановить", description: e?.message || "Попробуйте ещё раз", variant: "destructive" });
+    }
+  }
+
+  async function removePage(kw: { id: string; title?: string; keyword: string; status?: string }) {
+    if (!id || removingPageId) return;
+    const ready = kw.status === "done";
+    if (ready && !window.confirm(`Удалить статью «${kw.title || kw.keyword}»?`)) return;
+    setRemovingPageId(kw.id);
+    try {
+      const res = await fetch(`/api/seo/${id}/remove-page`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keywordId: kw.id }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.message || "Не удалось удалить");
+      if (d.seoConfig) {
+        setGenProgress({ done: d.seoConfig.pagesGenerated || 0, total: d.seoConfig.pagesTotal || 0 });
+      }
+      await refetch();
+      if (ready) toast({ title: "Статья удалена" });
+    } catch (e: any) {
+      toast({ title: "Не удалось удалить", description: e?.message || "Попробуйте ещё раз", variant: "destructive" });
+    } finally {
+      setRemovingPageId(null);
+    }
   }
 
   async function redesignHome() {
@@ -401,7 +458,7 @@ export default function SeoEditorPage() {
 
   // If page reloads while server is still generating — reconnect automatically.
   useEffect(() => {
-    if (!cfg || isGenerating || genActiveRef.current) return;
+    if (!cfg || isGenerating || genActiveRef.current || userStoppedRef.current) return;
     if (cfg.status === "generating" && (cfg.pagesGenerated || 0) < (cfg.pagesTotal || 0)) {
       startGeneration({ auto: true });
     }
@@ -1011,10 +1068,22 @@ export default function SeoEditorPage() {
               {showPages && (
                 <>
                   <div className="px-4 py-3 border-b border-slate-100 flex gap-2">
-                    {phase === "generating" ? (
-                      <div className="flex-1 py-2 rounded-xl bg-slate-50 border border-slate-100 text-slate-400 text-xs flex items-center justify-center gap-2">
-                        <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500" /> Генерирую статьи...
-                      </div>
+                    {phase === "generating" || isGenerating ? (
+                      <>
+                        <div className="flex-1 py-2 rounded-xl bg-slate-50 border border-slate-100 text-slate-400 text-xs flex items-center justify-center gap-2 min-w-0">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500 shrink-0" />
+                          <span className="truncate">{isStopping ? "Останавливаю…" : "Генерирую статьи..."}</span>
+                        </div>
+                        <button
+                          type="button"
+                          title="Остановить генерацию"
+                          onClick={() => void stopGeneration()}
+                          disabled={isStopping}
+                          className="px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 disabled:opacity-50 shrink-0"
+                        >
+                          <Square className="w-3 h-3 fill-current" /> Стоп
+                        </button>
+                      </>
                     ) : (
                       <>
                       <button onClick={() => startGeneration()} disabled={isGenerating} className={`flex-1 py-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 ${cfg.pagesGenerated > 0 ? "bg-indigo-50 text-indigo-600 border border-indigo-100" : "text-white bg-gradient-to-r from-indigo-500 to-violet-600 shadow-sm"}`}>
@@ -1051,13 +1120,24 @@ export default function SeoEditorPage() {
                         <div key={cluster.id}>
                           <TreeRow icon={open ? <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" /> : <ChevronRight className="w-3 h-3 text-slate-400 shrink-0" />} label={cluster.name} badge={`${doneCount}/${cluster.keywords.length}${offerNiche ? ` · ${offerNiche}` : ""}`} bold active={selectedFile === `${cluster.slug}/index.html`} indent={0} onClick={() => { toggleCluster(cluster.id); loadPreview(`${cluster.slug}/index.html`); }} />
                           {open && cluster.keywords.map((kw: any) => (
-                            <TreeRow key={kw.id} icon={<StatusIcon status={kw.status} />} label={kw.title || kw.keyword} badge={kw.targetUrl && kw.targetUrl !== cfg.targetUrl ? "реф" : undefined} active={selectedFile === kw.filename} indent={1} faded={kw.status !== "done"} onClick={() => kw.filename && loadPreview(kw.filename)} />
+                            <TreeRow
+                              key={kw.id}
+                              icon={<StatusIcon status={kw.status} />}
+                              label={kw.title || kw.keyword}
+                              badge={kw.targetUrl && kw.targetUrl !== cfg.targetUrl ? "реф" : undefined}
+                              active={selectedFile === kw.filename}
+                              indent={1}
+                              faded={kw.status !== "done"}
+                              onClick={() => kw.filename && loadPreview(kw.filename)}
+                              onDelete={() => void removePage(kw)}
+                              deleting={removingPageId === kw.id}
+                            />
                           ))}
                         </div>
                       );
                     })}
                   </div>
-                  {phase === "generating" && genLog.length > 0 && (
+                  {(phase === "generating" || isGenerating || isStopping) && genLog.length > 0 && (
                     <div className="border-t border-slate-100 px-4 py-2 max-h-[110px] overflow-y-auto bg-slate-50">
                       {genLog.slice(-7).map((line, i) => (
                         <div key={i} className="text-[10.5px] text-slate-400 leading-relaxed font-mono">{line}</div>
@@ -1501,21 +1581,38 @@ export default function SeoEditorPage() {
 }
 
 /* ─── Tree row ─── */
-function TreeRow({ icon, label, bold = false, active, done, badge, faded, indent, onClick }: {
+function TreeRow({ icon, label, bold = false, active, done, badge, faded, indent, onClick, onDelete, deleting }: {
   icon: any; label: string; bold?: boolean; active?: boolean; done?: boolean;
   badge?: string; faded?: boolean; indent?: number; onClick?: () => void;
+  onDelete?: () => void; deleting?: boolean;
 }) {
   return (
-    <button
-      onClick={onClick}
-      className={`w-full text-left cursor-pointer flex items-center gap-2 py-1.5 pr-3 border-l-2 ${active ? "bg-slate-100 border-indigo-500" : "bg-transparent border-transparent hover:bg-slate-50"}`}
+    <div
+      className={`group w-full flex items-center border-l-2 ${active ? "bg-slate-100 border-indigo-500" : "bg-transparent border-transparent hover:bg-slate-50"}`}
       style={{ paddingLeft: 14 + (indent || 0) * 16 }}
     >
-      {icon}
-      <span className={`text-[13px] flex-1 overflow-hidden text-ellipsis whitespace-nowrap ${bold ? "font-semibold" : "font-normal"} ${active ? "text-slate-800" : faded ? "text-slate-400" : "text-slate-600"}`}>{label}</span>
-      {done && !badge && <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0 opacity-70" />}
-      {badge && <span className="text-[10px] text-slate-400 font-semibold shrink-0">{badge}</span>}
-    </button>
+      <button
+        type="button"
+        onClick={onClick}
+        className="flex-1 min-w-0 text-left cursor-pointer flex items-center gap-2 py-1.5 pr-1"
+      >
+        {icon}
+        <span className={`text-[13px] flex-1 overflow-hidden text-ellipsis whitespace-nowrap ${bold ? "font-semibold" : "font-normal"} ${active ? "text-slate-800" : faded ? "text-slate-400" : "text-slate-600"}`}>{label}</span>
+        {done && !badge && <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0 opacity-70" />}
+        {badge && <span className="text-[10px] text-slate-400 font-semibold shrink-0">{badge}</span>}
+      </button>
+      {onDelete && (
+        <button
+          type="button"
+          title="Убрать страницу"
+          disabled={deleting}
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(); }}
+          className="shrink-0 mr-2 p-1 rounded-md text-slate-300 hover:text-red-500 hover:bg-red-50 opacity-70 sm:opacity-0 sm:group-hover:opacity-100 disabled:opacity-40"
+        >
+          {deleting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+        </button>
+      )}
+    </div>
   );
 }
 
