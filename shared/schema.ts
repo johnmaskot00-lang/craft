@@ -20,6 +20,47 @@ export const users = pgTable("users", {
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 
+/**
+ * Article formats the writer can be briefed with. A guide is wrong for a recipe
+ * site, so the clustering agent picks the format per category from this list.
+ */
+export type SeoContentType =
+  | "guide"
+  | "comparison"
+  | "tutorial"
+  | "review"
+  | "listicle"
+  | "recipe"
+  | "explainer"
+  | "pricing"
+  | "checklist"
+  | "case-study"
+  | "news"
+  | "opinion"
+  | "profile"
+  | "place-guide"
+  | "troubleshooting"
+  | "glossary";
+
+export const SEO_CONTENT_TYPES: SeoContentType[] = [
+  "guide",
+  "comparison",
+  "tutorial",
+  "review",
+  "listicle",
+  "recipe",
+  "explainer",
+  "pricing",
+  "checklist",
+  "case-study",
+  "news",
+  "opinion",
+  "profile",
+  "place-guide",
+  "troubleshooting",
+  "glossary",
+];
+
 export interface SeoKeyword {
   id: string;
   keyword: string;
@@ -30,7 +71,7 @@ export interface SeoKeyword {
   image?: string;
   publishedAt?: string;
   updatedAt?: string;
-  contentType?: "guide" | "comparison" | "tutorial" | "review" | "listicle";
+  contentType?: SeoContentType;
   keyQuestions?: string[];
   /** Per-article offer — wins over cluster/site defaults when generating CTAs. */
   niche?: string;
@@ -44,6 +85,8 @@ export interface SeoCluster {
   slug: string;
   description: string;
   keywords: SeoKeyword[];
+  /** Article format chosen by the clustering agent for this topic. */
+  contentType?: SeoContentType;
   /** Default offer for keywords in this category (used when keyword has none). */
   niche?: string;
   targetUrl?: string;
@@ -102,7 +145,16 @@ export interface SeoConfig {
   /** Set only for newly analyzed projects; missing means preserve the legacy skeleton. */
   structuralVersion?: 2;
   /** Curated architecture/navigation generation version for safe in-place upgrades of v2 sites. */
-  architectureVersion?: 4 | 5 | 6;
+  architectureVersion?: 4 | 5 | 6 | 7;
+  /**
+   * v7 sites: the art director also owns the article and category page shells,
+   * so two sites never share a reading layout. Older sites have no shells and
+   * keep the server skeleton untouched.
+   */
+  articleShell?: string;
+  categoryShell?: string;
+  /** Per-site component kit the staff writer must use inside the article body. */
+  articleKit?: string;
   /** One generated square brand mark reused across every page and deployment. */
   logoUrl?: string;
   logoStatus?: "pending" | "generating" | "ready" | "fallback";
