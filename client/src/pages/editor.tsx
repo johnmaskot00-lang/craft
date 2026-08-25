@@ -414,7 +414,8 @@ export default function EditorPage() {
     const initialSeoH2s = urlParams.get("seoh2s") || "";
     const initialLeadForm = urlParams.get("leadform") !== "0";
     const initialInteractive = urlParams.get("interactive") === "1";
-    const initialInteractiveStyle = urlParams.get("istyle") || "parallax";
+    const rawIstyle = urlParams.get("istyle") || "parallax";
+    const initialInteractiveStyle = rawIstyle === "threeui" ? "parallax" : rawIstyle;
     const initialProductImageUrl = urlParams.get("iproductUrl") || "";
     interactiveCreateRef.current = {
       interactive: initialInteractive,
@@ -443,9 +444,9 @@ export default function EditorPage() {
         setPrompt(initialPrompt);
         if (!isMockup || mockupImages) {
           firstCreateKickRef.current = true;
-          // Professional (mockup or agent=v1) → Claude V1; ThreeUI interactive → Claude V1; else Gemini V2.
+          // Professional (mockup or agent=v1) → Claude V1; else Gemini V2.
           const kickVersion =
-            isMockup || urlParams.get("agent") === "v1" || initialInteractiveStyle === "threeui"
+            isMockup || urlParams.get("agent") === "v1"
               ? "v1"
               : "v2";
           firstCreateAgentRef.current = kickVersion;
@@ -807,8 +808,6 @@ export default function EditorPage() {
         bodyData.interactiveMode = true;
         const style = interactiveStyle || interactiveOpts.style;
         if (style) bodyData.interactiveStyle = style;
-        // ThreeUI always runs on Claude V1 (Opus) — server also enforces this.
-        if (style === "threeui") bodyData.agentVersion = "v1";
         const productUrl = interactiveProductImageUrl || interactiveOpts.productUrl;
         if (productUrl) bodyData.interactiveProductImageUrl = productUrl;
       }
@@ -1464,7 +1463,7 @@ export default function EditorPage() {
   };
 
   // Detect broken / missing interactive hero so user can re-bake video into object storage.
-  // Volume / ThreeUI sites have no Kling video — never show «Восстановить видео».
+  // Volume (and leftover ThreeUI markers) have no Kling video — never show «Восстановить видео».
   const codeForAnimCheck = streamedCode || project?.generatedCode || "";
   const isNoKlingSite =
     /data-craft-volume-stack/i.test(codeForAnimCheck) || /data-craft-threeui/i.test(codeForAnimCheck);

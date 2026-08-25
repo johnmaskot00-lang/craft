@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-export type InteractiveStyleId = "parallax" | "split" | "action" | "motion" | "trigger" | "artdirector" | "volume" | "threeui";
+export type InteractiveStyleId = "parallax" | "split" | "action" | "motion" | "trigger" | "artdirector" | "volume";
 
 /** Token estimate for Interactive create (site + hero video + up to 6 images). */
 export const SITE_CREATE_COST = 100;
@@ -15,9 +15,6 @@ export const ART_DIRECTOR_MAX_IMAGES = 8;
 /** «Объём» — cutout layers, no Kling video. */
 export const VOLUME_MAX_IMAGES = 10;
 
-/** «ThreeUI» — Three.js WebGL hero, no Kling video. */
-export const THREEUI_MAX_IMAGES = 8;
-
 /**
  * Upper bound shown before generation. Charging happens per resolved marker, so a
  * site that uses fewer photos or one clip costs less than the estimate.
@@ -25,9 +22,6 @@ export const THREEUI_MAX_IMAGES = 8;
 export function interactiveModeTokenCost(style?: InteractiveStyleId): number {
   if (style === "volume") {
     return SITE_CREATE_COST + IMAGE_TOKEN_COST * VOLUME_MAX_IMAGES;
-  }
-  if (style === "threeui") {
-    return SITE_CREATE_COST + IMAGE_TOKEN_COST * THREEUI_MAX_IMAGES;
   }
   const videos = style === "artdirector" ? ART_DIRECTOR_MAX_VIDEOS : 1;
   const images = style === "artdirector" ? ART_DIRECTOR_MAX_IMAGES : MAX_BILLED_IMAGES;
@@ -49,7 +43,6 @@ export const INTERACTIVE_STYLES: Array<{
   tokenCost: number;
 }> = [
   { id: "artdirector", label: "Арт Директор", desc: "Свобода агенту · до 2 видео и 8 фото", tokenCost: interactiveModeTokenCost("artdirector") },
-  { id: "threeui", label: "ThreeUI", desc: "WebGL Three.js · Claude Opus 5 · без видео", tokenCost: interactiveModeTokenCost("threeui") },
   { id: "volume", label: "Объём", desc: "Сцена слоями · фон + объект + акцент", tokenCost: interactiveModeTokenCost("volume") },
 
   { id: "parallax", label: "Параллакс", desc: "Видео на весь экран, текст поверх", tokenCost: VIDEO_STYLE_COST },
@@ -173,21 +166,6 @@ function HeroPreview({ id, playing }: { id: InteractiveStyleId; playing: boolean
         <div className="isp-parallax-copy isp-vol-copy">
           <span className="isp-kicker">VOLUME</span>
           <span className="isp-title">Cutout origami</span>
-        </div>
-      </div>
-    );
-  }
-
-  if (id === "threeui") {
-    return (
-      <div className="isp-stage isp-three" data-playing={playing ? "1" : "0"}>
-        <div className="isp-three-grid" style={{ animationPlayState: play }} />
-        <div className="isp-three-plane isp-three-p1" style={{ animationPlayState: play }} />
-        <div className="isp-three-plane isp-three-p2" style={{ animationPlayState: play }} />
-        <div className="isp-three-plane isp-three-p3" style={{ animationPlayState: play }} />
-        <div className="isp-parallax-copy isp-three-copy">
-          <span className="isp-kicker">THREEUI</span>
-          <span className="isp-title">WebGL depth</span>
         </div>
       </div>
     );
@@ -803,41 +781,6 @@ const ISP_CSS = `
   100% { transform: translate3d(3%, 2%, 0) rotate(-1deg) scale(1.02); }
 }
 
-/* ThreeUI WebGL preview */
-.isp-three {
-  background: radial-gradient(120% 90% at 70% 30%, #1a2740 0%, #07090e 55%, #050608 100%);
-}
-.isp-three-grid {
-  position: absolute; inset: 0;
-  background-image:
-    linear-gradient(rgba(100,200,255,0.07) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(100,200,255,0.07) 1px, transparent 1px);
-  background-size: 28px 28px;
-  transform: perspective(600px) rotateX(58deg) scale(1.4);
-  transform-origin: center 120%;
-  animation: isp-three-grid 6s ease-in-out infinite alternate;
-  opacity: 0.7;
-}
-.isp-three-plane {
-  position: absolute;
-  border-radius: 10px;
-  border: 1px solid rgba(140,210,255,0.25);
-  background: linear-gradient(145deg, rgba(90,160,255,0.35), rgba(20,40,70,0.5));
-  box-shadow: 0 18px 40px rgba(0,0,0,0.45);
-  animation: isp-three-float 4.5s ease-in-out infinite alternate;
-}
-.isp-three-p1 { left: 18%; top: 28%; width: 42%; height: 38%; transform: rotateY(-18deg) rotateX(8deg); animation-delay: 0s; opacity: 0.55; }
-.isp-three-p2 { left: 36%; top: 22%; width: 40%; height: 44%; transform: rotateY(-8deg); animation-delay: .25s; z-index: 2; }
-.isp-three-p3 { right: 12%; top: 18%; width: 28%; height: 52%; transform: rotateY(12deg) rotateX(-4deg); animation-delay: .5s; z-index: 3; background: linear-gradient(160deg, rgba(255,180,120,0.45), rgba(40,20,10,0.35)); }
-.isp-three-copy { bottom: 10%; left: 8%; z-index: 4; }
-@keyframes isp-three-grid {
-  from { transform: perspective(600px) rotateX(58deg) scale(1.35) translateY(2%); }
-  to { transform: perspective(600px) rotateX(52deg) scale(1.45) translateY(-2%); }
-}
-@keyframes isp-three-float {
-  from { transform: translate3d(0, 2%, 0) rotateY(-10deg); }
-  to { transform: translate3d(2%, -3%, 0) rotateY(-4deg); }
-}
 
 /* Motion */
 .isp-motion {
