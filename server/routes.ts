@@ -25,6 +25,8 @@ import {
   buildArtDirectorVideoHtml,
   artDirectorVideoFallbackHtml,
   artDirectorPendingHtml,
+  buildArtDirectorNicheAddon,
+  dedupeArtDirectorScrollAnimMarkers,
 } from "./art-director";
 import {
   SCROLL_ANIMATIONAL_COST,
@@ -5287,7 +5289,10 @@ export async function registerRoutes(
       } else if (isArtDirectorMode) {
         // Full replace — the whole point of this mode is no master section checklist
         // and no server-built hero skeleton.
-        systemContent = ART_DIRECTOR_SYSTEM_PROMPT;
+        systemContent = ART_DIRECTOR_SYSTEM_PROMPT + buildArtDirectorNicheAddon(
+          String(prompt || ""),
+          project.title || undefined,
+        );
       }
       // Professional / Claude V1: learn from Leonxlnx/taste-skill on GitHub, then build.
       if (isNewSite && !isAnimationalMode && !useGemini) {
@@ -6863,8 +6868,13 @@ ${designAnalysis}
             videoPromptAuto = "premium niche brand scene in full vivid color, iconic commercial subject, cinematic lighting /// same subject and framing in richer alternate color mood, brighter premium commercial lighting, day-to-night or calm-to-energy metamorphosis reveal";
             textsAuto = "Прикоснись::Открой другую сторону бренда||Характер::Сила в деталях||Преображение::Когда результат виден сразу||Твой ход::Начни прямо сейчас";
           } else if (interactiveStyle === "artdirector") {
-            // Free-form mode: the agent writes its own hero copy, so no text pairs.
-            videoPromptAuto = "slow cinematic push-in through a premium brand environment, volumetric light and drifting atmospheric haze, calm negative space for overlaid typography, photorealistic, no text, no watermark";
+            // Free-form mode: niche-aware hero still; agent writes its own overlay copy.
+            const nicheHint = [project.title, project.description, typeof prompt === "string" ? prompt : ""]
+              .filter(Boolean).join(" ").replace(/[|{}]/g, " ").replace(/\s+/g, " ").trim().slice(0, 140);
+            const nicheClause = nicheHint
+              ? `matching this client niche (${nicheHint})`
+              : "matching the client's specific niche and brand";
+            videoPromptAuto = `slow cinematic push-in through a scene clearly ${nicheClause}, calm negative space for overlaid typography, volumetric light, photorealistic, no text, no watermark`;
             textsAuto = "";
           } else {
             videoPromptAuto = absoluteProductImageUrl
@@ -6881,6 +6891,14 @@ ${designAnalysis}
           else if (/<body[^>]*>/i.test(code0)) code0 = code0.replace(/<body[^>]*>/i, (m) => `${m}${markerAuto}`);
           else code0 = markerAuto + code0;
           console.log(`[SCROLLANIM] Auto-injected marker (AI missed it). Style: ${interactiveStyle}`);
+        }
+        if (interactiveStyle === "artdirector") {
+          const before = (code0.match(/\{\{SCROLLANIM:/g) || []).length;
+          code0 = dedupeArtDirectorScrollAnimMarkers(code0);
+          const after = (code0.match(/\{\{SCROLLANIM:/g) || []).length;
+          if (after !== before) {
+            console.log(`[ARTDIRECTOR] Deduped SCROLLANIM markers ${before} → ${after}`);
+          }
         }
         genFilesMap.set("index.html", code0);
         mainHtmlCode = code0;
