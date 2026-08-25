@@ -414,7 +414,8 @@ export default function EditorPage() {
     const initialSeoH2s = urlParams.get("seoh2s") || "";
     const initialLeadForm = urlParams.get("leadform") !== "0";
     const initialInteractive = urlParams.get("interactive") === "1";
-    const initialInteractiveStyle = urlParams.get("istyle") || "parallax";
+    const rawIstyle = urlParams.get("istyle") || "parallax";
+    const initialInteractiveStyle = rawIstyle === "threeui" ? "parallax" : rawIstyle;
     const initialProductImageUrl = urlParams.get("iproductUrl") || "";
     interactiveCreateRef.current = {
       interactive: initialInteractive,
