@@ -20,6 +20,8 @@ export const SW_DIVE_DURATION = 10;
 export const SW_CONN_DURATION = 5;
 
 const KLING_MODEL = "kling-3.0/video";
+/** Fallback when Kling create/render fails — unified KIE jobs API, 1080P. */
+const WAN_FALLBACK_MODEL = "wan/3-0-video";
 const STILL_MODEL = "nano-banana-2";
 const POLL_INTERVAL_MS = 5000;
 const CLIP_DEADLINE_MS = 35 * 60 * 1000; // ~35 min per clip (Kling queue)
@@ -591,6 +593,109 @@ async function createAndPollKling(opts: {
   return { taskId, mp4Url: null };
 }
 
+async function createAndPollWan(opts: {
+  prompt: string;
+  imageUrls: string[];
+  duration: string;
+  deps: GenerateScrollWorldDeps;
+  label: string;
+}): Promise<KieTaskResult | null> {
+  const { prompt, imageUrls, duration, deps, label } = opts;
+  const { kieApiKey, createUrl, statusUrl, kieRequestJson, shouldStop } = deps;
+  const stillUrl = imageUrls[0];
+  if (!stillUrl) {
+    warn(`${label} Wan fallback skipped — no still URL`);
+    return null;
+  }
+  const durationSec = Math.max(2, Math.min(30, Number(duration) || 5));
+
+  const createBody = await kieRequestJson(
+    createUrl,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${kieApiKey}`,
+      },
+      body: JSON.stringify({
+        model: WAN_FALLBACK_MODEL,
+        input: {
+          prompt: prompt.slice(0, PROMPT_MAX),
+          first_frame_url: stillUrl,
+          resolution: "1080P",
+          aspect_ratio: "adaptive",
+          duration: durationSec,
+          audio: false,
+        },
+      }),
+    },
+    {
+      label: `SCROLLWORLD ${label}-wan-create`,
+      retries: 3,
+      shouldStop,
+    },
+  );
+
+  const taskId: string | undefined = createBody?.data?.taskId;
+  if (createBody?.code !== 200 || !taskId) {
+    warn(`${label} Wan create failed:`, createBody?.msg || createBody?.code);
+    return null;
+  }
+  log(`${label} Wan 3.0 fallback task created: ${taskId} (dur=${durationSec})`);
+
+  const deadline = Date.now() + CLIP_DEADLINE_MS;
+  let pollCount = 0;
+  while (Date.now() < deadline) {
+    if (shouldStop()) return null;
+    await sleep(POLL_INTERVAL_MS);
+    pollCount++;
+    const body = await kieRequestJson(
+      `${statusUrl}?taskId=${taskId}`,
+      { headers: { Authorization: `Bearer ${kieApiKey}` } },
+      {
+        label: `SCROLLWORLD ${label}-wan-poll`,
+        retries: 2,
+        shouldStop: () => shouldStop() || Date.now() >= deadline,
+      },
+    );
+    if (!body || body.code !== 200 || !body.data) {
+      if (pollCount <= 3 || pollCount % 10 === 0) log(`${label} Wan poll #${pollCount}: no data`);
+      continue;
+    }
+    const state: string = body.data.state;
+    if (pollCount <= 3 || pollCount % 10 === 0) log(`${label} Wan poll #${pollCount} state=${state}`);
+
+    if (state === "success") {
+      let result: { resultUrls?: string[] } = {};
+      try {
+        const rj = body.data.resultJson;
+        result = typeof rj === "string" ? JSON.parse(rj) : rj || {};
+      } catch (parseErr: unknown) {
+        const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+        warn(`${label} Wan resultJson parse error: ${msg}`);
+      }
+      const mp4Url = (result.resultUrls || [])[0] || null;
+      log(`${label} Wan success mp4=${mp4Url}`);
+      return { taskId, mp4Url };
+    }
+
+    if (state === "fail" || state === "failed" || state === "error") {
+      const failMsg: string = body.data.failMsg || "";
+      const failCode: string = String(body.data.failCode || "");
+      warn(`${label} Wan failed: failMsg="${failMsg}" failCode="${failCode}"`);
+      return {
+        taskId,
+        mp4Url: null,
+        failMsg,
+        failCode,
+        moderation: isModerationError(failMsg, failCode),
+      };
+    }
+  }
+  warn(`${label} Wan timed out after ~${CLIP_DEADLINE_MS / 60000} min`);
+  return { taskId, mp4Url: null };
+}
+
 async function generateClipWithRetries(opts: {
   prompt: string;
   imageUrls: string[];
@@ -623,6 +728,17 @@ async function generateClipWithRetries(opts: {
       log(`${opts.label} sanitized prompt after moderation: "${prompt.slice(0, 100)}"`);
     }
   }
+
+  if (opts.deps.shouldStop()) return null;
+  log(`${opts.label} Kling exhausted — falling back to Wan 3.0 (1080P)…`);
+  const wan = await createAndPollWan({
+    prompt,
+    imageUrls,
+    duration: opts.duration,
+    deps: opts.deps,
+    label: `${opts.label}-wan`,
+  });
+  if (wan?.mp4Url) return wan.mp4Url;
   return null;
 }
 
