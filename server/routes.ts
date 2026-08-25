@@ -29,6 +29,13 @@ import {
   dedupeArtDirectorScrollAnimMarkers,
 } from "./art-director";
 import {
+  VOLUME_MAX_IMAGES,
+  VOLUME_IMAGE_PHASE_MS,
+  VOLUME_SYSTEM_PROMPT,
+  buildVolumeNicheAddon,
+  ensureVolumeRuntime,
+} from "./volume-origami";
+import {
   SCROLL_ANIMATIONAL_COST,
   ANIMATIONAL_SYSTEM_PROMPT,
   generateAnimationalSite,
@@ -3057,8 +3064,10 @@ async function generateGptImage(
   aspectRatio: string,
   shouldStop: () => boolean = () => false,
   refUrls?: string[],
+  opts?: { cutout?: boolean },
 ): Promise<{ url: string | null; confirmedKieFailure: boolean }> {
   const useRefs = !!(refUrls && refUrls.length > 0);
+  const wantCutout = !!opts?.cutout;
   // More attempts since explicit-fail retries are near-instant (2 s each)
   const MAX_ATTEMPTS = 7;
   // Recreate only after KIE explicitly ended the previous task with an error.
@@ -3157,8 +3166,21 @@ async function generateGptImage(
           try {
             const imgResp = await fetch(urls[0]);
             if (imgResp.ok) {
-              const buf = Buffer.from(await imgResp.arrayBuffer());
-              const localUrl = await uploadToObjectStorage(buf, "image/jpeg", "jpg");
+              let buf = Buffer.from(await imgResp.arrayBuffer());
+              let mime = "image/jpeg";
+              let ext = "jpg";
+              if (wantCutout) {
+                try {
+                  const { punchWhiteBackgroundToPng } = await import("./volume-origami");
+                  buf = await punchWhiteBackgroundToPng(buf);
+                  mime = "image/png";
+                  ext = "png";
+                  console.log(`[GENIMG] cutout alpha punch OK (${buf.length} bytes)`);
+                } catch (cutErr: any) {
+                  console.warn(`[GENIMG] cutout punch failed, storing original:`, cutErr?.message || cutErr);
+                }
+              }
+              const localUrl = await uploadToObjectStorage(buf, mime, ext);
               console.log(`[GENIMG] task ${taskId} success → stored ${localUrl}`);
               return { url: localUrl, confirmedKieFailure: false };
             }
@@ -3321,24 +3343,43 @@ async function resolveGenImgMarkers(
   const maxImages = budget.maxImages ?? MAX_AUTO_IMAGES;
   const maxBilled = budget.maxBilled ?? MAX_BILLED_AUTO_IMAGES;
   const GENIMG_RE = /\{\{GENIMG:([^}]+)\}\}/g;
-  const markers = new Map<string, { prompt: string; ratio: string; refIndices: number[] }>();
+  const markers = new Map<string, { prompt: string; ratio: string; refIndices: number[]; cutout: boolean }>();
   for (const code of Array.from(filesMap.values())) {
     let m: RegExpExecArray | null;
     GENIMG_RE.lastIndex = 0;
     while ((m = GENIMG_RE.exec(code)) !== null) {
       const raw = m[1].trim();
       if (markers.has(raw)) continue;
-      const parts = raw.split("|");
-      const promptText = parts[0].trim();
-      let ratio = (parts[1] || "").trim();
-      if (!/^\d+:\d+$/.test(ratio)) ratio = "16:9";
+      const parts = raw.split("|").map((p) => p.trim()).filter(Boolean);
+      let promptText = (parts[0] || "").trim();
+      let ratio = "16:9";
       let refIndices: number[] = [];
-      const refPart = (parts[2] || "").trim();
-      const refMatch = refPart.match(/^REF:?([\d,]+)$/i);
-      if (refMatch) {
-        refIndices = refMatch[1].split(",").map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n) && n > 0);
+      let cutout = false;
+      for (let pi = 1; pi < parts.length; pi++) {
+        const part = parts[pi];
+        if (/^\d+:\d+$/.test(part)) {
+          ratio = part;
+        } else if (/^REF:?[\d,]+$/i.test(part)) {
+          const refMatch = part.match(/^REF:?([\d,]+)$/i);
+          if (refMatch) {
+            refIndices = refMatch[1]
+              .split(",")
+              .map((s) => parseInt(s.trim(), 10))
+              .filter((n) => Number.isFinite(n) && n > 0);
+          }
+        } else if (/^CUTOUT$/i.test(part)) {
+          cutout = true;
+        }
       }
-      markers.set(raw, { prompt: promptText, ratio, refIndices });
+      markers.set(raw, { prompt: promptText, ratio, refIndices, cutout });
+    }
+  }
+  // Boost cutout prompts once (async import)
+  {
+    const { withVolumeCutoutBooster } = await import("./volume-origami");
+    for (const [raw, parsed] of Array.from(markers.entries())) {
+      if (!parsed.cutout) continue;
+      markers.set(raw, { ...parsed, prompt: withVolumeCutoutBooster(parsed.prompt) });
     }
   }
   // Always run the replacement pass below so no {{GENIMG:...}} marker can ever
@@ -3373,7 +3414,7 @@ async function resolveGenImgMarkers(
 
   // Worker that processes an ordered list of (raw, parsed) entries
   const runWorkerBatch = async (
-    batch: Array<[string, { prompt: string; ratio: string; refIndices: number[] }]>,
+    batch: Array<[string, { prompt: string; ratio: string; refIndices: number[]; cutout?: boolean }]>,
     passLabel: string,
   ) => {
     let idx = 0;
@@ -3416,7 +3457,13 @@ async function resolveGenImgMarkers(
               ? parsed.refIndices.map(i => referenceImageUrls[i - 1]).filter((u): u is string => !!u)
               : undefined;
             const imgResult = await withImageSlot(() =>
-              generateGptImage(withImageQualityBooster(parsed.prompt), parsed.ratio, () => isAborted() || Date.now() >= phaseDeadline, refUrls),
+              generateGptImage(
+                withImageQualityBooster(parsed.prompt),
+                parsed.ratio,
+                () => isAborted() || Date.now() >= phaseDeadline,
+                refUrls,
+                { cutout: !!parsed.cutout },
+              ),
             );
             const url = imgResult.url;
             if (url) {
@@ -3481,7 +3528,7 @@ async function autoFillMissingImages(
   isAborted: () => boolean = () => false,
 ): Promise<{ filled: number; creditsUsed: number }> {
   const PENDING_RE = /IMGPENDING:([A-Za-z0-9+/=]+)/g;
-  const pendingSet = new Map<string, { prompt: string; ratio: string }>();
+  const pendingSet = new Map<string, { prompt: string; ratio: string; cutout: boolean }>();
   for (const code of Array.from(filesMap.values())) {
     let m: RegExpExecArray | null;
     PENDING_RE.lastIndex = 0;
@@ -3489,11 +3536,20 @@ async function autoFillMissingImages(
       const b64key = m[1];
       if (pendingSet.has(b64key)) continue;
       const key = Buffer.from(b64key, "base64").toString("utf8");
-      const parts = key.split("|");
-      const prompt = parts[0].trim();
-      let ratio = (parts[1] || "").trim();
-      if (!/^\d+:\d+$/.test(ratio)) ratio = "16:9";
-      pendingSet.set(b64key, { prompt, ratio });
+      const parts = key.split("|").map((p) => p.trim()).filter(Boolean);
+      let prompt = (parts[0] || "").trim();
+      let ratio = "16:9";
+      let cutout = false;
+      for (let pi = 1; pi < parts.length; pi++) {
+        const part = parts[pi];
+        if (/^\d+:\d+$/.test(part)) ratio = part;
+        else if (/^CUTOUT$/i.test(part)) cutout = true;
+      }
+      if (cutout) {
+        const { withVolumeCutoutBooster } = await import("./volume-origami");
+        prompt = withVolumeCutoutBooster(prompt);
+      }
+      pendingSet.set(b64key, { prompt, ratio, cutout });
     }
   }
   if (pendingSet.size === 0) return { filled: 0, creditsUsed: 0 };
@@ -3506,7 +3562,7 @@ async function autoFillMissingImages(
   let creditsUsed = 0;
   const deadline = Date.now() + 480_000; // 8 min — recreate failed slots via KIE
 
-  for (const [b64key, { prompt, ratio }] of Array.from(pendingSet)) {
+  for (const [b64key, { prompt, ratio, cutout }] of Array.from(pendingSet)) {
     if (isAborted() || Date.now() > deadline) break;
     let billed = false;
     let ikey: string | undefined;
@@ -3521,19 +3577,25 @@ async function autoFillMissingImages(
         withImageQualityBooster(prompt),
         ratio,
         () => isAborted() || Date.now() > deadline,
+        undefined,
+        { cutout },
       ),
     );
     const resolvedUrl = imgResult.url;
     if (resolvedUrl) {
       let savedUrl = resolvedUrl;
-      try {
-        const imgResp = await fetch(resolvedUrl);
-        if (imgResp.ok) {
-          const buf = Buffer.from(await imgResp.arrayBuffer());
-          const localUrl = await uploadToObjectStorage(buf, "image/jpeg", "jpg");
-          if (localUrl) savedUrl = localUrl;
-        }
-      } catch { /* best-effort object storage */ }
+      // generateGptImage already punches cutouts to PNG and stores locally —
+      // only re-upload remote KIE URLs; never re-encode cutouts as JPEG.
+      if (!cutout && !/^\/objects\//.test(resolvedUrl) && !resolvedUrl.includes("/objects/")) {
+        try {
+          const imgResp = await fetch(resolvedUrl);
+          if (imgResp.ok) {
+            const buf = Buffer.from(await imgResp.arrayBuffer());
+            const localUrl = await uploadToObjectStorage(buf, "image/jpeg", "jpg");
+            if (localUrl) savedUrl = localUrl;
+          }
+        } catch { /* best-effort object storage */ }
+      }
       try {
         const proj = await storage.getProject(projectId);
         const name = (prompt.trim().split(/\s+/).slice(0, 3).join("_").replace(/[^a-zA-Z0-9_а-яА-Я-]/g, "") || "review_img").slice(0, 40);
@@ -5295,16 +5357,24 @@ export async function registerRoutes(
       // Gate on the estimated total so users don't start with only the site-create balance.
       if (isNewSite && interactiveMode) {
         const isArtDirectorEstimate = interactiveStyle === "artdirector";
-        const estimateVideos = isArtDirectorEstimate ? ART_DIRECTOR_MAX_VIDEOS : 1;
-        const estimateImages = isArtDirectorEstimate ? ART_DIRECTOR_MAX_IMAGES : MAX_BILLED_AUTO_IMAGES;
+        const isVolumeEstimate = interactiveStyle === "volume";
+        const estimateVideos = isVolumeEstimate ? 0 : isArtDirectorEstimate ? ART_DIRECTOR_MAX_VIDEOS : 1;
+        const estimateImages = isVolumeEstimate
+          ? VOLUME_MAX_IMAGES
+          : isArtDirectorEstimate
+            ? ART_DIRECTOR_MAX_IMAGES
+            : MAX_BILLED_AUTO_IMAGES;
         const interactiveEstimate =
           NEW_SITE_GENERATION_COST + SCROLL_ANIM_COST * estimateVideos + AUTO_IMAGE_COST * estimateImages;
         const balUser = await storage.getUser(user.id);
         const bal = balUser?.credits ?? 0;
         if (bal < interactiveEstimate) {
           dropGenerateSlot?.();
+          const mediaHint = isVolumeEstimate
+            ? `до ${estimateImages} cutout-фото`
+            : `${estimateVideos === 1 ? "видео" : `до ${estimateVideos} видео`} + до ${estimateImages} фото`;
           return res.status(402).json({
-            message: `Для интерактивного режима нужно минимум ${interactiveEstimate} токенов (сайт + ${estimateVideos === 1 ? "видео" : `до ${estimateVideos} видео`} + до ${estimateImages} фото). У вас ${bal}.`,
+            message: `Для интерактивного режима нужно минимум ${interactiveEstimate} токенов (сайт + ${mediaHint}). У вас ${bal}.`,
             required: interactiveEstimate,
             newBalance: bal,
           });
@@ -5377,6 +5447,7 @@ export async function registerRoutes(
       let systemContent = isNewSite ? SYSTEM_PROMPT : EDIT_SYSTEM_PROMPT;
       const isAnimationalMode = !!(interactiveMode && isNewSite && interactiveStyle === "animational");
       const isArtDirectorMode = !!(interactiveMode && isNewSite && interactiveStyle === "artdirector");
+      const isVolumeMode = !!(interactiveMode && isNewSite && interactiveStyle === "volume");
       if (isAnimationalMode) {
         // Full replace — own prompt, no master SYSTEM_PROMPT / interactive SCROLLANIM rules.
         systemContent = ANIMATIONAL_SYSTEM_PROMPT;
@@ -5387,10 +5458,15 @@ export async function registerRoutes(
           String(prompt || ""),
           project.title || undefined,
         );
+      } else if (isVolumeMode) {
+        systemContent = VOLUME_SYSTEM_PROMPT + buildVolumeNicheAddon(
+          String(prompt || ""),
+          project.title || undefined,
+        );
       }
       // Taste-skill study pass removed for Professional / Claude V1 — minimal presets.
       // Design direction comes only from mockup analysis (or the user prompt).
-      if (mockupMode && isNewSite && !isAnimationalMode && !isArtDirectorMode) {
+      if (mockupMode && isNewSite && !isAnimationalMode && !isArtDirectorMode && !isVolumeMode) {
         systemContent += `
 
 ═══ РЕЖИМ ПРОФЕССИОНАЛ — МИНИМУМ ПРЕДНАСТРОЕК ═══
@@ -5405,7 +5481,7 @@ Taste-skill и шаблонные «варианты hero A/B/C» из master-п
       if (researchData) {
         systemContent += `\n\n═══ РЕЗУЛЬТАТЫ DEEP RESEARCH ═══\nИспользуй следующие РЕАЛЬНЫЕ факты и данные из исследования при создании контента сайта:\n${researchData}\n═══ КОНЕЦ ИССЛЕДОВАНИЯ ═══\n`;
       }
-      if (isNewSite && !isAnimationalMode && !isArtDirectorMode && multiPagesData && typeof multiPagesData === "string" && multiPagesData.trim()) {
+      if (isNewSite && !isAnimationalMode && !isArtDirectorMode && !isVolumeMode && multiPagesData && typeof multiPagesData === "string" && multiPagesData.trim()) {
         const pageList = multiPagesData.split(",").map((p: string) => p.trim()).filter(Boolean);
         const fileNames = pageList.map((p: string) => {
           const slug = p.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
@@ -5415,7 +5491,7 @@ Taste-skill и шаблонные «варианты hero A/B/C» из master-п
       } else if (isNewSite) {
         systemContent += `\n\n⚠️ ОДНОСТРАНИЧНЫЙ РЕЖИМ: Создай ОДИН файл index.html. ЗАПРЕЩЕНО использовать маркеры --- FILE: --- или разбивать на несколько файлов. Весь сайт — один HTML-документ.`;
       }
-      if (interactiveMode && isNewSite && !isAnimationalMode && !isArtDirectorMode) {
+      if (interactiveMode && isNewSite && !isAnimationalMode && !isArtDirectorMode && !isVolumeMode) {
         const isSplitLayout = interactiveStyle === "split";
         const hasProductImage = !!absoluteProductImageUrl;
         if (isSplitLayout) {
@@ -6897,7 +6973,7 @@ ${designAnalysis}
           else code0 = markerAuto + code0;
           console.log(`[ANIMATIONAL] Auto-injected marker (AI missed it)`);
         }
-        if (interactiveMode && isNewSite && interactiveStyle !== "animational" && !code0.includes("{{SCROLLANIM:")) {
+        if (interactiveMode && isNewSite && interactiveStyle !== "animational" && interactiveStyle !== "volume" && !code0.includes("{{SCROLLANIM:")) {
           const isSplitAuto = interactiveStyle === "split";
           const isActionAuto = interactiveStyle === "action";
           const isImmersionAuto = interactiveStyle === "immersion";
@@ -7032,7 +7108,7 @@ ${designAnalysis}
             return null;
           }
         })();
-      } else if (interactiveMode && isNewSite) {
+      } else if (interactiveMode && isNewSite && interactiveStyle !== "volume") {
         // Should be unreachable after auto-inject — log loudly if a mode still skips Kling.
         console.error(`[BG ANIM] CRITICAL: interactive new site without SCROLLANIM/ANIMATIONAL markers (style=${interactiveStyle}) — video will not start`);
       }
@@ -7053,6 +7129,12 @@ ${designAnalysis}
               maxBilled: ART_DIRECTOR_MAX_IMAGES,
               phaseMs: ART_DIRECTOR_IMAGE_PHASE_MS,
             }
+          : interactiveStyle === "volume"
+            ? {
+                maxImages: VOLUME_MAX_IMAGES,
+                maxBilled: VOLUME_MAX_IMAGES,
+                phaseMs: VOLUME_IMAGE_PHASE_MS,
+              }
           : {},
       );
       mainHtmlCode = genFilesMap.get("index.html") ?? mainHtmlCode;
@@ -7099,6 +7181,11 @@ ${designAnalysis}
           }));
         }
         mainHtmlCode = genFilesMap.get("index.html") ?? mainHtmlCode;
+      }
+
+      if (interactiveStyle === "volume") {
+        mainHtmlCode = ensureVolumeRuntime(mainHtmlCode);
+        genFilesMap.set("index.html", mainHtmlCode);
       }
 
       // Re-canonicalize after GENIMG (markers must survive for pending replace).

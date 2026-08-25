@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-export type InteractiveStyleId = "parallax" | "split" | "action" | "motion" | "trigger" | "artdirector";
+export type InteractiveStyleId = "parallax" | "split" | "action" | "motion" | "trigger" | "artdirector" | "volume";
 
 /** Token estimate for Interactive create (site + hero video + up to 6 images). */
 export const SITE_CREATE_COST = 100;
@@ -12,11 +12,17 @@ export const MAX_BILLED_IMAGES = 6;
 export const ART_DIRECTOR_MAX_VIDEOS = 2;
 export const ART_DIRECTOR_MAX_IMAGES = 8;
 
+/** «Объём» — cutout layers, no Kling video. */
+export const VOLUME_MAX_IMAGES = 10;
+
 /**
  * Upper bound shown before generation. Charging happens per resolved marker, so a
  * site that uses fewer photos or one clip costs less than the estimate.
  */
 export function interactiveModeTokenCost(style?: InteractiveStyleId): number {
+  if (style === "volume") {
+    return SITE_CREATE_COST + IMAGE_TOKEN_COST * VOLUME_MAX_IMAGES;
+  }
   const videos = style === "artdirector" ? ART_DIRECTOR_MAX_VIDEOS : 1;
   const images = style === "artdirector" ? ART_DIRECTOR_MAX_IMAGES : MAX_BILLED_IMAGES;
   return SITE_CREATE_COST + VIDEO_ANIMATION_COST * videos + IMAGE_TOKEN_COST * images;
@@ -37,6 +43,7 @@ export const INTERACTIVE_STYLES: Array<{
   tokenCost: number;
 }> = [
   { id: "artdirector", label: "Арт Директор", desc: "Свобода агенту · до 2 видео и 8 фото", tokenCost: interactiveModeTokenCost("artdirector") },
+  { id: "volume", label: "Объём", desc: "Cutout-слои · оригами · без видео", tokenCost: interactiveModeTokenCost("volume") },
   { id: "parallax", label: "Параллакс", desc: "Видео на весь экран, текст поверх", tokenCost: VIDEO_STYLE_COST },
   { id: "split", label: "Сплит", desc: "Текст слева, продукт справа", tokenCost: VIDEO_STYLE_COST },
   { id: "action", label: "Экшн", desc: "Слоумо и облёт камеры", tokenCost: VIDEO_STYLE_COST },
@@ -144,6 +151,20 @@ function HeroPreview({ id, playing }: { id: InteractiveStyleId; playing: boolean
         <div className="isp-parallax-copy isp-ad-copy">
           <span className="isp-kicker">ART DIRECTOR</span>
           <span className="isp-title">Свой дизайн каждый раз</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (id === "volume") {
+    return (
+      <div className="isp-stage isp-vol" data-playing={playing ? "1" : "0"}>
+        <div className="isp-vol-layer isp-vol-l1" style={{ animationPlayState: play }} />
+        <div className="isp-vol-layer isp-vol-l2" style={{ animationPlayState: play }} />
+        <div className="isp-vol-layer isp-vol-l3" style={{ animationPlayState: play }} />
+        <div className="isp-parallax-copy isp-vol-copy">
+          <span className="isp-kicker">VOLUME</span>
+          <span className="isp-title">Cutout origami</span>
         </div>
       </div>
     );
@@ -713,6 +734,50 @@ const ISP_CSS = `
   14%  { opacity: 1; transform: translateY(0) scale(1); }
   76%  { opacity: 1; transform: translateY(0) scale(1); }
   92%, 100% { opacity: 0; transform: translateY(-6px) scale(0.98); }
+}
+
+/* Volume / origami cutouts */
+.isp-vol {
+  background: linear-gradient(160deg, #0c0a09 0%, #1c1917 55%, #292524 100%);
+}
+.isp-vol-layer {
+  position: absolute;
+  border-radius: 42% 58% 48% 52% / 52% 42% 58% 48%;
+  box-shadow: 0 18px 36px rgba(0,0,0,0.45);
+  animation: isp-vol-drift 4.8s ease-in-out infinite alternate;
+}
+.isp-vol-l1 {
+  left: 8%; top: 22%; width: 38%; height: 48%;
+  background: linear-gradient(145deg, #a8a29e, #57534e);
+  transform: rotate(-8deg);
+  opacity: 0.55;
+  animation-delay: 0s;
+}
+.isp-vol-l2 {
+  left: 28%; top: 18%; width: 42%; height: 54%;
+  background: linear-gradient(145deg, #fafaf9, #d6d3d1 60%, #78716c);
+  transform: rotate(4deg);
+  opacity: 0.85;
+  animation-delay: .35s;
+  z-index: 2;
+}
+.isp-vol-l3 {
+  right: 10%; top: 14%; width: 36%; height: 58%;
+  background: linear-gradient(155deg, #f5f5f4, #e7e5e4 40%, #a8a29e);
+  transform: rotate(-3deg);
+  z-index: 3;
+  animation-name: isp-vol-live;
+  animation-duration: 3.6s;
+}
+.isp-vol-copy { bottom: 10%; left: 8%; z-index: 4; }
+@keyframes isp-vol-drift {
+  from { transform: translate3d(0, 2%, 0) rotate(var(--r, -6deg)); }
+  to { transform: translate3d(2%, -2%, 0) rotate(var(--r, -6deg)); }
+}
+@keyframes isp-vol-live {
+  0% { transform: translate3d(0, 0, 0) rotate(-3deg) scale(1); }
+  50% { transform: translate3d(-4%, -3%, 0) rotate(-5deg) scale(1.04); }
+  100% { transform: translate3d(3%, 2%, 0) rotate(-1deg) scale(1.02); }
 }
 
 /* Motion */
