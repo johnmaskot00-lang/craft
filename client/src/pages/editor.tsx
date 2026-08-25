@@ -443,9 +443,11 @@ export default function EditorPage() {
         setPrompt(initialPrompt);
         if (!isMockup || mockupImages) {
           firstCreateKickRef.current = true;
-          // Professional (mockup or agent=v1 from dashboard) → Claude V1; else Gemini V2.
+          // Professional (mockup or agent=v1) → Claude V1; ThreeUI interactive → Claude V1; else Gemini V2.
           const kickVersion =
-            isMockup || urlParams.get("agent") === "v1" ? "v1" : "v2";
+            isMockup || urlParams.get("agent") === "v1" || initialInteractiveStyle === "threeui"
+              ? "v1"
+              : "v2";
           firstCreateAgentRef.current = kickVersion;
           setAgentVersion(kickVersion);
           try { localStorage.setItem("craft-agent-version", kickVersion); } catch {}
@@ -805,6 +807,8 @@ export default function EditorPage() {
         bodyData.interactiveMode = true;
         const style = interactiveStyle || interactiveOpts.style;
         if (style) bodyData.interactiveStyle = style;
+        // ThreeUI always runs on Claude V1 (Opus) — server also enforces this.
+        if (style === "threeui") bodyData.agentVersion = "v1";
         const productUrl = interactiveProductImageUrl || interactiveOpts.productUrl;
         if (productUrl) bodyData.interactiveProductImageUrl = productUrl;
       }
@@ -1460,12 +1464,13 @@ export default function EditorPage() {
   };
 
   // Detect broken / missing interactive hero so user can re-bake video into object storage.
-  // Volume (origami) sites have no Kling video — never show «Восстановить видео».
+  // Volume / ThreeUI sites have no Kling video — never show «Восстановить видео».
   const codeForAnimCheck = streamedCode || project?.generatedCode || "";
-  const isVolumeSite = /data-craft-volume-stack/i.test(codeForAnimCheck);
-  const hasAnimFallback = !isVolumeSite && codeForAnimCheck.includes('data-scroll-anim-fallback="1"');
+  const isNoKlingSite =
+    /data-craft-volume-stack/i.test(codeForAnimCheck) || /data-craft-threeui/i.test(codeForAnimCheck);
+  const hasAnimFallback = !isNoKlingSite && codeForAnimCheck.includes('data-scroll-anim-fallback="1"');
   const needsAnimRegen =
-    !isVolumeSite &&
+    !isNoKlingSite &&
     (hasAnimFallback ||
       !!project?.interactiveHero?.mediaBroken ||
       !!project?.interactiveHero?.hollow ||

@@ -589,7 +589,11 @@ export default function DashboardPage() {
         : "";
       const leadFormParam = leadOn ? "" : "&leadform=0";
       // Professional mode always runs on agent V1 (Claude / Anthropic via router.cheap).
-      const agentParam = mode === "photo" ? "&agent=v1" : `&agent=${agent}`;
+      // ThreeUI interactive also forces V1 (Claude Opus) — server enforces this too.
+      const agentParam =
+        mode === "photo" || (mode === "interactive" && iStyle === "threeui")
+          ? "&agent=v1"
+          : `&agent=${agent}`;
       const mockupParam = mockupUrls.length > 0
         ? `&mockup=1&mockupUrls=${encodeURIComponent(mockupUrls.join(","))}`
         : "";
@@ -1462,6 +1466,11 @@ export default function DashboardPage() {
                               В Объёме фото продукта станет верхним cutout-слоем оригами-стека (без видео)
                             </p>
                           )}
+                          {interactiveStyle === "threeui" && (
+                            <p className="shrink-0" style={{ fontSize: '0.68rem', color: '#0d9488', margin: 0, paddingLeft: 4, lineHeight: 1.35 }}>
+                              ThreeUI: WebGL на Claude Opus 5 · three.js с нашего хоста · без Kling-видео
+                            </p>
+                          )}
                           <input
                             ref={interactiveProductImgRef}
                             type="file"
@@ -1517,7 +1526,9 @@ export default function DashboardPage() {
                                     ? "PNG, JPG до 10 МБ — AI: 16:9 + 9:16 пары для morph"
                                     : interactiveStyle === "volume"
                                       ? "PNG, JPG до 10 МБ — станет cutout-слоем"
-                                      : "PNG, JPG до 10 МБ — AI оживит его"}
+                                      : interactiveStyle === "threeui"
+                                        ? "PNG, JPG до 10 МБ — текстура WebGL-слоя"
+                                        : "PNG, JPG до 10 МБ — AI оживит его"}
                                 </p>
                               </div>
                             </button>

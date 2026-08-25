@@ -36,6 +36,17 @@ import {
   ensureVolumeRuntime,
 } from "./volume-origami";
 import {
+  THREEUI_MAX_IMAGES,
+  THREEUI_IMAGE_PHASE_MS,
+  THREEUI_SYSTEM_PROMPT,
+  buildThreeUiNicheAddon,
+  ensureThreeUiRuntime,
+  hasCraftThreeUi,
+  rewriteThreeUiScriptForPublish,
+  readThreeMinJs,
+  THREEUI_PUBLISH_ASSET,
+} from "./threeui-mode";
+import {
   SCROLL_ANIMATIONAL_COST,
   ANIMATIONAL_SYSTEM_PROMPT,
   generateAnimationalSite,
@@ -4829,16 +4840,17 @@ export async function registerRoutes(
       if (isHollowCraftScrollAnim(generatedCode)) {
         generatedCode = await healHollowCraftScrollAnimFromVersions(project.id, generatedCode);
       }
-      const isVolume = hasCraftVolumeStack(generatedCode);
-      const mediaBroken = isVolume ? false : await interactiveMediaMissing(generatedCode);
-      const hollow = isVolume ? false : isHollowCraftScrollAnim(generatedCode);
-      const fallback = isVolume
+      const isNoKlingHero =
+        hasCraftVolumeStack(generatedCode) || hasCraftThreeUi(generatedCode);
+      const mediaBroken = isNoKlingHero ? false : await interactiveMediaMissing(generatedCode);
+      const hollow = isNoKlingHero ? false : isHollowCraftScrollAnim(generatedCode);
+      const fallback = isNoKlingHero
         ? false
         : /data-scroll-anim-fallback\s*=\s*["']1["']/i.test(generatedCode);
-      const pending = isVolume
+      const pending = isNoKlingHero
         ? false
         : /data-scroll-anim-pending\s*=\s*["']1["']/i.test(generatedCode);
-      const present = isVolume ? false : hasCraftScrollAnimSection(generatedCode);
+      const present = isNoKlingHero ? false : hasCraftScrollAnimSection(generatedCode);
       res.json({
         ...project,
         generatedCode,
@@ -4848,8 +4860,9 @@ export async function registerRoutes(
           fallback,
           hollow,
           mediaBroken,
-          canRegen: !isVolume && (fallback || hollow || mediaBroken),
-          volume: isVolume,
+          canRegen: !isNoKlingHero && (fallback || hollow || mediaBroken),
+          volume: hasCraftVolumeStack(generatedCode),
+          threeui: hasCraftThreeUi(generatedCode),
         },
       });
     } catch (err) {
@@ -5121,12 +5134,14 @@ export async function registerRoutes(
       const bodyAgentVersion = req.body?.agentVersion;
       const bodyMockupMode = !!req.body?.mockupMode;
       const bodyInteractive = !!req.body?.interactiveMode;
+      const bodyInteractiveStyle = String(req.body?.interactiveStyle || "");
       const earlyEmpty =
         !project.generatedCode || isCraftGeneratingHtml(project.generatedCode || "");
-      // Provider stamp: Interactive → Gemini; Professional (mockup) or explicit v1 → Claude;
-      // other new sites → Gemini; edits follow agentVersion.
+      // Provider stamp: Interactive → Gemini, except ThreeUI → Claude V1 (Opus SDK);
+      // Professional (mockup) or explicit v1 → Claude; other new sites → Gemini; edits follow agentVersion.
       const stampClaude =
-        !bodyInteractive && (bodyMockupMode || (earlyEmpty && bodyAgentVersion === "v1") || (!earlyEmpty && bodyAgentVersion !== "v2"));
+        (bodyInteractive && bodyInteractiveStyle === "threeui") ||
+        (!bodyInteractive && (bodyMockupMode || (earlyEmpty && bodyAgentVersion === "v1") || (!earlyEmpty && bodyAgentVersion !== "v2")));
       activeProjectGenerations.set(project.id, {
         token: projectGenerationToken,
         startedAt: Date.now(),
@@ -5185,11 +5200,11 @@ export async function registerRoutes(
           absoluteProductImageUrl = `${proto}://${host}${interactiveProductImageUrl}`;
         }
       }
-      // Interactive → always V2 (Gemini). Professional (mockupMode) → always V1 (Claude / Anthropic SDK).
-      // Prompt-mode new sites stay V2. Edits respect agentVersion (unless still generating placeholder).
-      // Explicit agentVersion=v1 on a new site (dashboard Professional without refs) also uses Claude.
+      // Interactive → V2 (Gemini), except ThreeUI → always V1 Claude Opus (official Anthropic SDK).
+      // Professional (mockupMode) → always V1. Prompt-mode new sites stay V2 unless agentVersion=v1.
       const isNewSiteEarly = !project.generatedCode || isCraftGeneratingHtml(project.generatedCode);
       const useGemini = (() => {
+        if (interactiveMode && interactiveStyle === "threeui") return false;
         if (interactiveMode) return true;
         if (mockupMode) return false;
         if (isNewSiteEarly && agentVersion === "v1") return false;
@@ -5375,21 +5390,26 @@ export async function registerRoutes(
       if (isNewSite && interactiveMode) {
         const isArtDirectorEstimate = interactiveStyle === "artdirector";
         const isVolumeEstimate = interactiveStyle === "volume";
-        const estimateVideos = isVolumeEstimate ? 0 : isArtDirectorEstimate ? ART_DIRECTOR_MAX_VIDEOS : 1;
-        const estimateImages = isVolumeEstimate
-          ? VOLUME_MAX_IMAGES
-          : isArtDirectorEstimate
-            ? ART_DIRECTOR_MAX_IMAGES
-            : MAX_BILLED_AUTO_IMAGES;
+        const isThreeUiEstimate = interactiveStyle === "threeui";
+        const estimateVideos =
+          isVolumeEstimate || isThreeUiEstimate ? 0 : isArtDirectorEstimate ? ART_DIRECTOR_MAX_VIDEOS : 1;
+        const estimateImages = isThreeUiEstimate
+          ? THREEUI_MAX_IMAGES
+          : isVolumeEstimate
+            ? VOLUME_MAX_IMAGES
+            : isArtDirectorEstimate
+              ? ART_DIRECTOR_MAX_IMAGES
+              : MAX_BILLED_AUTO_IMAGES;
         const interactiveEstimate =
           NEW_SITE_GENERATION_COST + SCROLL_ANIM_COST * estimateVideos + AUTO_IMAGE_COST * estimateImages;
         const balUser = await storage.getUser(user.id);
         const bal = balUser?.credits ?? 0;
         if (bal < interactiveEstimate) {
           dropGenerateSlot?.();
-          const mediaHint = isVolumeEstimate
-            ? `до ${estimateImages} cutout-фото`
-            : `${estimateVideos === 1 ? "видео" : `до ${estimateVideos} видео`} + до ${estimateImages} фото`;
+          const mediaHint =
+            isVolumeEstimate || isThreeUiEstimate
+              ? `до ${estimateImages} фото/текстур`
+              : `${estimateVideos === 1 ? "видео" : `до ${estimateVideos} видео`} + до ${estimateImages} фото`;
           return res.status(402).json({
             message: `Для интерактивного режима нужно минимум ${interactiveEstimate} токенов (сайт + ${mediaHint}). У вас ${bal}.`,
             required: interactiveEstimate,
@@ -5465,6 +5485,7 @@ export async function registerRoutes(
       const isAnimationalMode = !!(interactiveMode && isNewSite && interactiveStyle === "animational");
       const isArtDirectorMode = !!(interactiveMode && isNewSite && interactiveStyle === "artdirector");
       const isVolumeMode = !!(interactiveMode && isNewSite && interactiveStyle === "volume");
+      const isThreeUiMode = !!(interactiveMode && isNewSite && interactiveStyle === "threeui");
       if (isAnimationalMode) {
         // Full replace — own prompt, no master SYSTEM_PROMPT / interactive SCROLLANIM rules.
         systemContent = ANIMATIONAL_SYSTEM_PROMPT;
@@ -5480,10 +5501,15 @@ export async function registerRoutes(
           String(prompt || ""),
           project.title || undefined,
         );
+      } else if (isThreeUiMode) {
+        systemContent = THREEUI_SYSTEM_PROMPT + buildThreeUiNicheAddon(
+          String(prompt || ""),
+          project.title || undefined,
+        );
       }
       // Taste-skill study pass removed for Professional / Claude V1 — minimal presets.
       // Design direction comes only from mockup analysis (or the user prompt).
-      if (mockupMode && isNewSite && !isAnimationalMode && !isArtDirectorMode && !isVolumeMode) {
+      if (mockupMode && isNewSite && !isAnimationalMode && !isArtDirectorMode && !isVolumeMode && !isThreeUiMode) {
         systemContent += `
 
 ═══ РЕЖИМ ПРОФЕССИОНАЛ — МИНИМУМ ПРЕДНАСТРОЕК ═══
@@ -5498,7 +5524,7 @@ Taste-skill и шаблонные «варианты hero A/B/C» из master-п
       if (researchData) {
         systemContent += `\n\n═══ РЕЗУЛЬТАТЫ DEEP RESEARCH ═══\nИспользуй следующие РЕАЛЬНЫЕ факты и данные из исследования при создании контента сайта:\n${researchData}\n═══ КОНЕЦ ИССЛЕДОВАНИЯ ═══\n`;
       }
-      if (isNewSite && !isAnimationalMode && !isArtDirectorMode && !isVolumeMode && multiPagesData && typeof multiPagesData === "string" && multiPagesData.trim()) {
+      if (isNewSite && !isAnimationalMode && !isArtDirectorMode && !isVolumeMode && !isThreeUiMode && multiPagesData && typeof multiPagesData === "string" && multiPagesData.trim()) {
         const pageList = multiPagesData.split(",").map((p: string) => p.trim()).filter(Boolean);
         const fileNames = pageList.map((p: string) => {
           const slug = p.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
@@ -5508,7 +5534,7 @@ Taste-skill и шаблонные «варианты hero A/B/C» из master-п
       } else if (isNewSite) {
         systemContent += `\n\n⚠️ ОДНОСТРАНИЧНЫЙ РЕЖИМ: Создай ОДИН файл index.html. ЗАПРЕЩЕНО использовать маркеры --- FILE: --- или разбивать на несколько файлов. Весь сайт — один HTML-документ.`;
       }
-      if (interactiveMode && isNewSite && !isAnimationalMode && !isArtDirectorMode && !isVolumeMode) {
+      if (interactiveMode && isNewSite && !isAnimationalMode && !isArtDirectorMode && !isVolumeMode && !isThreeUiMode) {
         const isSplitLayout = interactiveStyle === "split";
         const hasProductImage = !!absoluteProductImageUrl;
         if (isSplitLayout) {
@@ -6990,7 +7016,7 @@ ${designAnalysis}
           else code0 = markerAuto + code0;
           console.log(`[ANIMATIONAL] Auto-injected marker (AI missed it)`);
         }
-        if (interactiveMode && isNewSite && interactiveStyle !== "animational" && interactiveStyle !== "volume" && !code0.includes("{{SCROLLANIM:")) {
+        if (interactiveMode && isNewSite && interactiveStyle !== "animational" && interactiveStyle !== "volume" && interactiveStyle !== "threeui" && !code0.includes("{{SCROLLANIM:")) {
           const isSplitAuto = interactiveStyle === "split";
           const isActionAuto = interactiveStyle === "action";
           const isImmersionAuto = interactiveStyle === "immersion";
@@ -7125,7 +7151,7 @@ ${designAnalysis}
             return null;
           }
         })();
-      } else if (interactiveMode && isNewSite && interactiveStyle !== "volume") {
+      } else if (interactiveMode && isNewSite && interactiveStyle !== "volume" && interactiveStyle !== "threeui") {
         // Should be unreachable after auto-inject — log loudly if a mode still skips Kling.
         console.error(`[BG ANIM] CRITICAL: interactive new site without SCROLLANIM/ANIMATIONAL markers (style=${interactiveStyle}) — video will not start`);
       }
@@ -7151,6 +7177,12 @@ ${designAnalysis}
                 maxImages: VOLUME_MAX_IMAGES,
                 maxBilled: VOLUME_MAX_IMAGES,
                 phaseMs: VOLUME_IMAGE_PHASE_MS,
+              }
+          : interactiveStyle === "threeui"
+            ? {
+                maxImages: THREEUI_MAX_IMAGES,
+                maxBilled: THREEUI_MAX_IMAGES,
+                phaseMs: THREEUI_IMAGE_PHASE_MS,
               }
           : {},
       );
@@ -7202,6 +7234,10 @@ ${designAnalysis}
 
       if (interactiveStyle === "volume") {
         mainHtmlCode = ensureVolumeRuntime(mainHtmlCode);
+        genFilesMap.set("index.html", mainHtmlCode);
+      }
+      if (interactiveStyle === "threeui") {
+        mainHtmlCode = ensureThreeUiRuntime(mainHtmlCode);
         genFilesMap.set("index.html", mainHtmlCode);
       }
 
@@ -8971,16 +9007,19 @@ ${designAnalysis}
         // Self-heal older interactive sites: ensure ancestors of the scroll-animation
         // never break position:sticky via overflow-x:hidden (convert hidden→clip at runtime).
         // Match a real section attribute — not the selector string inside this script itself.
-        if (hasCraftScrollAnimSection(result) && !hasCraftVolumeStack(result)) {
+        if (hasCraftScrollAnimSection(result) && !hasCraftVolumeStack(result) && !hasCraftThreeUi(result)) {
           result = result.replace(/<script[^>]*data-craft-stickyfix[^>]*>[\s\S]*?<\/script>/gi, "");
           result = result.replace(/<style[^>]*data-craft-stickyfix[^>]*>[\s\S]*?<\/style>/gi, "");
           const stickyFix = `<style data-craft-stickyfix>html{scrollbar-gutter:stable}</style><script data-craft-stickyfix>(function(){${CRAFT_STICKY_OVERFLOW_FIX_JS}if(document.readyState!=='loading')craftFixStickyOverflow();else document.addEventListener('DOMContentLoaded',craftFixStickyOverflow);})();<\/script>`;
           if (result.includes("</body>")) result = result.replace("</body>", stickyFix + "</body>");
           else result += stickyFix;
-        } else if (hasCraftVolumeStack(result)) {
-          // Volume sites: strip leftover sticky/video heal scripts from prior publishes.
+        } else if (hasCraftVolumeStack(result) || hasCraftThreeUi(result)) {
+          // Volume / ThreeUI: strip leftover sticky/video heal scripts from prior publishes.
           result = result.replace(/<script[^>]*data-craft-stickyfix[^>]*>[\s\S]*?<\/script>/gi, "");
           result = result.replace(/<style[^>]*data-craft-stickyfix[^>]*>[\s\S]*?<\/style>/gi, "");
+        }
+        if (hasCraftThreeUi(result)) {
+          result = rewriteThreeUiScriptForPublish(result);
         }
         return result;
       }
@@ -8990,7 +9029,7 @@ ${designAnalysis}
         mainHtml = mainHtml.replace(new RegExp(`\\{\\{IMG:${img.name}\\}\\}`, "g"), img.url);
       }
       // Only inject preloader for sites that have scroll-animation sections.
-      if (hasCraftScrollAnimSection(mainHtml) && !hasCraftVolumeStack(mainHtml)) {
+      if (hasCraftScrollAnimSection(mainHtml) && !hasCraftVolumeStack(mainHtml) && !hasCraftThreeUi(mainHtml)) {
         mainHtml = injectLoadingOverlay(mainHtml);
       }
       mainHtml = injectLeadsScript(mainHtml);
@@ -9004,6 +9043,17 @@ ${designAnalysis}
         }
         code = injectLeadsScript(code);
         files.push({ filename: f.filename, content: code });
+      }
+
+      // Bundle self-hosted three.min.js for ThreeUI published sites
+      if (files.some((f) => hasCraftThreeUi(f.content || ""))) {
+        const threeBuf = readThreeMinJs();
+        if (threeBuf) {
+          files.push({ filename: THREEUI_PUBLISH_ASSET, contentBuffer: threeBuf });
+          console.log(`[Publish] Bundled ${THREEUI_PUBLISH_ASSET} (${threeBuf.length} bytes) for ThreeUI site`);
+        } else {
+          console.warn(`[Publish] three.min.js missing — ThreeUI site may fail on published domain`);
+        }
       }
 
       applyClientGeoToPublishFiles(files, {
