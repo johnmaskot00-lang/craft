@@ -2058,9 +2058,10 @@ function extractCraftScrollAnimBlocks(html: string): string[] {
 
 /** True when a craft-scrollanim section exists but its engine CSS/JS was stripped. */
 function isHollowCraftScrollAnim(html: string): boolean {
-  if (!html.includes("data-craft-scrollanim")) return false;
+  // Must be a real section attribute — publish sticky-heal scripts also contain the
+  // selector string `data-craft-scrollanim`, which must NOT count as a hollow hero.
   const blocks = extractCraftScrollAnimBlocks(html);
-  if (!blocks.length) return true;
+  if (!blocks.length) return false;
   return blocks.some((b) => {
     const hasEngine = /<script[\s>]/i.test(b);
     const hasCss = /<style[\s>]/i.test(b) || /\bstyle\s*=\s*["'][^"']*height\s*:/i.test(b);
@@ -2220,9 +2221,19 @@ function collectInteractiveMediaUrls(html: string): string[] {
   return Array.from(urls);
 }
 
+/** True when HTML has a real interactive scrollanim section (not just a script selector). */
+function hasCraftScrollAnimSection(html: string): boolean {
+  return /<[^>]*\bdata-craft-scrollanim\b/i.test(html || "");
+}
+
+/** True when HTML is a Volume (origami) site — no Kling video. */
+function hasCraftVolumeStack(html: string): boolean {
+  return /<[^>]*\bdata-craft-volume-stack\b/i.test(html || "");
+}
+
 /** True when interactive hero HTML references object media that no longer exists on disk. */
 async function interactiveMediaMissing(html: string): Promise<boolean> {
-  if (!html.includes("data-craft-scrollanim")) return false;
+  if (!hasCraftScrollAnimSection(html)) return false;
   if (/data-scroll-anim-pending\s*=\s*["']1["']/i.test(html)) return false;
   if (/data-scroll-anim-fallback\s*=\s*["']1["']/i.test(html)) return false;
   if (isHollowCraftScrollAnim(html)) return false; // hollow is a separate repair path
@@ -4818,11 +4829,16 @@ export async function registerRoutes(
       if (isHollowCraftScrollAnim(generatedCode)) {
         generatedCode = await healHollowCraftScrollAnimFromVersions(project.id, generatedCode);
       }
-      const mediaBroken = await interactiveMediaMissing(generatedCode);
-      const hollow = isHollowCraftScrollAnim(generatedCode);
-      const fallback = /data-scroll-anim-fallback\s*=\s*["']1["']/i.test(generatedCode);
-      const pending = /data-scroll-anim-pending\s*=\s*["']1["']/i.test(generatedCode);
-      const present = generatedCode.includes("data-craft-scrollanim");
+      const isVolume = hasCraftVolumeStack(generatedCode);
+      const mediaBroken = isVolume ? false : await interactiveMediaMissing(generatedCode);
+      const hollow = isVolume ? false : isHollowCraftScrollAnim(generatedCode);
+      const fallback = isVolume
+        ? false
+        : /data-scroll-anim-fallback\s*=\s*["']1["']/i.test(generatedCode);
+      const pending = isVolume
+        ? false
+        : /data-scroll-anim-pending\s*=\s*["']1["']/i.test(generatedCode);
+      const present = isVolume ? false : hasCraftScrollAnimSection(generatedCode);
       res.json({
         ...project,
         generatedCode,
@@ -4832,7 +4848,8 @@ export async function registerRoutes(
           fallback,
           hollow,
           mediaBroken,
-          canRegen: fallback || hollow || mediaBroken,
+          canRegen: !isVolume && (fallback || hollow || mediaBroken),
+          volume: isVolume,
         },
       });
     } catch (err) {
@@ -8953,12 +8970,17 @@ ${designAnalysis}
         }
         // Self-heal older interactive sites: ensure ancestors of the scroll-animation
         // never break position:sticky via overflow-x:hidden (convert hidden→clip at runtime).
-        if (/data-craft-scrollanim/.test(result)) {
+        // Match a real section attribute — not the selector string inside this script itself.
+        if (hasCraftScrollAnimSection(result) && !hasCraftVolumeStack(result)) {
           result = result.replace(/<script[^>]*data-craft-stickyfix[^>]*>[\s\S]*?<\/script>/gi, "");
           result = result.replace(/<style[^>]*data-craft-stickyfix[^>]*>[\s\S]*?<\/style>/gi, "");
           const stickyFix = `<style data-craft-stickyfix>html{scrollbar-gutter:stable}</style><script data-craft-stickyfix>(function(){${CRAFT_STICKY_OVERFLOW_FIX_JS}if(document.readyState!=='loading')craftFixStickyOverflow();else document.addEventListener('DOMContentLoaded',craftFixStickyOverflow);})();<\/script>`;
           if (result.includes("</body>")) result = result.replace("</body>", stickyFix + "</body>");
           else result += stickyFix;
+        } else if (hasCraftVolumeStack(result)) {
+          // Volume sites: strip leftover sticky/video heal scripts from prior publishes.
+          result = result.replace(/<script[^>]*data-craft-stickyfix[^>]*>[\s\S]*?<\/script>/gi, "");
+          result = result.replace(/<style[^>]*data-craft-stickyfix[^>]*>[\s\S]*?<\/style>/gi, "");
         }
         return result;
       }
@@ -8968,7 +8990,7 @@ ${designAnalysis}
         mainHtml = mainHtml.replace(new RegExp(`\\{\\{IMG:${img.name}\\}\\}`, "g"), img.url);
       }
       // Only inject preloader for sites that have scroll-animation sections.
-      if (mainHtml.includes('data-craft-scrollanim')) {
+      if (hasCraftScrollAnimSection(mainHtml) && !hasCraftVolumeStack(mainHtml)) {
         mainHtml = injectLoadingOverlay(mainHtml);
       }
       mainHtml = injectLeadsScript(mainHtml);

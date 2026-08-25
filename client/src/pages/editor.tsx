@@ -1459,14 +1459,17 @@ export default function EditorPage() {
     toast({ title: "Архив готов!", description: `${allImageUrls.size + allModelUrls.size} файлов включено` });
   };
 
-  // Detect broken / missing interactive hero so user can re-bake video into object storage
+  // Detect broken / missing interactive hero so user can re-bake video into object storage.
+  // Volume (origami) sites have no Kling video — never show «Восстановить видео».
   const codeForAnimCheck = streamedCode || project?.generatedCode || "";
-  const hasAnimFallback = codeForAnimCheck.includes('data-scroll-anim-fallback="1"');
+  const isVolumeSite = /data-craft-volume-stack/i.test(codeForAnimCheck);
+  const hasAnimFallback = !isVolumeSite && codeForAnimCheck.includes('data-scroll-anim-fallback="1"');
   const needsAnimRegen =
-    hasAnimFallback ||
-    !!project?.interactiveHero?.mediaBroken ||
-    !!project?.interactiveHero?.hollow ||
-    !!project?.interactiveHero?.fallback;
+    !isVolumeSite &&
+    (hasAnimFallback ||
+      !!project?.interactiveHero?.mediaBroken ||
+      !!project?.interactiveHero?.hollow ||
+      !!project?.interactiveHero?.fallback);
 
   const handleRegenAnim = async () => {
     if (!project) return;
