@@ -1526,7 +1526,7 @@ export default function DashboardPage() {
                                   {interactiveStyle === "motion"
                                     ? "PNG, JPG до 10 МБ — AI: 16:9 + 9:16 пары для morph"
                                     : interactiveStyle === "volume"
-                                      ? "PNG, JPG до 10 МБ — станет cutout-слоем"
+                                      ? "PNG, JPG до 10 МБ — подложка или герой сцены"
                                       : "PNG, JPG до 10 МБ — AI оживит его"}
                                 </p>
                               </div>
