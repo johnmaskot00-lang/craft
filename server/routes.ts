@@ -630,6 +630,32 @@ async function saveChatResultVersion(
 }
 
 const KLING_IMG2VID_MODEL = "kling/v3-turbo-image-to-video";
+/** Fallback when Kling create/render fails — same unified KIE jobs API, 1080P. */
+const WAN_FALLBACK_MODEL = "wan/3-0-video";
+
+/** Build createTask `input` for the primary Kling model or Wan 3.0 fallback. */
+function buildKieVideoCreateInput(
+  model: string,
+  opts: { prompt: string; stillUrl: string; durationSec: number },
+): Record<string, unknown> {
+  const prompt = opts.prompt.slice(0, 2500);
+  if (model === WAN_FALLBACK_MODEL) {
+    return {
+      prompt,
+      first_frame_url: opts.stillUrl,
+      resolution: "1080P",
+      aspect_ratio: "adaptive",
+      duration: Math.max(2, Math.min(30, Math.round(opts.durationSec) || 5)),
+      audio: false,
+    };
+  }
+  return {
+    prompt,
+    image_urls: [opts.stillUrl],
+    duration: String(opts.durationSec),
+    resolution: "1080p",
+  };
+}
 
 function csaEsc(s: string): string {
   return String(s)
@@ -1466,7 +1492,6 @@ async function generateScrollFrames(
     : layout === "site3d"
     ? 90
     : SCROLL_FRAME_COUNT;
-  const videoResolution = "1080p";
   // Parallax / split / action match site3d («триггер»): one MP4 scrub, no ffmpeg frames.
   const useVideoScrub = usesMp4Scrub(layout);
 
@@ -1558,12 +1583,11 @@ async function generateScrollFrames(
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${KIE_API_KEY}` },
         body: JSON.stringify({
           model: KLING_IMG2VID_MODEL,
-          input: {
-            prompt: animPrompt.slice(0, 2500),
-            image_urls: [currentStillUrl],
-            duration: String(videoDuration),
-            resolution: videoResolution,
-          },
+          input: buildKieVideoCreateInput(KLING_IMG2VID_MODEL, {
+            prompt: animPrompt,
+            stillUrl: currentStillUrl,
+            durationSec: videoDuration,
+          }),
         }),
       },
       { label: "SCROLLANIM video-create", retries: 4, shouldStop: () => shouldStop() || Date.now() >= deadline },
@@ -1637,8 +1661,55 @@ async function generateScrollFrames(
     // taskFailed === true → continue to next videoAttempt
   }
 
+  if (!mp4Url && !shouldStop() && Date.now() < deadline) {
+    console.log("[SCROLLANIM] Kling exhausted — falling back to Wan 3.0 (1080P)…");
+    const wanCreate: any = await kieRequestJson(
+      NANO_BANANA_CREATE_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${KIE_API_KEY}` },
+        body: JSON.stringify({
+          model: WAN_FALLBACK_MODEL,
+          input: buildKieVideoCreateInput(WAN_FALLBACK_MODEL, {
+            prompt: animPrompt,
+            stillUrl: currentStillUrl,
+            durationSec: videoDuration,
+          }),
+        }),
+      },
+      { label: "SCROLLANIM wan3-fallback-create", retries: 3, shouldStop: () => shouldStop() || Date.now() >= deadline },
+    );
+    const wanTaskId: string | null =
+      wanCreate?.code === 200 && wanCreate?.data?.taskId ? wanCreate.data.taskId : null;
+    if (!wanTaskId) {
+      console.warn("[SCROLLANIM] Wan 3.0 create failed:", wanCreate?.msg || wanCreate?.code);
+      if (isConfirmedKieJobBodyFailure(wanCreate)) markKieFail();
+    } else {
+      console.log(`[SCROLLANIM] Wan 3.0 fallback task created: ${wanTaskId}`);
+      if (onTaskCreated) { try { onTaskCreated(wanTaskId); } catch {} }
+      const wanTerminal = await waitKieTaskViaCallback(wanTaskId, {
+        deadlineMs: Math.max(60_000, deadline - Date.now()),
+        shouldStop,
+        pollIntervalMs: 5000,
+        label: "SCROLLANIM wan3-fallback",
+      });
+      if (wanTerminal.ok) {
+        mp4Url = kieResultUrl(wanTerminal.data);
+        console.log(`[SCROLLANIM] Wan 3.0 fallback success, mp4Url=${mp4Url}`);
+      } else if (wanTerminal.reason === "fail") {
+        const failMsg = String(wanTerminal.data?.failMsg || "");
+        const failCode = String(wanTerminal.data?.failCode || "");
+        console.warn(`[SCROLLANIM] Wan 3.0 fallback failed: failMsg="${failMsg}" failCode="${failCode}"`);
+        if (isKieTaskInfraFailure(failMsg, failCode)) markKieFail();
+      } else {
+        console.warn("[SCROLLANIM] Wan 3.0 fallback timeout/abort");
+        markKieFail();
+      }
+    }
+  }
+
   if (!mp4Url) {
-    console.warn("[SCROLLANIM] video generation failed after all attempts or deadline exceeded");
+    console.warn("[SCROLLANIM] video generation failed after Kling + Wan 3.0 fallback (or deadline exceeded)");
     // If we never saw a confirmed infra fail but also never got video after create attempts,
     // and create always failed with body 5xx — already marked. Pure moderation → leave false.
     return { frames: [], confirmedKieFailure };
