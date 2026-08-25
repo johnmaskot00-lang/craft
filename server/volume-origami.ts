@@ -273,11 +273,25 @@ Hero (100svh) = ОДИН data-craft-volume-stack на всю ширину/выс
 
 Минимум в hero-стеке:
 1. Дальний план (фон мира) — cover 100%
-2. Средний план — ключевой объект ниши (|CUTOUT|)
-3. Ближний план — акцент (|CUTOUT|, data-craft-volume-live)
+2. Средний план — ключевой объект ниши (|CUTOUT|), «стоит» в нижней/средней зоне кадра (bottom / object-position:bottom)
+3. Ближний план — акцент (|CUTOUT|, data-craft-volume-live), тоже у земли/края, не в потолке
 + [data-craft-volume-copy] внутри стека (мало текста)
 
-ЗАПРЕЩЕНО: split «стена текста слева + один объект справа»; длинный абзац/stats в первом экране.
+ЗАПРЕЩЕНО:
+- split «стена текста слева + один объект справа»
+- длинный абзац/stats в первом экране
+- «летающий» бутон/лепесток/акцент у верхнего края (top < 35% без опоры) — акценты держатся рядом с главным объектом в нижней половине
+- height: 90%+ на cutout без object-position:bottom (объект «висит» в воздухе)
+
+═══ ТИПОГРАФИКА HERO (не вытягивать) ═══
+Заголовок должен быть плотным и читаемым, НЕ «вытянутым»:
+- font-weight: 400–600 (НЕ 200/300 на огромном кегле)
+- line-height: 1.12–1.22
+- letter-spacing: −0.02em…0.02em (без огромного tracking)
+- font-size: clamp(2rem, 4.2vw, 3.6rem) — потолок ~3.6rem, не 4.4rem+
+- без transform: scaleY / writing-mode:vertical / искусственного растягивания
+- italic только на 1–3 словах акцента, не на всём заголовке
+- volume-line-container min-height умеренный (≈160–200px), не 240px+ с пустотой
 
 ═══ МАЛО ТЕКСТА + СМЕНА ПРИ СКРОЛЛЕ ═══
 Hero: headline ≤8–12 слов, опционально 1 короткая строка, 1 CTA. Остальное — ниже fold.
@@ -316,8 +330,10 @@ food → Fraunces + DM Sans; sport → Bebas Neue + Archivo; interior → Instru
 
 ПЕРЕД ОТПРАВКОЙ:
 1. Hero = одна объёмная СЦЕНА из ≥3 слоёв (фон-мир + объект + акцент), промпты согласованы
-2. Фон без CUTOUT; объекты с |CUTOUT| без transparent/checkerboard в тексте промпта
-3. Мало текста + data-craft-volume-line; шрифты под нишу
-4. Карточки без |CUTOUT|; на 375px слои overlapping
+2. Акценты не летают у потолка; object-position:bottom у cutout
+3. Заголовок не вытянут (weight 400–600, lh ~1.15, clamp ≤3.6rem)
+4. Фон без CUTOUT; объекты с |CUTOUT| без transparent/checkerboard в тексте промпта
+5. Мало текста + data-craft-volume-line; шрифты под нишу
+6. Карточки без |CUTOUT|; на 375px слои overlapping
 `;
 
