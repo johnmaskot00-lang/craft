@@ -81,6 +81,58 @@ export function artDirectorPendingHtml(videoPrompt?: string, texts?: Array<{ tit
 </section>`;
 }
 
+/** Niche brief appended to the art-director system prompt at generate time. */
+export function buildArtDirectorNicheAddon(userPrompt: string, projectTitle?: string): string {
+  const brief = [projectTitle, userPrompt].filter(Boolean).join(" — ").replace(/\s+/g, " ").trim().slice(0, 500);
+  if (!brief) return "";
+  return `\n\n═══ НИША ЭТОГО КЛИЕНТА (обязательно) ═══
+Запрос: ${brief}
+Hero-видео и все {{GENIMG}} должны узнаваемо отражать ЭТУ нишу. Универсальные «brand / workshop / haze» сцены без привязки к запросу — запрещены.
+Второе {{SCROLLANIM}} ставь только если оно усиливает композицию, и только с другой сценой той же ниши.
+═══ КОНЕЦ НИШИ ═══\n`;
+}
+
+/**
+ * Drop duplicate / near-duplicate SCROLLANIM markers so we never bake the same
+ * clip twice. Keeps the first occurrence; strips later near-copies entirely.
+ */
+export function dedupeArtDirectorScrollAnimMarkers(html: string): string {
+  const RE = /\{\{SCROLLANIM:([\s\S]+?)\}\}/g;
+  const seen: string[] = [];
+  const normalize = (raw: string) =>
+    raw
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 180);
+
+  const overlap = (a: string, b: string): boolean => {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    // Share ≥ 70% of significant tokens → treat as the same scene.
+    const ta = new Set(a.split(" ").filter((w) => w.length > 3));
+    const tb = new Set(b.split(" ").filter((w) => w.length > 3));
+    if (ta.size < 4 || tb.size < 4) return a.includes(b) || b.includes(a);
+    let shared = 0;
+    for (const w of Array.from(ta)) if (tb.has(w)) shared++;
+    return shared / Math.min(ta.size, tb.size) >= 0.7;
+  };
+
+  let count = 0;
+  return html.replace(RE, (full, inner: string) => {
+    count += 1;
+    if (count > ART_DIRECTOR_MAX_VIDEOS) return "";
+    const key = normalize(String(inner || ""));
+    if (seen.some((prev) => overlap(prev, key))) {
+      console.warn("[ARTDIRECTOR] Dropped duplicate SCROLLANIM marker (same/near-same scene)");
+      return "";
+    }
+    seen.push(key);
+    return full;
+  });
+}
+
 /** Full replacement of the master SYSTEM_PROMPT — this mode has no section checklist. */
 export const ART_DIRECTOR_SYSTEM_PROMPT = `Ты — АРТ-ДИРЕКТОР и frontend-разработчик мирового уровня. Ты делаешь сайты уровня awwwards.com Site of the Day.
 
@@ -102,21 +154,37 @@ export const ART_DIRECTOR_SYSTEM_PROMPT = `Ты — АРТ-ДИРЕКТОР и f
 
 ═══ БЮДЖЕТ МЕДИА (важно — планируй заранее) ═══
 Ты можешь заказать:
-- ДО ${ART_DIRECTOR_MAX_VIDEOS} видео через маркер {{SCROLLANIM:...}}
+- 1 видео ОБЯЗАТЕЛЬНО (hero) + максимум ещё 1 опционально — итого ДО ${ART_DIRECTOR_MAX_VIDEOS} маркеров {{SCROLLANIM:...}}
 - ДО ${ART_DIRECTOR_MAX_IMAGES} фотографий через маркер {{GENIMG:...}}
 Больше маркеров, чем этот лимит, ставить НЕЛЬЗЯ — лишние не сгенерируются и превратятся в пустые места.
-Реши сам, сколько тебе реально нужно, и распредели их по композиции.
 
 ВИДЕО — {{SCROLLANIM:ПРОМПТ_НА_АНГЛИЙСКОМ}}
 - Формат: {{SCROLLANIM:cinematic slow push-in toward ..., dramatic lighting, photorealistic, no text, no watermark}}
 - ТОЛЬКО английский, ТОЛЬКО запятые. НЕ используй символы | :: и фигурные скобки внутри промпта.
 - Маркер заменяется на <video autoplay muted loop playsinline>, который РАСТЯГИВАЕТСЯ НА ВЕСЬ РОДИТЕЛЬСКИЙ КОНТЕЙНЕР (position:absolute; inset:0; object-fit:cover). Звука нет.
 - ⚠️ КРИТИЧНО: ставь маркер ПЕРВЫМ ребёнком контейнера, у которого есть position:relative; overflow:hidden и заданная высота (например height:100svh или aspect-ratio). Текст поверх видео клади в соседний элемент с position:relative; z-index:2.
-- ПЕРВОЕ видео — фон hero-блока. Второе (если берёшь) — фон любой другой секции по твоему выбору.
 - Видео — это ФОН. Обязательно клади поверх него градиентный оверлей, иначе текст не прочитать.
-- Пример правильной разметки:
+
+🚨 ВИДЕО-ПРОМПТ = НИША КЛИЕНТА (нарушение = провал):
+- Промпт ОБЯЗАН описывать конкретную сцену ИМЕННО ЭТОЙ ниши из запроса клиента — продукт, место, действие, атмосфера бренда.
+- ЗАПРЕЩЕНО писать универсальные «premium brand environment», «modern workshop», «volumetric haze», «cinematic office» без явной привязки к нише.
+- В промпте явно назови объект/место ниши (spa treatment room, dental clinic, sushi kitchen, yacht marina, bakery counter, law library…).
+- Первое видео — ТОЛЬКО фон hero. Сцена должна узнаваемо читать нишу за 1 секунду.
+
+🚨 ВТОРОЕ ВИДЕО — ОПЦИОНАЛЬНО:
+- По умолчанию ставь РОВНО ОДИН {{SCROLLANIM:...}} (hero). Этого достаточно.
+- Второе видео добавляй ТОЛЬКО если дизайн реально выигрывает от второго полноэкранного видео-фона (например mid-page immersive break или финальный CTA). Иначе — НЕ ставь.
+- Если второе есть: его промпт ОБЯЗАН быть ДРУГОЙ сценой той же ниши (другой ракурс / другой момент / другая локация). ЗАПРЕЩЕНО копировать или слегка перефразировать первый промпт — иначе получится одно и то же видео дважды.
+- Пример для спа: hero = "slow push into a candlelit spa treatment room…" · второе = "overhead glide across a warm stone massage table with essential oil steam…" — разные сцены.
+
+Примеры правильных (нишевых) промптов:
+- Спа: {{SCROLLANIM:slow cinematic push-in through a candlelit luxury spa treatment room, warm stone surfaces, soft steam rising, serene atmosphere, photorealistic, no text, no watermark}}
+- Стоматология: {{SCROLLANIM:gentle camera drift across a bright modern dental clinic chair and soft daylight windows, clean clinical elegance, photorealistic, no text, no watermark}}
+- Ресторан: {{SCROLLANIM:slow dolly over an elegant plated dish in a dim fine-dining restaurant, candlelight and rising steam, photorealistic, no text, no watermark}}
+
+Пример правильной разметки:
   <section style="position:relative;height:100svh;overflow:hidden;">
-    {{SCROLLANIM:slow cinematic push-in through a sunlit modern workshop, dust motes drifting in volumetric light, photorealistic}}
+    {{SCROLLANIM:slow cinematic push-in through a candlelit luxury spa treatment room, warm stone surfaces, soft steam rising, serene atmosphere, photorealistic, no text, no watermark}}
     <div style="position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.55),rgba(0,0,0,.25) 45%,rgba(0,0,0,.7));"></div>
     <div style="position:relative;z-index:2;...">…твой заголовок…</div>
   </section>
@@ -172,6 +240,8 @@ export const ART_DIRECTOR_SYSTEM_PROMPT = `Ты — АРТ-ДИРЕКТОР и f
 - ❌ Узкая тёмная плашка с текстом поверх фото
 - ❌ Блок «О нас / Услуги / Отзывы / FAQ / Контакты» просто потому, что так принято — бери только то, что нужно этому бренду
 - ❌ Стандартный набор карточек с иконками-эмодзи и заголовками в три слова
+- ❌ Универсальные видео-промпты без ниши («premium brand environment», «modern workshop», «cinematic haze»)
+- ❌ Два одинаковых или почти одинаковых {{SCROLLANIM}} — второе видео либо другое по сцене, либо его нет
 
 ═══ ФОРМАТ ОТВЕТА ═══
 Только один файл, без комментариев до и после:
@@ -183,7 +253,7 @@ export const ART_DIRECTOR_SYSTEM_PROMPT = `Ты — АРТ-ДИРЕКТОР и f
 
 ПЕРЕД ОТПРАВКОЙ ПРОВЕРЬ:
 1. Есть #site-preloader и его скрипт
-2. Есть {{SCROLLANIM:...}} внутри контейнера с position:relative и высотой — и их не больше ${ART_DIRECTOR_MAX_VIDEOS}
+2. Есть РОВНО один {{SCROLLANIM:...}} в hero (второе — только если реально нужно) — не больше ${ART_DIRECTOR_MAX_VIDEOS}; каждый промпт явно про нишу клиента; если два — сцены РАЗНЫЕ
 3. Маркеров {{GENIMG:...}} не больше ${ART_DIRECTOR_MAX_IMAGES}
 4. Смысловых блоков не меньше ${ART_DIRECTOR_MIN_BLOCKS}
 5. Реализовано минимум 5 UI-механик из списка
