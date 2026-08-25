@@ -137,95 +137,159 @@ export function buildVolumeNicheAddon(userPrompt: string, projectTitle?: string)
 ═══ КОНЕЦ НИШИ ═══\n`;
 }
 
-/** Baseline CSS so stacks keep depth even if agent media-queries flatten them. */
+/** Baseline CSS: sticky rail + smooth layer motion (no layout jumps). */
 export const VOLUME_BASE_CSS = `<style id="craft-volume-css">
-[data-craft-volume-stack]{position:relative;isolation:isolate;overflow-x:clip;overflow-y:visible}
+/* Parent heroes often set height:100svh + overflow:hidden — unlock for the rail */
+.hero:has([data-craft-volume-stack]),
+.hero-volume-wrapper:has([data-craft-volume-stack]),
+section:has([data-craft-volume-stack]),
+main:has(>[data-craft-volume-stack]){
+  height:auto!important;min-height:0!important;max-height:none!important;overflow:visible!important;
+}
+[data-craft-volume-rail]{position:relative;width:100%;height:240vh!important;display:block}
+[data-craft-volume-stack]{
+  position:sticky!important;top:0!important;left:0;width:100%!important;
+  height:100svh!important;min-height:100svh!important;max-height:100svh!important;
+  isolation:isolate;overflow:hidden!important;z-index:1;
+}
 [data-craft-volume-stack] [data-craft-volume-layer]{
-  position:absolute!important;display:block!important;float:none!important;
-  height:auto;object-fit:contain;background:transparent;pointer-events:none;will-change:transform;
+  position:absolute!important;display:block!important;float:none!important;margin:0!important;
+  background:transparent;pointer-events:none;will-change:transform;
+  animation:none!important;
 }
 [data-craft-volume-copy]{position:absolute;z-index:20;pointer-events:none;max-width:min(42vw,520px)}
 [data-craft-volume-copy] a,[data-craft-volume-copy] button{pointer-events:auto}
-[data-craft-volume-line]{opacity:0;transform:translate3d(0,14px,0);transition:opacity .45s ease,transform .45s ease;position:absolute;inset:0;pointer-events:none}
+[data-craft-volume-line]{
+  opacity:0;transform:translate3d(0,12px,0);
+  transition:opacity .55s ease,transform .55s ease;
+  position:absolute;inset:0;pointer-events:none;
+}
 [data-craft-volume-line].is-on{opacity:1;transform:none;position:relative;pointer-events:auto}
 @media (max-width:768px){
-  [data-craft-volume-stack]{min-height:min(88svh,680px)!important;width:100%}
-  [data-craft-volume-stack] [data-craft-volume-layer]{
-    position:absolute!important;margin:0!important;float:none!important;
-    max-width:min(78vw,340px);
-  }
-  [data-craft-volume-copy]{max-width:min(92vw,420px);left:4vw!important;right:4vw;top:auto;bottom:8%}
+  [data-craft-volume-rail]{height:200vh!important}
+  [data-craft-volume-stack] [data-craft-volume-layer]{max-width:min(82vw,360px)}
+  [data-craft-volume-copy]{max-width:min(92vw,420px);left:4vw!important;right:4vw;top:auto!important;bottom:8%}
+}
+@media (prefers-reduced-motion:reduce){
+  [data-craft-volume-rail]{height:100vh!important}
+  [data-craft-volume-line]{transition:none}
 }
 </style>`;
 
-/** Vanilla runtime: parallax/hover + mobile heal + scroll copy lines. */
-export const VOLUME_RUNTIME_SCRIPT = `<script>(function(){if(window.__craftVolume)return;window.__craftVolume=1;
+/**
+ * Smooth sticky parallax runtime (v2).
+ * Tall rail + sticky stage → scroll progress drives depth without layout jumps.
+ */
+export const VOLUME_RUNTIME_SCRIPT = `<script data-craft-volume-runtime="2">(function(){if(window.__craftVolume>=2)return;window.__craftVolume=2;
 function ready(){try{window.__craftAnimReady=true;window.dispatchEvent(new Event('craft:anim-ready'));window.dispatchEvent(new Event('craft:frames-ready'));}catch(e){}}
 function isMobile(){return window.matchMedia('(max-width:768px)').matches;}
-function healStack(stack){var layers=[].slice.call(stack.querySelectorAll('[data-craft-volume-layer]'));if(layers.length<2)return;
-layers.forEach(function(el){el.style.setProperty('position','absolute','important');el.style.setProperty('display','block','important');el.style.setProperty('float','none','important');el.style.setProperty('margin','0','important');});
-if(!isMobile())return;
-var rects=layers.map(function(el){return el.getBoundingClientRect();});
-var tops=rects.map(function(r){return r.top;});
-var span=Math.max.apply(null,tops)-Math.min.apply(null,tops);
-var avgH=rects.reduce(function(s,r){return s+r.height;},0)/Math.max(1,rects.length);
-if(span>Math.max(avgH*0.85,window.innerHeight*0.32)){
-  if(!stack.style.minHeight||parseFloat(stack.style.minHeight)<200)stack.style.minHeight=Math.min(window.innerHeight*0.88,680)+'px';
-  layers.forEach(function(el,i){var n=layers.length;var pct=n<=1?0:i/(n-1);
-  el.style.left=(6+pct*28).toFixed(1)+'%';
-  el.style.top=(10+pct*26).toFixed(1)+'%';
-  el.style.right='auto';el.style.bottom='auto';
-  el.style.width=(72-pct*14).toFixed(1)+'%';
-  el.style.maxWidth='320px';el.style.zIndex=String(i+1);
-  if(!el.getAttribute('data-rot'))el.setAttribute('data-rot',String(((i%2)?1:-1)*(2+i*1.5)));
-  if(!el.getAttribute('data-depth'))el.setAttribute('data-depth',String((0.4+pct*1.1).toFixed(2)));});
-}}
-function bindCopy(stack){var copy=stack.querySelector('[data-craft-volume-copy]');if(!copy)return;
-var lines=[].slice.call(copy.querySelectorAll('[data-craft-volume-line]'));if(lines.length<2){if(lines[0])lines[0].classList.add('is-on');return;}
-var cur=-1;
-function setLine(i){if(i===cur)return;cur=i;lines.forEach(function(el,j){if(j===i)el.classList.add('is-on');else el.classList.remove('is-on');});}
-function onScroll(){var r=stack.getBoundingClientRect();var mid=window.innerHeight*0.5;
-var p=(mid-r.top)/Math.max(1,r.height);p=Math.max(0,Math.min(0.999,p));
-setLine(Math.min(lines.length-1,Math.floor(p*lines.length)));}
-setLine(0);window.addEventListener('scroll',onScroll,{passive:true});onScroll();}
-function bindStack(stack){healStack(stack);bindCopy(stack);var layers=[].slice.call(stack.querySelectorAll('[data-craft-volume-layer]'));if(!layers.length)return;
-var live=stack.querySelector('[data-craft-volume-live]')||layers[layers.length-1];
-var reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-var tx=0,ty=0,cx=0,cy=0,raf=0;
-function tick(){raf=0;cx+=(tx-cx)*0.12;cy+=(ty-cy)*0.12;
-layers.forEach(function(el,i){var depth=parseFloat(el.getAttribute('data-depth')||String((i+1)*0.35));
-var isLive=el===live;var mx=isLive?cx:cx*0.35;var my=isLive?cy:cy*0.35;
-var rot=el.getAttribute('data-rot')||'0';
-el.style.transform='translate3d('+ (mx*depth).toFixed(2)+'px,'+(my*depth).toFixed(2)+'px,0) rotate('+rot+'deg)';});
-if(Math.abs(tx-cx)>0.2||Math.abs(ty-cy)>0.2)raf=requestAnimationFrame(tick);}
-function onMove(e){if(reduce)return;var r=stack.getBoundingClientRect();
-var x=((e.clientX-r.left)/Math.max(1,r.width)-0.5)*(isMobile()?18:28);
-var y=((e.clientY-r.top)/Math.max(1,r.height)-0.5)*(isMobile()?12:18);
-tx=x;ty=y;if(!raf)raf=requestAnimationFrame(tick);}
-function onScroll(){if(reduce)return;var r=stack.getBoundingClientRect();
-var p=1-(r.top+r.height)/(window.innerHeight+r.height);
-ty=(p-0.5)*(isMobile()?36:22);tx=isMobile()?(p-0.5)*10:tx;if(!raf)raf=requestAnimationFrame(tick);}
-stack.addEventListener('pointermove',onMove,{passive:true});
-stack.addEventListener('pointerleave',function(){if(isMobile())return;tx=0;ty=0;if(!raf)raf=requestAnimationFrame(tick);});
-window.addEventListener('scroll',onScroll,{passive:true});
-window.addEventListener('resize',function(){healStack(stack);onScroll();},{passive:true});
-onScroll();}
-function init(){document.querySelectorAll('[data-craft-volume-stack]').forEach(bindStack);
-var imgs=[].slice.call(document.querySelectorAll('img'));var left=imgs.length;if(!left){ready();return;}
-imgs.forEach(function(img){if(img.complete){if(--left<=0)ready();}else{img.addEventListener('load',function(){if(--left<=0)ready();},{once:true});img.addEventListener('error',function(){if(--left<=0)ready();},{once:true});}});
-setTimeout(ready,12000);}
-if(document.readyState!=='loading')init();else document.addEventListener('DOMContentLoaded',init);})();</script>`;
+function reduceMotion(){return window.matchMedia('(prefers-reduced-motion: reduce)').matches;}
+function ensureRail(stack){
+  if(stack.parentElement&&stack.parentElement.getAttribute('data-craft-volume-rail')==='1')return stack.parentElement;
+  var rail=document.createElement('div');
+  rail.setAttribute('data-craft-volume-rail','1');
+  stack.parentNode.insertBefore(rail,stack);
+  rail.appendChild(stack);
+  return rail;
+}
+function railProgress(rail){
+  var r=rail.getBoundingClientRect();
+  var travel=Math.max(1,r.height-window.innerHeight);
+  return Math.max(0,Math.min(1,(-r.top)/travel));
+}
+function bindStack(stack){
+  var rail=ensureRail(stack);
+  var layers=[].slice.call(stack.querySelectorAll('[data-craft-volume-layer]'));
+  if(!layers.length)return;
+  var live=stack.querySelector('[data-craft-volume-live]')||layers[layers.length-1];
+  var copy=stack.querySelector('[data-craft-volume-copy]');
+  var lines=copy?[].slice.call(copy.querySelectorAll('[data-craft-volume-line]')):[];
+  var reduce=reduceMotion();
+  var px=0,py=0,cx=0,cy=0,sp=0,csp=0,raf=0,line=-1;
+  layers.forEach(function(el){
+    el.style.setProperty('position','absolute','important');
+    el.style.setProperty('animation','none','important');
+    // Full-bleed backgrounds keep cover; don't force contain
+    var depth=parseFloat(el.getAttribute('data-depth')||'0.5');
+    var isBg=depth<=0.35||/cover/i.test(el.style.objectFit||'')||el.className.indexOf('backdrop')>=0||el.className.indexOf('bg-layer')>=0||el.className.indexOf('layer-backdrop')>=0;
+    if(isBg){el.setAttribute('data-vol-bg','1');el.style.objectFit=el.style.objectFit||'cover';}
+  });
+  function setLine(i){
+    if(!lines.length)return;
+    i=Math.max(0,Math.min(lines.length-1,i));
+    if(i===line)return;line=i;
+    lines.forEach(function(el,j){if(j===i)el.classList.add('is-on');else el.classList.remove('is-on');});
+  }
+  if(lines.length)setLine(0);
+  function tick(){
+    raf=0;
+    csp+=(sp-csp)*0.08;
+    cx+=(px-cx)*0.1;cy+=(py-cy)*0.1;
+    layers.forEach(function(el,i){
+      var depth=parseFloat(el.getAttribute('data-depth')||String((i+1)*0.4));
+      var isBg=el.getAttribute('data-vol-bg')==='1';
+      var isLive=el===live;
+      var scrollAmp=isBg?18:(isLive?90:48);
+      var pointerAmp=isBg?4:(isLive?22:12);
+      if(isMobile()){scrollAmp*=0.85;pointerAmp*=0.55;}
+      if(reduce){scrollAmp=0;pointerAmp=0;}
+      var y=(csp-0.5)*scrollAmp*Math.max(0.15,depth);
+      var x=(csp-0.5)*scrollAmp*0.22*depth+cx*pointerAmp*0.05*depth;
+      var my=cy*pointerAmp*0.05*depth;
+      var rot=parseFloat(el.getAttribute('data-rot')||'0')||0;
+      if(isLive&&!reduce)rot+=Math.sin(csp*Math.PI)*1.2;
+      var sc=isBg?(1.04+csp*0.03):(isLive?(1+csp*0.04):1);
+      el.style.transform='translate3d('+x.toFixed(2)+'px,'+(y+my).toFixed(2)+'px,0) rotate('+rot.toFixed(2)+'deg) scale('+sc.toFixed(3)+')';
+    });
+    if(lines.length>1){
+      var idx=Math.min(lines.length-1,Math.floor(csp*lines.length+0.0001));
+      // Hysteresis-ish: only advance when clearly in band
+      setLine(idx);
+    }
+    if(Math.abs(sp-csp)>0.001||Math.abs(px-cx)>0.15||Math.abs(py-cy)>0.15)raf=requestAnimationFrame(tick);
+  }
+  function kick(){if(!raf)raf=requestAnimationFrame(tick);}
+  function onScroll(){sp=railProgress(rail);kick();}
+  function onMove(e){
+    if(reduce)return;
+    var r=stack.getBoundingClientRect();
+    px=((e.clientX-r.left)/Math.max(1,r.width)-0.5)*2;
+    py=((e.clientY-r.top)/Math.max(1,r.height)-0.5)*2;
+    kick();
+  }
+  stack.addEventListener('pointermove',onMove,{passive:true});
+  stack.addEventListener('pointerleave',function(){px=0;py=0;kick();});
+  window.addEventListener('scroll',onScroll,{passive:true});
+  window.addEventListener('resize',onScroll,{passive:true});
+  onScroll();kick();
+}
+function init(){
+  document.querySelectorAll('[data-craft-volume-stack]').forEach(bindStack);
+  var imgs=[].slice.call(document.querySelectorAll('img'));var left=imgs.length;
+  if(!left){ready();return;}
+  imgs.forEach(function(img){
+    if(img.complete){if(--left<=0)ready();}
+    else{img.addEventListener('load',function(){if(--left<=0)ready();},{once:true});
+      img.addEventListener('error',function(){if(--left<=0)ready();},{once:true});}
+  });
+  setTimeout(ready,12000);
+}
+if(document.readyState!=='loading')init();else document.addEventListener('DOMContentLoaded',init);
+})();</script>`;
 
-/** Ensure CSS + runtime are present once (idempotent). */
+/** Ensure CSS + runtime v2 are present (upgrades older volume runtimes). */
 export function ensureVolumeRuntime(html: string): string {
   if (!html) return html;
   let out = html;
-  if (!out.includes("craft-volume-css") && !out.includes('id="craft-volume-css"')) {
-    if (/<\/head>/i.test(out)) out = out.replace(/<\/head>/i, VOLUME_BASE_CSS + "\n</head>");
-    else if (/<body[^>]*>/i.test(out)) out = out.replace(/<body[^>]*>/i, (m) => `${m}\n${VOLUME_BASE_CSS}`);
-    else out = VOLUME_BASE_CSS + "\n" + out;
-  }
-  if (out.includes("__craftVolume")) return out;
+  // Always refresh baseline CSS
+  out = out.replace(/<style[^>]*id=["']craft-volume-css["'][^>]*>[\s\S]*?<\/style>/gi, "");
+  if (/<\/head>/i.test(out)) out = out.replace(/<\/head>/i, VOLUME_BASE_CSS + "\n</head>");
+  else if (/<body[^>]*>/i.test(out)) out = out.replace(/<body[^>]*>/i, (m) => `${m}\n${VOLUME_BASE_CSS}`);
+  else out = VOLUME_BASE_CSS + "\n" + out;
+
+  // Strip any prior volume runtime, then inject v2
+  out = out.replace(/<script[^>]*data-craft-volume-runtime[^>]*>[\s\S]*?<\/script>/gi, "");
+  out = out.replace(/<script>\(function\(\)\{if\(window\.__craftVolume\)[\s\S]*?<\/script>/gi, "");
   if (/<\/body>/i.test(out)) return out.replace(/<\/body>/i, VOLUME_RUNTIME_SCRIPT + "\n</body>");
   if (/<\/html>/i.test(out)) return out.replace(/<\/html>/i, VOLUME_RUNTIME_SCRIPT + "\n</html>");
   return out + "\n" + VOLUME_RUNTIME_SCRIPT;
@@ -268,39 +332,36 @@ export const VOLUME_SYSTEM_PROMPT = `Ты — арт-директор режим
 Бюджет: до ${VOLUME_MAX_IMAGES} GENIMG, до ${VOLUME_MAX_CUTOUTS} с |CUTOUT|.
 
 ═══ HERO = ПОЛНАЯ СЦЕНА НА ВЕСЬ БЛОК ═══
-Hero (100svh) = ОДИН data-craft-volume-stack на всю ширину/высоту.
-Слои = планы ОДНОЙ сцены, разложенные по глубине на весь кадр (не свалены в правый угол).
+Hero = ОДИН data-craft-volume-stack на всю ширину (высота ~100svh).
+Рантайм сам сделает sticky-рельс (длинный скролл → плавный объём) — НЕ добавляй свои
+@keyframes на transform слоёв и НЕ пиши JS parallax (конфликт = прыжки).
 
-Минимум в hero-стеке:
-1. Дальний план (фон мира) — cover 100%
-2. Средний план — ключевой объект ниши (|CUTOUT|), «стоит» в нижней/средней зоне кадра (bottom / object-position:bottom)
-3. Ближний план — акцент (|CUTOUT|, data-craft-volume-live), тоже у земли/края, не в потолке
-+ [data-craft-volume-copy] внутри стека (мало текста)
+Слои = планы ОДНОЙ сцены на весь кадр. Минимум 4 слоя для «вау»:
+1. Фон-мир (БЕЗ CUTOUT, data-depth="0.15–0.25") — cover 100%, inset 0, БЕЗ героя
+2. Дальний/средний антураж (|CUTOUT| или второй wide, depth 0.5–0.7) — скала/дымка/мебель
+3. Главный объект ниши (|CUTOUT|, depth 0.9–1.2) — крупный, bottom / object-position:bottom, 45–65% ширины
+4. Ближний bleed-акцент (|CUTOUT| + data-craft-volume-live, depth 1.4–1.8) — у края/низа, перекрывает героя частично
++ [data-craft-volume-copy] внутри стека
+
+Масштаб слоёв должен СИЛЬНО отличаться (фон огромный, акцент меньше и ближе).
+Один свет/час суток во ВСЕХ промптах (например всё «Martian sunset warm rim light»).
 
 ЗАПРЕЩЕНО:
 - split «стена текста слева + один объект справа»
 - длинный абзац/stats в первом экране
-- «летающий» бутон/лепесток/акцент у верхнего края (top < 35% без опоры) — акценты держатся рядом с главным объектом в нижней половине
-- height: 90%+ на cutout без object-position:bottom (объект «висит» в воздухе)
+- CSS animation/keyframes на transform у [data-craft-volume-layer]
+- «летающий» акцент у потолка (top < 35%)
+- height:90%+ cutout без object-position:bottom
+- собственные scroll-listeners на hero
 
 ═══ ТИПОГРАФИКА HERO (не вытягивать) ═══
-Заголовок должен быть плотным и читаемым, НЕ «вытянутым»:
-- font-weight: 400–600 (НЕ 200/300 на огромном кегле)
-- line-height: 1.12–1.22
-- letter-spacing: −0.02em…0.02em (без огромного tracking)
-- font-size: clamp(2rem, 4.2vw, 3.6rem) — потолок ~3.6rem, не 4.4rem+
-- без transform: scaleY / writing-mode:vertical / искусственного растягивания
-- italic только на 1–3 словах акцента, не на всём заголовке
-- volume-line-container min-height умеренный (≈160–200px), не 240px+ с пустотой
+- font-weight: 400–600; line-height: 1.12–1.22; letter-spacing: −0.02em…0.02em
+- font-size: clamp(2rem, 4.2vw, 3.6rem); без scaleY / vertical writing-mode
+- italic только на 1–3 словах; volume-line-container min-height ≈160–180px
 
 ═══ МАЛО ТЕКСТА + СМЕНА ПРИ СКРОЛЛЕ ═══
-Hero: headline ≤8–12 слов, опционально 1 короткая строка, 1 CTA. Остальное — ниже fold.
-2–3 смены текста:
-<div data-craft-volume-copy style="left:6%;top:28%;…">
-  <div data-craft-volume-line class="is-on"><h1>…</h1><a>CTA</a></div>
-  <div data-craft-volume-line><h1>Другой акцент</h1></div>
-  <div data-craft-volume-line><h1>Третий акцент</h1><a>CTA</a></div>
-</div>
+Hero: ≤8–12 слов headline, опционально 1 строка, 1 CTA. Ниже fold — остальное.
+2–3 смены через data-craft-volume-line (рантайм переключит плавно по sticky-скроллу).
 
 ═══ ШРИФТЫ ПОД НИШУ ═══
 Google Fonts пара под мир сцены (не Inter/Roboto/Montserrat/Arial):
@@ -308,12 +369,14 @@ tech → Space Grotesk + IBM Plex Sans; beauty/flowers → Cormorant Garamond + 
 food → Fraunces + DM Sans; sport → Bebas Neue + Archivo; interior → Instrument Serif + Figtree.
 
 ═══ РАЗМЕТКА СТЕКА ═══
-<div data-craft-volume-stack style="position:relative;min-height:100svh;width:100%;overflow-x:clip;">
-  <img data-craft-volume-layer data-depth="0.2" style="inset:0;width:100%;height:100%;object-fit:cover;"> <!-- мир/фон -->
-  <img data-craft-volume-layer data-depth="0.9" data-rot="2" …> <!-- объект -->
-  <img data-craft-volume-layer data-craft-volume-live data-depth="1.5" …> <!-- акцент ближе -->
-  <div data-craft-volume-copy>…</div>
+<div data-craft-volume-stack>
+  <img data-craft-volume-layer data-depth="0.2" style="inset:0;width:100%;height:100%;object-fit:cover;">
+  <img data-craft-volume-layer data-depth="0.65" …>
+  <img data-craft-volume-layer data-depth="1.05" style="bottom:0;right:4%;width:55%;object-fit:contain;object-position:bottom;">
+  <img data-craft-volume-layer data-craft-volume-live data-depth="1.55" style="bottom:-4%;left:-2%;width:32%;object-fit:contain;">
+  <div data-craft-volume-copy>…lines…</div>
 </div>
+Не оборачивай стек в tall rail вручную — это делает рантайм.
 
 ═══ МОБИЛЬНЫЙ ═══
 Тот же объём (absolute overlap), не колонка. Copy снизу. Плоский телефонный hero = провал.
@@ -329,11 +392,11 @@ food → Fraunces + DM Sans; sport → Bebas Neue + Archivo; interior → Instru
 \`\`\`
 
 ПЕРЕД ОТПРАВКОЙ:
-1. Hero = одна объёмная СЦЕНА из ≥3 слоёв (фон-мир + объект + акцент), промпты согласованы
-2. Акценты не летают у потолка; object-position:bottom у cutout
-3. Заголовок не вытянут (weight 400–600, lh ~1.15, clamp ≤3.6rem)
-4. Фон без CUTOUT; объекты с |CUTOUT| без transparent/checkerboard в тексте промпта
-5. Мало текста + data-craft-volume-line; шрифты под нишу
-6. Карточки без |CUTOUT|; на 375px слои overlapping
+1. ≥4 слоя одной сцены, разный scale/depth, один свет в промптах
+2. Нет CSS keyframes на transform слоёв (рантайм сам двигает)
+3. Акценты у низа/края; object-position:bottom у главного cutout
+4. Заголовок плотный (weight 400–600, clamp ≤3.6rem)
+5. Карточки без |CUTOUT|; cutout-промпты без transparent/checkerboard
+6. На 375px слои overlapping
 `;
 
