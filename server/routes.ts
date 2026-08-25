@@ -46,6 +46,7 @@ import {
   readThreeMinJs,
   THREEUI_PUBLISH_ASSET,
 } from "./threeui-mode";
+import { buildThreeUiSkillAddon } from "./threeui-skill";
 import {
   SCROLL_ANIMATIONAL_COST,
   ANIMATIONAL_SYSTEM_PROMPT,
@@ -5502,10 +5503,11 @@ export async function registerRoutes(
           project.title || undefined,
         );
       } else if (isThreeUiMode) {
-        systemContent = THREEUI_SYSTEM_PROMPT + buildThreeUiNicheAddon(
-          String(prompt || ""),
-          project.title || undefined,
-        );
+        // Full replace + inject vendored MengTo/threeui skill (.md) for the agent to study.
+        systemContent =
+          THREEUI_SYSTEM_PROMPT +
+          buildThreeUiNicheAddon(String(prompt || ""), project.title || undefined) +
+          buildThreeUiSkillAddon();
       }
       // Taste-skill study pass removed for Professional / Claude V1 — minimal presets.
       // Design direction comes only from mockup analysis (or the user prompt).
