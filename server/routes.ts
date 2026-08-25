@@ -477,15 +477,17 @@ function usesMp4Scrub(layout: ScrollAnimLayout): boolean {
 }
 
 /**
- * Runtime sticky heal for interactive heroes.
+ * Runtime sticky heal for interactive heroes (parallax / action / split / …).
  *
- * NEVER mutate html/body overflow: setting overflow-x to `clip` while overflow-y
- * stays `visible` makes the browser compute overflow-y as `auto`, which adds a
- * classic scrollbar and shifts the whole page (video) left by ~15px.
- * Only rewrite intermediate `overflow:hidden` wrappers as a single `overflow:clip`.
- * Art Director slots are absolute (not sticky) — skip them.
+ * Agent CSS almost always sets `overflow-x: hidden` on html/body. That breaks
+ * `position: sticky`, so after publish the tall scrub section just scrolls away
+ * instead of pinning the video. Converting root overflow-x to `clip` restores
+ * sticky. To avoid the ~15px left jump (clip-x + visible-y → computed auto-y
+ * suddenly shows a scrollbar), we also pin overflow-y and reserve
+ * `scrollbar-gutter: stable` up front.
+ * Art Director slots are absolute (not sticky) — skip those roots.
  */
-const CRAFT_STICKY_OVERFLOW_FIX_JS = `function craftFixStickyOverflow(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;for(var i=0;i<s.length;i++){var root=s[i];if(root.getAttribute('data-layout')==='artdirector')continue;var el=root.parentElement;while(el&&el.nodeType===1&&el!==document.documentElement&&el!==document.body){var cs=getComputedStyle(el);if(cs.overflow==='hidden'||(cs.overflowX==='hidden'&&cs.overflowY==='hidden')){el.style.setProperty('overflow','clip');}else if(cs.overflowY==='hidden'&&cs.overflowX!=='hidden'&&cs.overflowX!=='scroll'&&cs.overflowX!=='auto'){el.style.setProperty('overflow-y','clip');}el=el.parentElement;}}}`;
+const CRAFT_STICKY_OVERFLOW_FIX_JS = `function craftFixStickyOverflow(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;var needsSticky=false;for(var i=0;i<s.length;i++){if(s[i].getAttribute('data-layout')!=='artdirector'){needsSticky=true;break;}}if(!needsSticky)return;for(var i=0;i<s.length;i++){var root=s[i];if(root.getAttribute('data-layout')==='artdirector')continue;var el=root.parentElement;while(el&&el.nodeType===1&&el!==document.documentElement&&el!==document.body){var cs=getComputedStyle(el);if(cs.overflow==='hidden'||(cs.overflowX==='hidden'&&cs.overflowY==='hidden')){el.style.setProperty('overflow','clip');}else if(cs.overflowY==='hidden'&&cs.overflowX!=='hidden'&&cs.overflowX!=='scroll'&&cs.overflowX!=='auto'){el.style.setProperty('overflow-y','clip');}el=el.parentElement;}}try{document.documentElement.style.setProperty('scrollbar-gutter','stable');}catch(e){}[document.documentElement,document.body].forEach(function(n){if(!n)return;var c=getComputedStyle(n);var ox=c.overflowX,oy=c.overflowY;if(ox==='hidden'||ox==='auto'||ox==='scroll'){n.style.setProperty('overflow-x','clip');if(oy==='visible'||oy==='hidden'){n.style.setProperty('overflow-y','auto');}}else if(oy==='hidden'){n.style.setProperty('overflow-y','clip');}});}`;
 
 /**
  * Client scrub engine shared by parallax/split/action (and mirrored in site3d).
@@ -8866,7 +8868,8 @@ ${designAnalysis}
         // never break position:sticky via overflow-x:hidden (convert hidden→clip at runtime).
         if (/data-craft-scrollanim/.test(result)) {
           result = result.replace(/<script[^>]*data-craft-stickyfix[^>]*>[\s\S]*?<\/script>/gi, "");
-          const stickyFix = `<script data-craft-stickyfix>(function(){${CRAFT_STICKY_OVERFLOW_FIX_JS}if(document.readyState!=='loading')craftFixStickyOverflow();else document.addEventListener('DOMContentLoaded',craftFixStickyOverflow);})();<\/script>`;
+          result = result.replace(/<style[^>]*data-craft-stickyfix[^>]*>[\s\S]*?<\/style>/gi, "");
+          const stickyFix = `<style data-craft-stickyfix>html{scrollbar-gutter:stable}</style><script data-craft-stickyfix>(function(){${CRAFT_STICKY_OVERFLOW_FIX_JS}if(document.readyState!=='loading')craftFixStickyOverflow();else document.addEventListener('DOMContentLoaded',craftFixStickyOverflow);})();<\/script>`;
           if (result.includes("</body>")) result = result.replace("</body>", stickyFix + "</body>");
           else result += stickyFix;
         }
