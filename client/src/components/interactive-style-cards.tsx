@@ -43,7 +43,7 @@ export const INTERACTIVE_STYLES: Array<{
   tokenCost: number;
 }> = [
   { id: "artdirector", label: "Арт Директор", desc: "Свобода агенту · до 2 видео и 8 фото", tokenCost: interactiveModeTokenCost("artdirector") },
-  { id: "volume", label: "Объём", desc: "Многослойный hero · cutout только в стеках", tokenCost: interactiveModeTokenCost("volume") }, }
+  { id: "volume", label: "Объём", desc: "Многослойный hero · cutout только в стеках", tokenCost: interactiveModeTokenCost("volume") },
 
   { id: "parallax", label: "Параллакс", desc: "Видео на весь экран, текст поверх", tokenCost: VIDEO_STYLE_COST },
   { id: "split", label: "Сплит", desc: "Текст слева, продукт справа", tokenCost: VIDEO_STYLE_COST },
