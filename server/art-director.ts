@@ -18,7 +18,7 @@ export const ART_DIRECTOR_VIDEO_PHASE_MS = 3_600_000;
 const VIDEO_CLASS = "craft-adv";
 
 /** Absolutely fills the container the agent designed, without touching its layout. */
-const SLOT_STYLE = "position:absolute;inset:0;overflow:hidden;z-index:0;margin:0;padding:0;";
+const SLOT_STYLE = "position:absolute;inset:0;overflow:hidden;z-index:0;margin:0;padding:0;pointer-events:none;";
 
 /**
  * Replacement for a resolved {{SCROLLANIM:}} in Art Director mode.
@@ -34,12 +34,12 @@ export function buildArtDirectorVideoHtml(videoUrl: string): string {
   return `<section data-craft-scrollanim="1" data-layout="artdirector" data-video="${src}" aria-hidden="true" style="${SLOT_STYLE}">
   <video class="${VIDEO_CLASS}" src="${src}" autoplay muted loop playsinline preload="auto" disablepictureinpicture></video>
 </section>
-<style>section[data-layout="artdirector"]{${SLOT_STYLE}}video.${VIDEO_CLASS}{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;border:0;background:#0a0a0a;}</style>
+<style>section[data-layout="artdirector"]{${SLOT_STYLE}}video.${VIDEO_CLASS}{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;border:0;background:#0a0a0a;z-index:0;}</style>
 <script>(function(){if(window.__craftAdVideo)return;window.__craftAdVideo=1;
 function ready(){try{window.__craftAnimReady=true;window.dispatchEvent(new Event('craft:anim-ready'));window.dispatchEvent(new Event('craft:frames-ready'));}catch(e){}}
 function init(){var v=document.querySelectorAll('video.${VIDEO_CLASS}');if(!v.length){ready();return;}
 for(var i=0;i<v.length;i++){(function(el){var host=el.closest('section[data-layout="artdirector"]');var p=host?host.parentElement:el.parentElement;
-if(p){var cs=getComputedStyle(p);if(cs.position==='static')p.style.position='relative';if(cs.overflow==='visible')p.style.overflow='hidden';}
+if(p){var cs=getComputedStyle(p);if(cs.position==='static')p.style.position='relative';if(cs.overflow==='visible')p.style.overflow='hidden';if(!p.style.minHeight&&(!cs.minHeight||cs.minHeight==='0px')&&(!cs.height||cs.height==='0px'||cs.height==='auto')){p.style.minHeight='100svh';}}
 el.muted=true;el.playsInline=true;try{el.setAttribute('playsinline','');el.setAttribute('webkit-playsinline','');el.setAttribute('muted','');}catch(e){}
 el.addEventListener('loadeddata',ready,{once:true});
 var pr=el.play();if(pr&&pr.catch)pr.catch(function(){var go=function(){el.play().catch(function(){});};document.addEventListener('click',go,{once:true});document.addEventListener('touchstart',go,{once:true});});
@@ -152,6 +152,29 @@ export const ART_DIRECTOR_SYSTEM_PROMPT = `Ты — АРТ-ДИРЕКТОР и f
 - Текст на русском, живой и по делу, без «мы — команда профессионалов» и без lorem ipsum.
 - Общий объём текста на странице — 1200-2000 слов, чтобы страница индексировалась.
 
+═══ ТИПОГРАФИКА И HERO (каждый сайт — уникальный) ═══
+🚨 ЗАПРЕЩЁННЫЙ ШАБЛОН HERO (если сделаешь так — провал):
+- Большой all-caps sans по центру + подзаголовок + две кнопки (заливка + ghost) + полоска метрик внизу
+- Одинаковые шрифты Inter / Roboto / Montserrat / Arial / system-ui / Unbounded как единственный display
+- Всегда тёмный фон + cyan/neon акцент «AI tech»
+
+ОБЯЗАТЕЛЬНО для КАЖДОГО сайта:
+1. Выбери УНИКАЛЬНУЮ пару Google Fonts под нишу (display + body). Примеры направлений:
+   - кино/продакшн → драматичный serif или condensed display (Fraunces, Bebas Neue, Playfair Display) + нейтральный body
+   - спа/beauty → мягкий serif + лёгкий sans (Cormorant Garamond + Manrope)
+   - еда → жирный display + тёплый body (Syne / DM Serif Display + Source Sans 3)
+   - юр/фин → строгий grotesk + editorial serif
+   Подключи через fonts.googleapis.com. Все размеры — clamp().
+2. Hero-композиция — ВЫБЕРИ ОДНУ, разную от проекта к проекту:
+   - текст слева / видео справа (split)
+   - текст снизу поверх видео (editorial bottom)
+   - огромный кинетический заголовок поверх видео, CTA отдельно ниже первого экрана
+   - асимметрия: заголовок смещён, оверлей диагональный
+   НЕ повторяй «центр + 2 кнопки + stats strip» как дефолт.
+3. HERO-ФОН = ТОЛЬКО {{SCROLLANIM:...}}. ЗАПРЕЩЕНО ставить {{GENIMG}} или <img> на весь первый экран вместо видео.
+4. Видео должно быть ВИДНО: маркер — первый ребёнок контейнера height:100svh; position:relative; overflow:hidden. Оверлей — полупрозрачный (макс. rgba(0,0,0,.55) в самой тёмной точке), НЕ сплошной чёрный. Контент — position:relative; z-index:2.
+5. Пока видео грузится, контейнер может быть тёмным — но после подстановки видео кадр обязан читаться за текстом.
+
 ═══ БЮДЖЕТ МЕДИА (важно — планируй заранее) ═══
 Ты можешь заказать:
 - 1 видео ОБЯЗАТЕЛЬНО (hero) + максимум ещё 1 опционально — итого ДО ${ART_DIRECTOR_MAX_VIDEOS} маркеров {{SCROLLANIM:...}}
@@ -235,7 +258,10 @@ export const ART_DIRECTOR_SYSTEM_PROMPT = `Ты — АРТ-ДИРЕКТОР и f
 <script>(function(){var p=document.getElementById('site-preloader');if(!p)return;function hide(){p.style.transition='opacity .6s ease,visibility .6s';p.style.opacity='0';p.style.visibility='hidden';p.style.pointerEvents='none';setTimeout(function(){try{if(p.parentNode)p.parentNode.removeChild(p);}catch(e){}},700);}var t=setTimeout(hide,20000);window.addEventListener('craft:frames-ready',function(){clearTimeout(t);setTimeout(hide,300);},{once:true});})();</script>
 
 ═══ ЧЕГО НЕ ДЕЛАТЬ ═══
-- ❌ Фиолетовый градиент + Inter/Roboto/Arial + эмодзи вместо иконок — это выдаёт шаблон
+- ❌ Фиолетовый градиент + Inter/Roboto/Arial/Montserrat + эмодзи вместо иконок — это выдаёт шаблон
+- ❌ Hero «центр + 2 CTA + метрики» на каждом сайте
+- ❌ Hero на {{GENIMG}} / статичном фото вместо {{SCROLLANIM}} — видео обязано быть видно
+- ❌ Сплошной чёрный оверлей, из-за которого видео не видно
 - ❌ Одинаковый паттерн «текст слева 45% / картинка справа 55%» в каждой секции
 - ❌ Узкая тёмная плашка с текстом поверх фото
 - ❌ Блок «О нас / Услуги / Отзывы / FAQ / Контакты» просто потому, что так принято — бери только то, что нужно этому бренду
@@ -253,9 +279,10 @@ export const ART_DIRECTOR_SYSTEM_PROMPT = `Ты — АРТ-ДИРЕКТОР и f
 
 ПЕРЕД ОТПРАВКОЙ ПРОВЕРЬ:
 1. Есть #site-preloader и его скрипт
-2. Есть РОВНО один {{SCROLLANIM:...}} в hero (второе — только если реально нужно) — не больше ${ART_DIRECTOR_MAX_VIDEOS}; каждый промпт явно про нишу клиента; если два — сцены РАЗНЫЕ
-3. Маркеров {{GENIMG:...}} не больше ${ART_DIRECTOR_MAX_IMAGES}
-4. Смысловых блоков не меньше ${ART_DIRECTOR_MIN_BLOCKS}
-5. Реализовано минимум 5 UI-механик из списка
-6. На 375px ничего не разъезжается
+2. Hero использует {{SCROLLANIM:...}} (не GENIMG на весь экран); видео-промпт про нишу; оверлей не глушит картинку
+3. Подключены уникальные Google Fonts под нишу (не Inter/Roboto/Montserrat/Arial)
+4. Маркеров {{GENIMG:...}} не больше ${ART_DIRECTOR_MAX_IMAGES}; {{SCROLLANIM}} не больше ${ART_DIRECTOR_MAX_VIDEOS}
+5. Смысловых блоков не меньше ${ART_DIRECTOR_MIN_BLOCKS}
+6. Реализовано минимум 5 UI-механик из списка
+7. На 375px ничего не разъезжается
 `;

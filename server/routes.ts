@@ -46,17 +46,6 @@ import {
   craftOrderIdFromPayment,
   type YooPayment,
 } from "./yookassa";
-import {
-  PROFESSIONAL_TASTE_SKILL,
-  TASTE_SKILL_REPO,
-  TASTE_STUDY_SYSTEM,
-  buildTasteStudyUserMessage,
-  buildProfessionalBuildAddon,
-} from "./taste-skill-prompt";
-import {
-  loadProfessionalTastePack,
-  truncateSkillsForStudy,
-} from "./taste-skill-loader";
 import { setupAuth } from "./auth";
 import { gemini } from "./gemini";
 import { deployToYandex, addCustomDomain, removeCustomDomain, checkDomainStatus, unpublishFromYandex, deleteProjectFromYandex, getDomainProxyIp } from "./yandex-deploy";
@@ -3212,6 +3201,97 @@ function gradientPlaceholderDataUri(seed: string): string {
   return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
 }
 
+/** Indices of attached images that are layout mockups (not product/logo photos). */
+function parseDesignReferenceIndices(analysisJson: string): Set<number> {
+  const out = new Set<number>();
+  try {
+    const data = JSON.parse(analysisJson);
+    const photos = data?.reference_photos;
+    if (!Array.isArray(photos)) return out;
+    for (const p of photos) {
+      const role = String(p?.role || "").toLowerCase().replace(/\s+/g, "_");
+      const isDesign =
+        role.includes("design_reference") ||
+        role.includes("mockup") ||
+        role.includes("screenshot") ||
+        role === "design" ||
+        role === "layout" ||
+        role === "ui_reference";
+      const idx = Number(p?.index);
+      if (isDesign && Number.isFinite(idx) && idx > 0) out.add(idx);
+    }
+  } catch {
+    /* analysis may be truncated / non-JSON */
+  }
+  return out;
+}
+
+/**
+ * Prevent Professional mockup screenshots from leaking into the built site:
+ * - strip {{GENIMG:…|REFn}} when n is a design_reference
+ * - replace <img src="mockupUrl"> / CSS url(mockupUrl) with a fresh GENIMG marker
+ */
+function scrubMockupLeakageFromHtml(
+  html: string,
+  mockupUrls: string[],
+  designRefIndices: Set<number>,
+): string {
+  if (!html || mockupUrls.length === 0) return html;
+  let out = html;
+
+  out = out.replace(/\{\{GENIMG:([^}]+)\}\}/g, (full, inner: string) => {
+    const parts = String(inner).split("|").map((s) => s.trim());
+    if (parts.length < 2) return full;
+    const last = parts[parts.length - 1];
+    const refMatch = last.match(/^REF:?([\d,]+)$/i);
+    if (!refMatch) return full;
+    const indices = refMatch[1]
+      .split(",")
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    // Unknown roles (empty set) → strip ALL REF in mockup mode (safe default).
+    const keep =
+      designRefIndices.size === 0
+        ? []
+        : indices.filter((i) => !designRefIndices.has(i));
+    if (keep.length === indices.length) return full;
+    const base = parts.slice(0, -1).join("|");
+    console.warn(
+      `[MOCKUP] Stripped design_reference REF from GENIMG (had REF${indices.join(",")})`,
+    );
+    if (keep.length === 0) return `{{GENIMG:${base}}}`;
+    return `{{GENIMG:${base}|REF${keep.join(",")}}}`;
+  });
+
+  const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  for (const rawUrl of mockupUrls) {
+    if (!rawUrl) continue;
+    const variants = Array.from(
+      new Set(
+        [rawUrl, rawUrl.replace(/^https?:\/\/[^/]+/i, ""), rawUrl.split("/").pop() || ""]
+          .map((u) => u.trim())
+          .filter((u) => u.length > 8),
+      ),
+    );
+    for (const variant of variants) {
+      const reImg = new RegExp(
+        `(<img\\b[^>]*\\bsrc\\s*=\\s*["'])([^"']*${escapeRe(variant)}[^"']*)(["'][^>]*>)`,
+        "gi",
+      );
+      out = out.replace(reImg, (_m, a: string, _src: string, c: string) => {
+        console.warn("[MOCKUP] Replaced pasted mockup <img> with fresh GENIMG marker");
+        return `${a}{{GENIMG:on-brand scene matching the site visual style, editorial cinematic photography, photorealistic, ultra high resolution|16:9}}${c}`;
+      });
+      const reUrl = new RegExp(`url\\((['"]?)([^)'"]*${escapeRe(variant)}[^)'"]*)\\1\\)`, "gi");
+      out = out.replace(reUrl, () => {
+        console.warn("[MOCKUP] Removed pasted mockup from CSS url()");
+        return "none";
+      });
+    }
+  }
+  return out;
+}
+
 // Scan assembled page code for {{GENIMG:prompt|ratio}} markers, generate the
 // images via GPT Image 2 (bounded concurrency + credit check per image), upload
 // to object storage, save to the project library, and replace markers in-place.
@@ -5294,87 +5374,19 @@ export async function registerRoutes(
           project.title || undefined,
         );
       }
-      // Professional / Claude V1: learn from Leonxlnx/taste-skill on GitHub, then build.
-      if (isNewSite && !isAnimationalMode && !useGemini) {
-        let designDirection = "";
-        let usedSkillNames: string[] = [];
-        try {
-          res.write(
-            `data: ${JSON.stringify({
-              status: "Загружаю taste-skill с GitHub…",
-              generating: true,
-              tastePhase: "fetch",
-            })}\n\n`,
-          );
-          const pack = await loadProfessionalTastePack({
-            withImageToCode: !!(
-              mockupMode &&
-              (imageArray.length > 0 || (Array.isArray(imageUrls) && imageUrls.length > 0))
-            ),
-          });
-          usedSkillNames = pack.skills.map((s) => s.installName);
-          console.log(
-            `[TASTE-SKILL] loaded ${pack.skills.length} skill(s) (${pack.totalBytes} bytes) from ${pack.source}: ${usedSkillNames.join(", ")}`,
-          );
+      // Taste-skill study pass removed for Professional / Claude V1 — minimal presets.
+      // Design direction comes only from mockup analysis (or the user prompt).
+      if (mockupMode && isNewSite && !isAnimationalMode && !isArtDirectorMode) {
+        systemContent += `
 
-          res.write(
-            `data: ${JSON.stringify({
-              status: "Изучаю design taste skill…",
-              generating: true,
-              tastePhase: "study",
-              tasteSkills: usedSkillNames,
-            })}\n\n`,
-          );
-
-          const studyMarkdown = truncateSkillsForStudy(pack.combinedMarkdown);
-          const studyUser = buildTasteStudyUserMessage({
-            userPrompt: String(prompt || ""),
-            skillsMarkdown: studyMarkdown,
-            hasMockupRefs: !!(mockupMode && (imageArray.length > 0 || (Array.isArray(imageUrls) && imageUrls.length > 0))),
-          });
-
-          designDirection = (
-            await routerCheapGenerateSync({
-              systemPrompt: TASTE_STUDY_SYSTEM,
-              messages: [{ role: "user", content: studyUser }],
-              maxTokens: 4096,
-            })
-          ).trim();
-
-          if (!designDirection || designDirection.length < 80) {
-            throw new Error("taste study returned empty DESIGN_DIRECTION");
-          }
-          console.log(
-            `[TASTE-SKILL] study done (${designDirection.length} chars) skills=${usedSkillNames.join(",")}`,
-          );
-
-          res.write(
-            `data: ${JSON.stringify({
-              status: "Создаю сайт по изученному вкусу…",
-              generating: true,
-              tastePhase: "build",
-            })}\n\n`,
-          );
-
-          systemContent += `\n\n${buildProfessionalBuildAddon({
-            designDirection,
-            usedSkills: usedSkillNames,
-            repo: TASTE_SKILL_REPO,
-          })}\n`;
-        } catch (tasteErr: any) {
-          console.warn(
-            `[TASTE-SKILL] learn phase failed, using Craft distill fallback:`,
-            tasteErr?.message || tasteErr,
-          );
-          res.write(
-            `data: ${JSON.stringify({
-              status: "Taste-skill недоступен — генерирую с локальными правилами вкуса…",
-              generating: true,
-              tastePhase: "fallback",
-            })}\n\n`,
-          );
-          systemContent += `\n\n${PROFESSIONAL_TASTE_SKILL}\n`;
-        }
+═══ РЕЖИМ ПРОФЕССИОНАЛ — МИНИМУМ ПРЕДНАСТРОЕК ═══
+Taste-skill и шаблонные «варианты hero A/B/C» из master-промпта НЕ применять.
+Источник истины — анализ приложенного макета + запрос пользователя.
+- Шрифты, сетка, hero-композиция, палитра — как на макете (не Inter/центрированный шаблон по умолчанию)
+- НЕ вставляй скриншот/макет в HTML как <img> и НЕ копируй его через {{GENIMG:…|REFn}}
+- Hero и декоративные фото — новые {{GENIMG:...}} БЕЗ REF (кроме реального фото товара/лого/человека)
+═══ КОНЕЦ ═══
+`;
       }
       if (researchData) {
         systemContent += `\n\n═══ РЕЗУЛЬТАТЫ DEEP RESEARCH ═══\nИспользуй следующие РЕАЛЬНЫЕ факты и данные из исследования при создании контента сайта:\n${researchData}\n═══ КОНЕЦ ИССЛЕДОВАНИЯ ═══\n`;
@@ -5678,12 +5690,23 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
       }
 
       const uploadedImageArray: Array<{url: string, fileName: string}> = Array.isArray(imageUrls) ? imageUrls.filter((i: any) => i && i.url) : [];
-      if (uploadedImageArray.length > 0) {
+      if (uploadedImageArray.length > 0 && !mockupMode) {
         systemContent += `\n\n═══ ЗАГРУЖЕННЫЕ ФОТО ПОЛЬЗОВАТЕЛЯ (ВЫСШИЙ ПРИОРИТЕТ) ═══\nПользователь загрузил эти фотографии. ОБЯЗАТЕЛЬНО встрой ИМЕННО ЭТИ фото на сайт через <img src="URL"> с указанными URL. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО заменять их на Unsplash, Picsum или другие сток-фото — используй только эти точные URL:\n`;
         for (const im of uploadedImageArray) {
           systemContent += `- "${im.fileName}" — URL: ${im.url}\n`;
         }
         systemContent += `\nПример: <img src="${uploadedImageArray[0].url}" alt="${uploadedImageArray[0].fileName}" style="width:100%;height:100%;object-fit:cover;">\nРазмести каждое фото в подходящей по смыслу секции (hero, галерея, о нас, товар и т.д.) согласно запросу пользователя. Если фото несколько — используй их ВСЕ.\n═══ КОНЕЦ ФОТО ═══\n`;
+      } else if (uploadedImageArray.length > 0 && mockupMode) {
+        systemContent += `\n\n═══ РЕЖИМ ПРОФЕССИОНАЛ — ПРИЛОЖЕННЫЕ ИЗОБРАЖЕНИЯ ═══
+Файлы ниже уже загружены. Скриншот/макет сайта — ТОЛЬКО референс структуры и стиля.
+ЗАПРЕЩЕНО вставлять URL макета в <img src="..."> или как CSS background / hero-фон.
+Hero и декоративные фото — новые {{GENIMG:...}} БЕЗ REF.
+{{GENIMG:…|REFn}} — только если среди файлов есть РЕАЛЬНОЕ фото товара/лого/человека (не UI-скриншот).
+URL (для ориентира, не для прямой вставки макета):\n`;
+        for (const im of uploadedImageArray) {
+          systemContent += `- "${im.fileName}" — ${im.url}\n`;
+        }
+        systemContent += `═══ КОНЕЦ ═══\n`;
       }
 
       const audioArray: Array<{url: string, fileName: string}> = Array.isArray(audioUrls) ? audioUrls.filter((a: any) => a && a.url) : [];
@@ -5797,8 +5820,9 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
       // URL-backed references are already persistent. Keep them directly so
       // Professional mode does not depend on a browser CORS download/re-upload.
       const savedImageUrls: string[] = uploadedImageArray.map((image) => image.url);
+      let designRefIndices = new Set<number>();
 
-      if (imageArray.length > 0) {
+      if (imageArray.length > 0 || (mockupMode && savedImageUrls.length > 0)) {
         for (let imageIndex = 0; imageIndex < imageArray.length; imageIndex++) {
           const imgData = imageArray[imageIndex];
           const mime = imgData.mimeType || "image/png";
@@ -5899,12 +5923,16 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
 
 ВАЖНО:
 - Пользователю могут быть приложены НЕСКОЛЬКО изображений одновременно: скриншот дизайна другого сайта (референс стиля) И/ИЛИ реальные фото товара/бренда/логотипа/человека пользователя, которые должны появиться на итоговом сайте
-- ОБЯЗАТЕЛЬНО опиши КАЖДОЕ приложенное изображение отдельным объектом в "reference_photos", с "index" по порядку приложения (начиная с 1) и ролью: "design_reference" — это скриншот/макет чужого дизайна для вдохновения по стилю/структуре; "product_photo" / "logo" / "person" / "brand_asset" — это РЕАЛЬНЫЙ объект пользователя (товар, бренд, лого, человек), который нужно сохранить как есть на сайте, а не придумывать заново
+- ОБЯЗАТЕЛЬНО опиши КАЖДОЕ приложенное изображение отдельным объектом в "reference_photos", с "index" по порядку приложения (начиная с 1) и ролью:
+  - "design_reference" — полный скриншот/макет сайта, UI-мокап, лендинг-референс (навигация + секции + типографика видны как страница). Это НЕ фото для вставки в hero
+  - "product_photo" / "logo" / "person" / "brand_asset" — РЕАЛЬНЫЙ объект пользователя (товар, лого, человек), который можно сохранить через image-to-image
+- Если изображение выглядит как ГОТОВЫЙ САЙТ / Figma-макет / UI-скриншот — роль ВСЕГДА "design_reference", даже если на нём есть люди или «красивый фон»
+- В массиве "images" описывай, какие картинки НУЖНО СГЕНЕРИРОВАТЬ ЗАНОВО в стиле макета. НЕ предлагай вставлять сам скриншот макета как фон hero
 - Определяй цвета МАКСИМАЛЬНО ТОЧНО по пикселям (для изображений с ролью design_reference)
 - Извлекай ВСЕ тексты со скриншота-референса (заголовки, абзацы, кнопки, меню), если он есть
 - Описывай КАЖДУЮ секцию отдельно
 - Указывай точные размеры и отступы где можно определить
-- Если видно шрифт — попробуй определить его (Inter, Montserrat, Roboto, etc.)
+- Если видно шрифт — попробуй определить пару (display + body), не своди всё к Inter/Montserrat/Roboto
 - Верни ТОЛЬКО JSON, без пояснений` },
           ];
 
@@ -5955,6 +5983,12 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
               designAnalysis = designAnalysis.substring(0, 6000) + "\n...[обрезано]";
             }
             console.log("Mockup analysis completed, length:", designAnalysis.length, "valid JSON:", analysisValid);
+            if (analysisValid && designAnalysis) {
+              designRefIndices = parseDesignReferenceIndices(designAnalysis);
+              console.log(
+                `[MOCKUP] design_reference indices: ${Array.from(designRefIndices).join(",") || "(none parsed)"}`,
+              );
+            }
           } catch (analysisError) {
             console.error("Mockup analysis failed:", analysisError);
             analysisValid = false;
@@ -5971,34 +6005,33 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
 ${designAnalysis}
 
 ПРАВИЛА ГЕНЕРАЦИИ:
-1. НЕ вставляй скриншот целиком как <img> — собери видимый интерфейс реальными семантическими HTML/CSS/JS элементами
+1. НЕ вставляй скриншот/макет целиком как <img src="..."> и НЕ используй его URL напрямую нигде на сайте
 2. Сходство с макетом важнее твоих стандартных дизайнерских предпочтений. Не добавляй отсутствующие в референсе градиенты, glassmorphism, bento-сетки, огромный hero или другое меню
 3. Сохрани визуальные якоря: расположение логотипа и меню, силуэт первого экрана, число колонок, чередование фонов, размеры карточек и ритм вертикальных отступов
 4. Тексты адаптируй под запрос пользователя, сохраняя близкую длину строк, чтобы композиция не расползлась
-5. ⚠️ РЕФЕРЕНС-ФОТО ТОВАРА/БРЕНДА (КРИТИЧЕСКИ ВАЖНО): если в "reference_photos" есть изображение с ролью "product_photo" / "logo" / "person" / "brand_asset" (РЕАЛЬНЫЙ товар, лого или человек пользователя) — везде, где на сайте должен появиться ИМЕННО ЭТОТ товар/бренд/человек, используй маркер {{GENIMG:<промпт на английском, опиши сцену/контекст>|<соотношение>|REF<номер>}}, где <номер> — это "index" нужного фото из reference_photos. Это запускает image-to-image генерацию, которая сохраняет реальный товар/бренд/человека на новом качественном профессиональном кадре (студийный свет, контекст по смыслу сайта), НЕ придумывая его заново
-6. Для ВСЕХ ОСТАЛЬНЫХ фото (декоративные, атмосферные, не связанные с конкретным реальным объектом пользователя) — используй обычный {{GENIMG:<промпт на английском>|<соотношение>}} БЕЗ REF, чтобы AI сгенерировал подходящее изображение с нуля
-7. Сам реши для каждого фото сайта: нужен ли REF (когда важно сохранить реальный товар/бренд/человека) или генерация с нуля (когда фото просто иллюстративное) — ориентируйся на инструкцию пользователя выше запроса
-8. Все интерактивные элементы (кнопки, ссылки, формы) должны быть функциональными
-9. CSS: flexbox, grid, custom properties, hover-анимации, transitions
-10. ⚠️ ОБЯЗАТЕЛЬНАЯ МОБИЛЬНАЯ АДАПТИВНОСТЬ: viewport meta, mobile-first @media, шрифты через clamp(), на ≤768px все grid → 1 колонка, навбар → гамбургер, картинки max-width:100%, кнопки min-height:44px, никаких горизонтальных скроллов. Сайт ОБЯЗАН отлично выглядеть на 375px ширины
+5. ⚠️ МАКЕТ САЙТА (role=design_reference) — ТОЛЬКО для структуры и стиля. ЗАПРЕЩЕНО: ставить его в hero/фон, копировать через {{GENIMG:…|REFN}} где N — index этого макета, или вставлять URL макета в <img>. Hero и все декоративные фото генерируй НОВЫМИ {{GENIMG:...}} БЕЗ REF (в стиле макета, но не копией пикселей)
+6. ⚠️ РЕФЕРЕНС-ФОТО ТОВАРА/БРЕНДА: {{GENIMG:…|соотношение|REFN}} разрешён ТОЛЬКО если role в reference_photos = "product_photo" / "logo" / "person" / "brand_asset". Для design_reference — НИКОГДА
+7. Все интерактивные элементы (кнопки, ссылки, формы) должны быть функциональными
+8. CSS: flexbox, grid, custom properties, hover-анимации, transitions
+9. ⚠️ ОБЯЗАТЕЛЬНАЯ МОБИЛЬНАЯ АДАПТИВНОСТЬ: viewport meta, mobile-first @media, шрифты через clamp(), на ≤768px все grid → 1 колонка, навбар → гамбургер, картинки max-width:100%, кнопки min-height:44px, никаких горизонтальных скроллов. Сайт ОБЯЗАН отлично выглядеть на 375px ширины
 
-Перед ответом мысленно сравни результат с референсом сверху вниз. Результат — рабочая адаптивная реализация именно показанного макета, а не другой сайт в похожих цветах.
+Перед ответом мысленно сравни результат с референсом сверху вниз. Результат — рабочая адаптивная реализация именно показанного макета, а не другой сайт в похожих цветах — и без вставки самого скриншота в hero.
 ═══ КОНЕЦ РЕЖИМА "ПРОФЕССИОНАЛ" ═══`;
           } else {
             // Fallback: single-step vision mode (analysis failed or invalid)
             textPart += `\n\n═══ РЕЖИМ "ПРОФЕССИОНАЛ" (точная реализация референса) ═══
-ПОЛЬЗОВАТЕЛЬ ПРИЛОЖИЛ РЕФЕРЕНС(Ы). Скриншот/макет сайта является главным источником истины: воспроизведи его композицию, секции, сетку, пропорции, палитру, типографику и навигацию максимально близко. Фото товара/бренда/логотипа/человека нужно сохранить как реальный объект пользователя.
+ПОЛЬЗОВАТЕЛЬ ПРИЛОЖИЛ РЕФЕРЕНС(Ы). Скриншот/макет сайта — источник структуры и стиля. Воспроизведи композицию, секции, сетку, пропорции, палитру, типографику и навигацию. НЕ вставляй сам скриншот в HTML.
 
 ПРАВИЛА:
-1. НЕ вставляй макет одним <img> — реализуй его реальными HTML/CSS/JS элементами
+1. НЕ вставляй макет одним <img> и НЕ используй URL загруженного макета в src
 2. Не заменяй макет типовым шаблоном и не добавляй отсутствующие стилистические приёмы
 3. Сохрани расположение меню, силуэт hero, порядок секций, число колонок, размеры карточек и ритм отступов; тексты адаптируй с близкой длиной строк
 4. Современный CSS используй для точного воспроизведения и адаптивности, а не для редизайна
-5. ⚠️ РЕФЕРЕНС-ФОТО ТОВАРА/БРЕНДА: если среди приложенных изображений есть РЕАЛЬНОЕ фото товара, лого или человека пользователя (не просто скриншот дизайна) — везде, где на сайте нужно показать ИМЕННО ЭТОТ товар/бренд/человека, используй маркер {{GENIMG:<промпт на английском>|<соотношение>|REF<номер>}}, где <номер> — порядковый номер этого изображения среди приложенных (считая с 1, в порядке приложения). Это сохранит реальный объект на новом качественном кадре вместо того, чтобы придумывать его заново
-6. Для остальных, чисто иллюстративных фото — обычный {{GENIMG:<промпт на английском>|<соотношение>}} без REF
+5. Hero и декоративные фото — только НОВЫЕ {{GENIMG:...}} БЕЗ REF (не копируй пиксели макета через image-to-image)
+6. {{GENIMG:…|REFN}} — ТОЛЬКО если среди приложенных есть РЕАЛЬНОЕ фото товара/лого/человека (не скриншот дизайна)
 7. ⚠️ ОБЯЗАТЕЛЬНАЯ МОБИЛЬНАЯ АДАПТИВНОСТЬ: viewport meta, mobile-first @media, шрифты через clamp(), на ≤768px все grid → 1 колонка, навбар → гамбургер, картинки max-width:100%, кнопки min-height:44px, никаких горизонтальных скроллов. Сайт ОБЯЗАН отлично выглядеть на 375px ширины
 
-Результат — полностью рабочая адаптивная HTML/CSS/JS реализация именно приложенного макета.
+Результат — полностью рабочая адаптивная HTML/CSS/JS реализация именно приложенного макета, без вставки скриншота в hero.
 ═══ КОНЕЦ РЕЖИМА "ПРОФЕССИОНАЛ" ═══`;
           }
         } else if (savedImageUrls.length > 0) {
@@ -6811,9 +6844,25 @@ ${designAnalysis}
         genFilesMap.set(f.filename, f.code);
       }
       const genRunKey = idempotencyKey || `gen-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+      // Only product/logo/person refs should drive image-to-image. Design mockups stay
+      // in the URL list for index alignment, but scrubMockupLeakage strips bad REFs.
       const referenceImageUrlsForGen = (mockupMode && savedImageUrls.length > 0)
         ? savedImageUrls.map(u => (u.startsWith("http") ? u : `${baseUrl}${u}`))
         : [];
+
+      if (mockupMode && savedImageUrls.length > 0) {
+        let scrubbed = scrubMockupLeakageFromHtml(mainHtmlCode, savedImageUrls, designRefIndices);
+        if (scrubbed !== mainHtmlCode) {
+          console.log(`[MOCKUP] Scrubbed mockup leakage from index.html before GENIMG`);
+          mainHtmlCode = scrubbed;
+          genFilesMap.set("index.html", scrubbed);
+        }
+        for (const [fname, code] of Array.from(genFilesMap.entries())) {
+          if (fname === "index.html") continue;
+          const next = scrubMockupLeakageFromHtml(code, savedImageUrls, designRefIndices);
+          if (next !== code) genFilesMap.set(fname, next);
+        }
+      }
 
       // ── Normalize / auto-inject SCROLLANIM BEFORE media work ───────────────
       // So Kling i2v can start immediately in parallel with site GENIMG.

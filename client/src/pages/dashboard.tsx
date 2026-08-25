@@ -168,7 +168,7 @@ interface TourStep {
 }
 
 const CHOOSE_TOUR_STEPS: TourStep[] = [
-  { target: '[data-tour="mode-photo"]', title: "Профессионал", text: "Загрузите референсы (скриншот дизайна и/или фото товара) — ИИ вдохновится ими и создаст свой профессиональный сайт.", position: "bottom" },
+  { target: '[data-tour="mode-photo"]', title: "Профессионал", text: "Claude Opus 5 — загрузите макет или референс; минимум преднастроек, точная реализация структуры.", position: "bottom" },
   { target: '[data-tour="mode-prompt"]', title: "По описанию", text: "Просто напишите текстом, что вам нужно — ИИ сделает сайт по вашему описанию.", position: "bottom" },
   { target: '[data-tour="mode-interactive"]', title: "Интерактивный", text: "Сайт с кинематографичной анимацией, которая разворачивается по мере прокрутки.", position: "bottom" },
 ];
@@ -1286,7 +1286,7 @@ export default function DashboardPage() {
                     {
                       m: "photo",
                       t: "Профессионал",
-                      d: "Референсы + ИИ-креатив",
+                      d: "Claude Opus 5",
                       badge: null as string | null,
                       icon: (
                         <svg viewBox="0 0 24 24" fill="none" className="w-8 h-8">
