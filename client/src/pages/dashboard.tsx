@@ -1469,7 +1469,7 @@ export default function DashboardPage() {
                           )}
                           {interactiveStyle === "volume" && (
                             <p className="shrink-0" style={{ fontSize: '0.68rem', color: '#0d9488', margin: 0, paddingLeft: 4, lineHeight: 1.35 }}>
-                              В Объёме фото продукта станет верхним cutout-слоем оригами-стека (без видео)
+                              Объём: единый фон → подложка (горшок/стол) → объект на ней; фото продукта станет подложкой или героем
                             </p>
                           )}
                           <input

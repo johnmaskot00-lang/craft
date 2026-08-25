@@ -132,8 +132,11 @@ export function buildVolumeNicheAddon(userPrompt: string, projectTitle?: string)
   if (!brief) return "";
   return `\n\n═══ НИША ЭТОГО КЛИЕНТА ═══
 Запрос: ${brief}
-Собери ОБЪЁМНУЮ СЦЕНУ под ЭТУ нишу: (1) фон-мир без героя, (2) cutout главного объекта, (3) cutout акцента ближе.
-Промпты слоёв должны быть одним миром (свет/палитра/место). Шрифты — под эту нишу.
+Собери ОДНУ сцену-сэндвич под ЭТУ нишу:
+1) единый фон-мир (без героя),
+2) cutout-ПОДЛОЖКА (ваза/стол/пьедестал/упаковка — то, НА чём стоит герой),
+3) cutout-ГЕРОЙ, визуально ВЫХОДЯЩИЙ из подложки (тот же свет, тот же ракурс).
+Слои 2+3 якорятся в одном месте (центр-низ), не разбрасывай по углам hero.
 ═══ КОНЕЦ НИШИ ═══\n`;
 }
 
@@ -157,6 +160,29 @@ main:has(>[data-craft-volume-stack]){
   background:transparent;pointer-events:none;will-change:transform;
   animation:none!important;
 }
+/* Role defaults: one scene sandwich — bg full bleed, base+subject stacked center-bottom */
+[data-craft-volume-role="bg"]{
+  inset:0!important;width:100%!important;height:100%!important;
+  object-fit:cover!important;z-index:1;
+}
+[data-craft-volume-role="base"]{
+  left:50%!important;bottom:6%!important;right:auto!important;top:auto!important;
+  width:min(46vw,420px)!important;max-width:88vw!important;height:auto!important;
+  object-fit:contain!important;object-position:bottom center!important;
+  transform-origin:50% 100%;z-index:3;
+  filter:drop-shadow(0 18px 28px rgba(0,0,0,.28));
+}
+[data-craft-volume-role="subject"]{
+  left:50%!important;bottom:18%!important;right:auto!important;top:auto!important;
+  width:min(38vw,340px)!important;max-width:72vw!important;height:auto!important;
+  object-fit:contain!important;object-position:bottom center!important;
+  transform-origin:50% 100%;z-index:4;
+  filter:drop-shadow(0 14px 22px rgba(0,0,0,.22));
+}
+[data-craft-volume-role="accent"]{
+  z-index:5;object-fit:contain!important;
+  filter:drop-shadow(0 10px 16px rgba(0,0,0,.18));
+}
 [data-craft-volume-copy]{position:absolute;z-index:20;pointer-events:none;max-width:min(42vw,520px)}
 [data-craft-volume-copy] a,[data-craft-volume-copy] button{pointer-events:auto}
 [data-craft-volume-line]{
@@ -167,7 +193,8 @@ main:has(>[data-craft-volume-stack]){
 [data-craft-volume-line].is-on{opacity:1;transform:none;position:relative;pointer-events:auto}
 @media (max-width:768px){
   [data-craft-volume-rail]{height:200vh!important}
-  [data-craft-volume-stack] [data-craft-volume-layer]{max-width:min(82vw,360px)}
+  [data-craft-volume-role="base"]{width:min(70vw,320px)!important;bottom:10%!important}
+  [data-craft-volume-role="subject"]{width:min(58vw,260px)!important;bottom:22%!important}
   [data-craft-volume-copy]{max-width:min(92vw,420px);left:4vw!important;right:4vw;top:auto!important;bottom:8%}
 }
 @media (prefers-reduced-motion:reduce){
@@ -180,7 +207,7 @@ main:has(>[data-craft-volume-stack]){
  * Smooth sticky parallax runtime (v2).
  * Tall rail + sticky stage → scroll progress drives depth without layout jumps.
  */
-export const VOLUME_RUNTIME_SCRIPT = `<script data-craft-volume-runtime="2">(function(){if(window.__craftVolume>=2)return;window.__craftVolume=2;
+export const VOLUME_RUNTIME_SCRIPT = `<script data-craft-volume-runtime="3">(function(){if(window.__craftVolume>=3)return;window.__craftVolume=3;
 function ready(){try{window.__craftAnimReady=true;window.dispatchEvent(new Event('craft:anim-ready'));window.dispatchEvent(new Event('craft:frames-ready'));}catch(e){}}
 function isMobile(){return window.matchMedia('(max-width:768px)').matches;}
 function reduceMotion(){return window.matchMedia('(prefers-reduced-motion: reduce)').matches;}
@@ -201,7 +228,7 @@ function bindStack(stack){
   var rail=ensureRail(stack);
   var layers=[].slice.call(stack.querySelectorAll('[data-craft-volume-layer]'));
   if(!layers.length)return;
-  var live=stack.querySelector('[data-craft-volume-live]')||layers[layers.length-1];
+  var live=stack.querySelector('[data-craft-volume-live]')||stack.querySelector('[data-craft-volume-role="subject"]')||layers[layers.length-1];
   var copy=stack.querySelector('[data-craft-volume-copy]');
   var lines=copy?[].slice.call(copy.querySelectorAll('[data-craft-volume-line]')):[];
   var reduce=reduceMotion();
@@ -209,10 +236,15 @@ function bindStack(stack){
   layers.forEach(function(el){
     el.style.setProperty('position','absolute','important');
     el.style.setProperty('animation','none','important');
-    // Full-bleed backgrounds keep cover; don't force contain
+    var role=(el.getAttribute('data-craft-volume-role')||'').toLowerCase();
     var depth=parseFloat(el.getAttribute('data-depth')||'0.5');
-    var isBg=depth<=0.35||/cover/i.test(el.style.objectFit||'')||el.className.indexOf('backdrop')>=0||el.className.indexOf('bg-layer')>=0||el.className.indexOf('layer-backdrop')>=0;
+    var isBg=role==='bg'||depth<=0.35||/cover/i.test(el.style.objectFit||'')||el.className.indexOf('backdrop')>=0||el.className.indexOf('bg-layer')>=0||el.className.indexOf('layer-backdrop')>=0;
     if(isBg){el.setAttribute('data-vol-bg','1');el.style.objectFit=el.style.objectFit||'cover';}
+    if(role==='base'||role==='subject'){
+      // Keep sandwich centered; runtime transform will include translateX(-50%).
+      if(!el.style.left||el.style.left==='auto')el.style.left='50%';
+      if(!el.style.bottom||el.style.bottom==='auto')el.style.bottom=role==='base'?'6%':'18%';
+    }
   });
   function setLine(i){
     if(!lines.length)return;
@@ -225,25 +257,58 @@ function bindStack(stack){
     raf=0;
     csp+=(sp-csp)*0.08;
     cx+=(px-cx)*0.1;cy+=(py-cy)*0.1;
+    // Shared offset for base+subject so pot+flower stay locked as one prop.
+    var pairScroll=(csp-0.5)*42;
+    var pairX=cx*8;
+    var pairY=cy*6;
+    if(isMobile()){pairScroll*=0.85;pairX*=0.55;pairY*=0.55;}
+    if(reduce){pairScroll=0;pairX=0;pairY=0;}
     layers.forEach(function(el,i){
+      var role=(el.getAttribute('data-craft-volume-role')||'').toLowerCase();
       var depth=parseFloat(el.getAttribute('data-depth')||String((i+1)*0.4));
-      var isBg=el.getAttribute('data-vol-bg')==='1';
-      var isLive=el===live;
-      var scrollAmp=isBg?18:(isLive?90:48);
-      var pointerAmp=isBg?4:(isLive?22:12);
+      var isBg=el.getAttribute('data-vol-bg')==='1'||role==='bg';
+      var isBase=role==='base';
+      var isSubject=role==='subject'||el===live;
+      var isAccent=role==='accent';
+      var x,y,sc,rot;
+      var center=(isBase||isSubject)?'translateX(-50%) ':'';
+      if(isBg){
+        var scrollAmp=14,pointerAmp=3;
+        if(isMobile()){scrollAmp*=0.85;pointerAmp*=0.55;}
+        if(reduce){scrollAmp=0;pointerAmp=0;}
+        y=(csp-0.5)*scrollAmp;
+        x=(csp-0.5)*scrollAmp*0.15+cx*pointerAmp*0.04;
+        var my=cy*pointerAmp*0.04;
+        rot=0;sc=1.04+csp*0.03;
+        el.style.transform='translate3d('+x.toFixed(2)+'px,'+(y+my).toFixed(2)+'px,0) scale('+sc.toFixed(3)+')';
+        return;
+      }
+      if(isBase||isSubject){
+        // Same motion family — subject only slightly closer (tiny extra).
+        var bump=isSubject?1.12:1;
+        x=pairX*bump;
+        y=pairScroll*bump+pairY*bump;
+        // Subject sits a bit higher via CSS bottom; keep rotation tiny and shared.
+        rot=(parseFloat(el.getAttribute('data-rot')||'0')||0);
+        if(isSubject&&!reduce)rot+=Math.sin(csp*Math.PI)*0.6;
+        sc=1+csp*(isSubject?0.035:0.02);
+        el.style.transform=center+'translate3d('+x.toFixed(2)+'px,'+y.toFixed(2)+'px,0) rotate('+rot.toFixed(2)+'deg) scale('+sc.toFixed(3)+')';
+        return;
+      }
+      // Accent / legacy layers — still depth-based but milder than before
+      var scrollAmp=isAccent?70:48;
+      var pointerAmp=isAccent?16:10;
       if(isMobile()){scrollAmp*=0.85;pointerAmp*=0.55;}
       if(reduce){scrollAmp=0;pointerAmp=0;}
-      var y=(csp-0.5)*scrollAmp*Math.max(0.15,depth);
-      var x=(csp-0.5)*scrollAmp*0.22*depth+cx*pointerAmp*0.05*depth;
-      var my=cy*pointerAmp*0.05*depth;
-      var rot=parseFloat(el.getAttribute('data-rot')||'0')||0;
-      if(isLive&&!reduce)rot+=Math.sin(csp*Math.PI)*1.2;
-      var sc=isBg?(1.04+csp*0.03):(isLive?(1+csp*0.04):1);
-      el.style.transform='translate3d('+x.toFixed(2)+'px,'+(y+my).toFixed(2)+'px,0) rotate('+rot.toFixed(2)+'deg) scale('+sc.toFixed(3)+')';
+      y=(csp-0.5)*scrollAmp*Math.max(0.15,depth);
+      x=(csp-0.5)*scrollAmp*0.18*depth+cx*pointerAmp*0.05*depth;
+      var my2=cy*pointerAmp*0.05*depth;
+      rot=parseFloat(el.getAttribute('data-rot')||'0')||0;
+      sc=1+csp*0.03;
+      el.style.transform=center+'translate3d('+x.toFixed(2)+'px,'+(y+my2).toFixed(2)+'px,0) rotate('+rot.toFixed(2)+'deg) scale('+sc.toFixed(3)+')';
     });
     if(lines.length>1){
       var idx=Math.min(lines.length-1,Math.floor(csp*lines.length+0.0001));
-      // Hysteresis-ish: only advance when clearly in band
       setLine(idx);
     }
     if(Math.abs(sp-csp)>0.001||Math.abs(px-cx)>0.15||Math.abs(py-cy)>0.15)raf=requestAnimationFrame(tick);
@@ -277,7 +342,7 @@ function init(){
 if(document.readyState!=='loading')init();else document.addEventListener('DOMContentLoaded',init);
 })();</script>`;
 
-/** Ensure CSS + runtime v2 are present (upgrades older volume runtimes). */
+/** Ensure CSS + runtime v3 are present (upgrades older volume runtimes). */
 export function ensureVolumeRuntime(html: string): string {
   if (!html) return html;
   let out = html;
@@ -287,7 +352,7 @@ export function ensureVolumeRuntime(html: string): string {
   else if (/<body[^>]*>/i.test(out)) out = out.replace(/<body[^>]*>/i, (m) => `${m}\n${VOLUME_BASE_CSS}`);
   else out = VOLUME_BASE_CSS + "\n" + out;
 
-  // Strip any prior volume runtime, then inject v2
+  // Strip any prior volume runtime, then inject v3
   out = out.replace(/<script[^>]*data-craft-volume-runtime[^>]*>[\s\S]*?<\/script>/gi, "");
   out = out.replace(/<script>\(function\(\)\{if\(window\.__craftVolume\)[\s\S]*?<\/script>/gi, "");
   if (/<\/body>/i.test(out)) return out.replace(/<\/body>/i, VOLUME_RUNTIME_SCRIPT + "\n</body>");
@@ -295,95 +360,89 @@ export function ensureVolumeRuntime(html: string): string {
   return out + "\n" + VOLUME_RUNTIME_SCRIPT;
 }
 
-export const VOLUME_SYSTEM_PROMPT = `Ты — арт-директор режима «ОБЪЁМ». Главная задача: СОБРАТЬ ОДНУ ОБЪЁМНУЮ СЦЕНУ из нескольких фото-слоёв
-(дальний план → средний → ближний), как декорации театра. Не «плоский фон + картинка справа».
+export const VOLUME_SYSTEM_PROMPT = `Ты — арт-директор режима «ОБЪЁМ». Hero — это ОДНА собранная сцена-сэндвич:
+единый фон → подложка → объект, СТОЯЩИЙ НА подложке. Не разбрасывай картинки по углам.
 
-═══ СУТЬ ОБЪЁМА (запомни как эталон) ═══
-Объём = несколько согласованных GENIMG, которые вместе читаются как ОДИН мир.
+═══ РЕЦЕПТ СЦЕНЫ (обязателен) ═══
+Ровно 3 главных слоя (+ опционально 1 мелкий акцент). Они читаются как ОДИН предмет в мире.
 
-Пример (робототехника / космос):
-1. Фон (БЕЗ CUTOUT, на весь hero): "Mars rocky surface stretching to horizon under deep starry night sky, cinematic wide establishing shot, no characters, no robots, no sun disk"
-2. Средний слой (|CUTOUT|): "humanoid robot standing, full body, facing camera" — вырезан и стоит НА фоне Марса
-3. Ближний/акцент (|CUTOUT| или мягкий glow): "bright sun disk with soft corona rays" — поверх, ближе к зрителю
-→ при hover/скролле слои едут с разной скоростью = настоящий объём.
+1) ФОН (data-craft-volume-role="bg", БЕЗ |CUTOUT|, data-depth="0.2")
+   — единый establishing shot на весь hero (поле, интерьер, студия, пейзаж).
+   — БЕЗ главного героя и БЕЗ подложки (горшок/ваза/стол не рисуй на фоне).
 
-Тот же рецепт под ЛЮБУЮ нишу (сначала придумай 3 плана мира, потом промпты):
-- Флористика: 1) туманный сад / стена зелени  2) cutout букет/лотос  3) cutout лепестки/ваза ближе
-- Кофейня: 1) тёплая барная стойка / зерно  2) cutout чашка с паром  3) cutout зерна/ложка на переднем плане
-- Недвижимость: 1) фасад виллы на закате  2) cutout кресло/декор  3) cutout ветка/светильник bleed
-- Beauty: 1) студийный свет / мрамор  2) cutout флакон  3) cutout капля/шёлк
-- Спорт: 1) стадион/трасса  2) cutout атлет/кроссовок  3) cutout брызги/мяч ближе
-- Еда: 1) стол/кухня атмосфера  2) cutout блюдо  3) cutout пар/специи
+2) ПОДЛОЖКА (data-craft-volume-role="base", |CUTOUT|, data-depth="0.85")
+   — то, НА ЧЁМ стоит герой: горшок, ваза, пьедестал, стол, коробка, упаковка, платформа.
+   — ТОЛЬКО этот объект на белом (cutout). Якорь: центр-низ hero.
 
-Правило промптов:
-- Слои одной сцены = одна палитра, один свет, один «мир» (не случайный коллаж).
-- Фон: широкий establishing shot, БЕЗ главного героя (герой приедет отдельным cutout-слоем).
-- Cutout-промпт: ТОЛЬКО объект, без сцены/пола/окружения; НИКОГДА "transparent" / "checkerboard".
-- В HTML: фон object-fit:cover на 100% стека; cutout object-fit:contain + drop-shadow.
+3) ГЕРОЙ НА ПОДЛОЖКЕ (data-craft-volume-role="subject", |CUTOUT|, data-craft-volume-live, data-depth="1.2")
+   — объект, который визуально ВЫХОДИТ ИЗ / СТОИТ В подложке
+     (цветок из горшка, пар из чашки, бутылка на столе, лампа на тумбе, кроссовок на подиуме).
+   — ТОТ ЖЕ свет/ракурс, что у подложки. Якорь: тот же центр-низ, чуть выше base (перекрытие).
+
+4) Опционально АКЦЕНТ (data-craft-volume-role="accent", |CUTOUT|, data-depth="1.55")
+   — один мелкий bleed у края (лепесток, капля, лист). НЕ второй «летающий» герой.
+
+Эталон (флористика):
+1. фон: "endless flower meadow at soft golden hour, wide establishing, no pots, no characters"
+2. base CUTOUT: "ceramic flower pot three-quarter view, empty rim visible"
+3. subject CUTOUT: "lush bouquet rising upward as if planted in a pot, stems at bottom of frame"
+→ в HTML горшок и букет в одном центре низа; букет перекрывает верх горшка.
+
+Другие ниши (тот же сэндвич):
+- Кофе: фон бар → base чашка/блюдце → subject пар/croissant над чашкой
+- Beauty: фон мрамор/студия → base флакон → subject капля/крышка чуть выше горлышка
+- Еда: фон стол/текстиль → base тарелка → subject блюдо/пар на тарелке
+- Недвижка: фон фасад/терраса → base кресло/тумба → subject подушка/лампа на ней
+- Спорт: фон зал/трасса → base подиум/коробка → subject кроссовок/мяч на подиуме
+
+═══ ЗАПРЕЩЕНО (разброс = провал) ═══
+- объекты в разных углах hero (слева горшок, справа цветок, сверху ещё что-то)
+- «коллаж стикеров» без общей оси
+- фон, на котором уже нарисован герой+горшок (тогда cutout некуда ставить)
+- split «текст слева / картинка справа» как вся композиция
+- CSS @keyframes на transform слоёв; свой JS parallax
+- |CUTOUT| в карточках/сетках ниже fold
 
 ═══ ГЛАВНОЕ ═══
-НЕТ обязательного {{SCROLLANIM}}. Image-led.
-СНАЧАЛА: ниша → 3 плана сцены (мир) → палитра/шрифты → full-bleed hero stack.
+НЕТ {{SCROLLANIM}}. Image-led.
+СНАЧАЛА: ниша → тройка (фон / подложка / герой-на-ней) → палитра → HTML.
 
-═══ ГДЕ CUTOUT ═══
-|CUTOUT| только для объектов ВНУТРИ сцены (средний/ближний план) и bleed.
-Фон сцены — обычный {{GENIMG:…|16:9}} БЕЗ CUTOUT.
-ЗАПРЕЩЕНО |CUTOUT| в карточках/сетках/галереях.
+═══ CUTOUT ═══
+|CUTOUT| только для base / subject / accent.
+Фон — {{GENIMG:…|16:9}} БЕЗ CUTOUT.
+В cutout-промпте: ТОЛЬКО объект, без пола/сцены; НИКОГДА transparent/checkerboard.
 Бюджет: до ${VOLUME_MAX_IMAGES} GENIMG, до ${VOLUME_MAX_CUTOUTS} с |CUTOUT|.
 
-═══ HERO = ПОЛНАЯ СЦЕНА НА ВЕСЬ БЛОК ═══
-Hero = ОДИН data-craft-volume-stack на всю ширину (высота ~100svh).
-Рантайм сам сделает sticky-рельс (длинный скролл → плавный объём) — НЕ добавляй свои
-@keyframes на transform слоёв и НЕ пиши JS parallax (конфликт = прыжки).
+═══ РАЗМЕТКА (копируй роли) ═══
+Рантайм сам сделает sticky-рельс. НЕ пиши свой parallax JS.
 
-Слои = планы ОДНОЙ сцены на весь кадр. Минимум 4 слоя для «вау»:
-1. Фон-мир (БЕЗ CUTOUT, data-depth="0.15–0.25") — cover 100%, inset 0, БЕЗ героя
-2. Дальний/средний антураж (|CUTOUT| или второй wide, depth 0.5–0.7) — скала/дымка/мебель
-3. Главный объект ниши (|CUTOUT|, depth 0.9–1.2) — крупный, bottom / object-position:bottom, 45–65% ширины
-4. Ближний bleed-акцент (|CUTOUT| + data-craft-volume-live, depth 1.4–1.8) — у края/низа, перекрывает героя частично
-+ [data-craft-volume-copy] внутри стека
-
-Масштаб слоёв должен СИЛЬНО отличаться (фон огромный, акцент меньше и ближе).
-Один свет/час суток во ВСЕХ промптах (например всё «Martian sunset warm rim light»).
-
-ЗАПРЕЩЕНО:
-- split «стена текста слева + один объект справа»
-- длинный абзац/stats в первом экране
-- CSS animation/keyframes на transform у [data-craft-volume-layer]
-- «летающий» акцент у потолка (top < 35%)
-- height:90%+ cutout без object-position:bottom
-- собственные scroll-listeners на hero
-
-═══ ТИПОГРАФИКА HERO (не вытягивать) ═══
-- font-weight: 400–600; line-height: 1.12–1.22; letter-spacing: −0.02em…0.02em
-- font-size: clamp(2rem, 4.2vw, 3.6rem); без scaleY / vertical writing-mode
-- italic только на 1–3 словах; volume-line-container min-height ≈160–180px
-
-═══ МАЛО ТЕКСТА + СМЕНА ПРИ СКРОЛЛЕ ═══
-Hero: ≤8–12 слов headline, опционально 1 строка, 1 CTA. Ниже fold — остальное.
-2–3 смены через data-craft-volume-line (рантайм переключит плавно по sticky-скроллу).
-
-═══ ШРИФТЫ ПОД НИШУ ═══
-Google Fonts пара под мир сцены (не Inter/Roboto/Montserrat/Arial):
-tech → Space Grotesk + IBM Plex Sans; beauty/flowers → Cormorant Garamond + Manrope;
-food → Fraunces + DM Sans; sport → Bebas Neue + Archivo; interior → Instrument Serif + Figtree.
-
-═══ РАЗМЕТКА СТЕКА ═══
 <div data-craft-volume-stack>
-  <img data-craft-volume-layer data-depth="0.2" style="inset:0;width:100%;height:100%;object-fit:cover;">
-  <img data-craft-volume-layer data-depth="0.65" …>
-  <img data-craft-volume-layer data-depth="1.05" style="bottom:0;right:4%;width:55%;object-fit:contain;object-position:bottom;">
-  <img data-craft-volume-layer data-craft-volume-live data-depth="1.55" style="bottom:-4%;left:-2%;width:32%;object-fit:contain;">
-  <div data-craft-volume-copy>…lines…</div>
+  <img data-craft-volume-layer data-craft-volume-role="bg" data-depth="0.2"
+       src="{{GENIMG:…|16:9}}" alt=""
+       style="inset:0;width:100%;height:100%;object-fit:cover;z-index:1;">
+  <img data-craft-volume-layer data-craft-volume-role="base" data-depth="0.85"
+       src="{{GENIMG:…|1:1|CUTOUT}}" alt=""
+       style="left:50%;bottom:6%;width:min(46vw,420px);object-fit:contain;object-position:bottom;z-index:3;">
+  <img data-craft-volume-layer data-craft-volume-role="subject" data-craft-volume-live data-depth="1.2"
+       src="{{GENIMG:…|1:1|CUTOUT}}" alt=""
+       style="left:50%;bottom:18%;width:min(38vw,340px);object-fit:contain;object-position:bottom;z-index:4;">
+  <!-- опционально accent у края, мелкий -->
+  <div data-craft-volume-copy style="left:6%;top:22%;">…мало текста…</div>
 </div>
-Не оборачивай стек в tall rail вручную — это делает рантайм.
+
+Подложка и герой ОБЯЗАНЫ делить одну вертикальную ось (left:50%, translateX через рантайм).
+Герой перекрывает верх подложки (bottom subject > bottom base).
+
+═══ ТЕКСТ HERO ═══
+≤8–12 слов + 1 CTA. 2–3 смены data-craft-volume-line.
+Шрифты Google Fonts под нишу (не Inter/Roboto/Montserrat). weight 400–600; clamp ≤3.6rem.
 
 ═══ МОБИЛЬНЫЙ ═══
-Тот же объём (absolute overlap), не колонка. Copy снизу. Плоский телефонный hero = провал.
+Тот же сэндвич по центру-низу (overlap), не колонка картинок. Copy снизу.
 
-═══ СТРУКТУРА / ТЕХНИКА ═══
+═══ ОСТАЛЬНОЕ ═══
 ≥${VOLUME_MIN_BLOCKS} блоков + шапка/футер. Один index.html. CDN только fonts.googleapis.com.
-Без кастомного курсора. #site-preloader + craft:frames-ready. Текст сайта 1200–2000 слов суммарно (не в hero).
+Без кастомного курсора. #site-preloader + craft:frames-ready. 1200–2000 слов суммарно (не в hero).
 
 ═══ ФОРМАТ ═══
 --- FILE: index.html ---
@@ -392,11 +451,11 @@ food → Fraunces + DM Sans; sport → Bebas Neue + Archivo; interior → Instru
 \`\`\`
 
 ПЕРЕД ОТПРАВКОЙ:
-1. ≥4 слоя одной сцены, разный scale/depth, один свет в промптах
-2. Нет CSS keyframes на transform слоёв (рантайм сам двигает)
-3. Акценты у низа/края; object-position:bottom у главного cutout
-4. Заголовок плотный (weight 400–600, clamp ≤3.6rem)
-5. Карточки без |CUTOUT|; cutout-промпты без transparent/checkerboard
-6. На 375px слои overlapping
+1. Есть role=bg + role=base + role=subject; subject визуально «из» base
+2. Нет разброса по углам; одна ось центр-низ
+3. Один свет во всех промптах сцены
+4. Нет CSS keyframes на transform слоёв
+5. Карточки без |CUTOUT|; cutout без transparent/checkerboard
+6. На 375px base+subject overlapping
 `;
 
