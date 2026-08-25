@@ -17,6 +17,16 @@ import {
 } from "./motion-reveal";
 import { buildTriggerLookHtml, normalizeTriggerLookFrames } from "./trigger-look";
 import {
+  ART_DIRECTOR_MAX_VIDEOS,
+  ART_DIRECTOR_MAX_IMAGES,
+  ART_DIRECTOR_IMAGE_PHASE_MS,
+  ART_DIRECTOR_VIDEO_PHASE_MS,
+  ART_DIRECTOR_SYSTEM_PROMPT,
+  buildArtDirectorVideoHtml,
+  artDirectorVideoFallbackHtml,
+  artDirectorPendingHtml,
+} from "./art-director";
+import {
   SCROLL_ANIMATIONAL_COST,
   ANIMATIONAL_SYSTEM_PROMPT,
   generateAnimationalSite,
@@ -449,7 +459,7 @@ const TRIGGER_LOOK_MOTION_CANONICAL =
   `multiple turns, reversing back and forth, looping, idle wobble, or staying centered. ` +
   `Exactly one smooth sweep: LEFT → CENTER → RIGHT. Stop at the right. ` +
   `Body stays front-facing en face, both eyes visible, locked static camera, background almost still.`;
-type ScrollAnimLayout = "parallax" | "split" | "action" | "immersion" | "site3d" | "motion" | "animational" | "trigger";
+type ScrollAnimLayout = "parallax" | "split" | "action" | "immersion" | "site3d" | "motion" | "animational" | "trigger" | "artdirector";
 
 function resolveScrollAnimLayout(style?: string | null): ScrollAnimLayout {
   if (style === "split") return "split";
@@ -459,6 +469,7 @@ function resolveScrollAnimLayout(style?: string | null): ScrollAnimLayout {
   if (style === "motion") return "motion";
   if (style === "animational") return "animational";
   if (style === "trigger") return "trigger";
+  if (style === "artdirector") return "artdirector";
   return "parallax";
 }
 
@@ -469,7 +480,9 @@ function resolveScrollAnimLayout(style?: string | null): ScrollAnimLayout {
  * fetch→Blob→objectURL so seeking never depends on HTTP Range / moov position.
  */
 function usesMp4Scrub(layout: ScrollAnimLayout): boolean {
-  return layout === "site3d" || layout === "parallax" || layout === "split" || layout === "action";
+  // «Арт Директор» plays the raw MP4 (autoplay loop) instead of scrubbing it, but
+  // shares the same "keep the MP4, skip ffmpeg frame extraction" pipeline.
+  return layout === "site3d" || layout === "parallax" || layout === "split" || layout === "action" || layout === "artdirector";
 }
 
 /**
@@ -2196,6 +2209,11 @@ function scrollAnimPendingHtml(texts: Array<{ title: string; sub: string }>, vid
     const brandHint = texts[0]?.title || undefined;
     return buildAnimationalPendingHtml(brandHint, videoPrompt);
   }
+  // Art Director markers sit inside the agent's own hero — fill that box instead
+  // of stacking a second full-height section on top of it.
+  if (style === "artdirector") {
+    return artDirectorPendingHtml(videoPrompt, texts);
+  }
   const isMotion = style === "motion";
   const isTrigger = style === "trigger";
   const first = texts[0] || { title: "", sub: "" };
@@ -2254,6 +2272,9 @@ function scrollAnimFallbackHtml(
     ? ` data-scroll-anim-prompt="${encodeURIComponent(videoPrompt)}" data-scroll-anim-style="${encodeURIComponent(style || "parallax")}"`
     : "";
   const taskAttr = taskId ? ` data-scroll-anim-task-id="${encodeURIComponent(taskId)}"` : "";
+  // Art Director markers live inside the agent's own hero container — a white
+  // full-width section there would break the layout, so fill the slot instead.
+  if (style === "artdirector") return artDirectorVideoFallbackHtml(videoPrompt, taskId);
   return `<section data-scroll-anim-fallback="1"${promptAttr}${taskAttr} style="background:#fff;padding:clamp(60px,12vw,160px) 6%;text-align:center;">${blocks}</section>`;
 }
 
@@ -2308,6 +2329,12 @@ function buildScrollAnimHtml(
   //    Uses a dedicated attribute (not the generic data-frames) to avoid clashes,
   //    and a header-height-aware threshold instead of a magic number.
   const navCtl = `\n<style>header{transition:background .45s ease,background-color .45s ease,backdrop-filter .45s ease,-webkit-backdrop-filter .45s ease,border-color .45s ease,box-shadow .45s ease;}body:not(.craft-anim-passed) header{background:transparent!important;background-color:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;border-color:transparent!important;box-shadow:none!important;}</style>\n<script>(function(){if(window.__craftNavCtl)return;window.__craftNavCtl=true;function fixSticky(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;for(var i=0;i<s.length;i++){var el=s[i];while(el&&el.nodeType===1&&el!==document.documentElement){var cs=getComputedStyle(el);if(cs.overflowX==='hidden')el.style.overflowX='clip';if(cs.overflowY==='hidden')el.style.overflowY='clip';el=el.parentElement;}}var de=document.documentElement,b=document.body;[de,b].forEach(function(n){if(!n)return;var c=getComputedStyle(n);if(c.overflowX==='hidden')n.style.overflowX='clip';if(c.overflowY==='hidden')n.style.overflowY='clip';});}function u(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;var h=document.querySelector('header');var th=h?h.offsetHeight:64;var passed=true;for(var i=0;i<s.length;i++){if(s[i].getBoundingClientRect().bottom>th){passed=false;break;}}document.body.classList.toggle('craft-anim-passed',passed);}window.addEventListener('scroll',u,{passive:true});window.addEventListener('resize',u);if(document.readyState!=='loading'){fixSticky();u();}else{document.addEventListener('DOMContentLoaded',function(){fixSticky();u();});}fixSticky();u();})();</script>`;
+
+  // «Арт Директор»: no server-built hero. Drop the marker's slot into whatever
+  // container the agent designed and let its own CSS own the composition.
+  if (layout === "artdirector") {
+    return videoUrl ? buildArtDirectorVideoHtml(videoUrl) : artDirectorVideoFallbackHtml();
+  }
 
   if (layout === "trigger") {
     return buildTriggerLookHtml(frames, texts, navCtl, csaEsc);
@@ -2703,10 +2730,15 @@ async function resolveScrollAnimMarkers(
   if (entries.length === 0) { return { generated: 0, creditsUsed: 0 }; }
 
   const layout = resolveScrollAnimLayout(interactiveStyle);
-  const planned = entries.slice(0, layout === "immersion" ? 1 : 2); // immersion: one world; others: at most 2
+  const planned = entries.slice(
+    0,
+    layout === "immersion" ? 1 : layout === "artdirector" ? ART_DIRECTOR_MAX_VIDEOS : 2,
+  ); // immersion: one world; others: at most 2
   // Immersion runs 2N−1 Kling jobs (dives + connectors); allow a longer wall-clock budget.
   // Motion is sequential base → I2I reveal; allow both KIE tasks and retries.
-    const phaseDeadline = Date.now() + (layout === "immersion" ? 5400000 : layout === "motion" ? 1200000 : 2520000);
+  // Art Director may ask for two clips — they render one after another, so the
+  // phase needs room for both instead of cutting the second into a fallback.
+    const phaseDeadline = Date.now() + (layout === "immersion" ? 5400000 : layout === "motion" ? 1200000 : layout === "artdirector" ? ART_DIRECTOR_VIDEO_PHASE_MS : 2520000);
 
   // Product still is regenerated lazily (ONCE) AFTER the first successful credit
   // deduction inside the loop, so we never spend external API budget on a user who
@@ -3118,7 +3150,10 @@ async function resolveGenImgMarkers(
   res: any,
   isAborted: () => boolean = () => false,
   referenceImageUrls: string[] = [],
+  budget: { maxImages?: number; maxBilled?: number; phaseMs?: number } = {},
 ): Promise<{ generated: number; creditsUsed: number }> {
+  const maxImages = budget.maxImages ?? MAX_AUTO_IMAGES;
+  const maxBilled = budget.maxBilled ?? MAX_BILLED_AUTO_IMAGES;
   const GENIMG_RE = /\{\{GENIMG:([^}]+)\}\}/g;
   const markers = new Map<string, { prompt: string; ratio: string; refIndices: number[] }>();
   for (const code of Array.from(filesMap.values())) {
@@ -3143,7 +3178,7 @@ async function resolveGenImgMarkers(
   // Always run the replacement pass below so no {{GENIMG:...}} marker can ever
   // survive into saved/deployed HTML, even if there are zero plannable markers.
   const entries = Array.from(markers.entries());
-  const planned = entries.slice(0, MAX_AUTO_IMAGES);
+  const planned = entries.slice(0, maxImages);
   const urlMap = new Map<string, string>();
   let generated = 0;
   let creditsUsed = 0;
@@ -3151,7 +3186,7 @@ async function resolveGenImgMarkers(
   let outOfCredits = false;
   const total = planned.length;
   // Generous budget: each image already retries KIE many times; leave room for a 3rd pass.
-  const phaseDeadline = Date.now() + 600000;
+  const phaseDeadline = Date.now() + (budget.phaseMs ?? 600000);
 
   const finalize = () => {
     for (const [filename, code] of Array.from(filesMap.entries())) {
@@ -3192,8 +3227,8 @@ async function resolveGenImgMarkers(
           let ikey: string | undefined;
           if (userId) {
             // Reserve a paid slot synchronously (safe under JS concurrency) so we
-            // never charge more than MAX_BILLED_AUTO_IMAGES even if GENIMG > 6.
-            const canBill = billedImageCount < MAX_BILLED_AUTO_IMAGES;
+            // never charge more than the billing cap even if GENIMG markers exceed it.
+            const canBill = billedImageCount < maxBilled;
             if (canBill) {
               billedImageCount += 1;
               ikey = `auto-img-${projectId}-${runKey}-${crypto.createHash("md5").update(raw).digest("hex").slice(0, 8)}`;
@@ -5092,14 +5127,17 @@ export async function registerRoutes(
       // Interactive new sites also spend video (120) + up to 6 images × 15 during the run.
       // Gate on the estimated total so users don't start with only the site-create balance.
       if (isNewSite && interactiveMode) {
+        const isArtDirectorEstimate = interactiveStyle === "artdirector";
+        const estimateVideos = isArtDirectorEstimate ? ART_DIRECTOR_MAX_VIDEOS : 1;
+        const estimateImages = isArtDirectorEstimate ? ART_DIRECTOR_MAX_IMAGES : MAX_BILLED_AUTO_IMAGES;
         const interactiveEstimate =
-          NEW_SITE_GENERATION_COST + SCROLL_ANIM_COST + AUTO_IMAGE_COST * MAX_BILLED_AUTO_IMAGES;
+          NEW_SITE_GENERATION_COST + SCROLL_ANIM_COST * estimateVideos + AUTO_IMAGE_COST * estimateImages;
         const balUser = await storage.getUser(user.id);
         const bal = balUser?.credits ?? 0;
         if (bal < interactiveEstimate) {
           dropGenerateSlot?.();
           return res.status(402).json({
-            message: `Для интерактивного режима нужно минимум ${interactiveEstimate} токенов (сайт + видео + до 6 фото). У вас ${bal}.`,
+            message: `Для интерактивного режима нужно минимум ${interactiveEstimate} токенов (сайт + ${estimateVideos === 1 ? "видео" : `до ${estimateVideos} видео`} + до ${estimateImages} фото). У вас ${bal}.`,
             required: interactiveEstimate,
             newBalance: bal,
           });
@@ -5171,9 +5209,14 @@ export async function registerRoutes(
       // contradicted patch instructions, and made Gemini V2 answer with prose.
       let systemContent = isNewSite ? SYSTEM_PROMPT : EDIT_SYSTEM_PROMPT;
       const isAnimationalMode = !!(interactiveMode && isNewSite && interactiveStyle === "animational");
+      const isArtDirectorMode = !!(interactiveMode && isNewSite && interactiveStyle === "artdirector");
       if (isAnimationalMode) {
         // Full replace — own prompt, no master SYSTEM_PROMPT / interactive SCROLLANIM rules.
         systemContent = ANIMATIONAL_SYSTEM_PROMPT;
+      } else if (isArtDirectorMode) {
+        // Full replace — the whole point of this mode is no master section checklist
+        // and no server-built hero skeleton.
+        systemContent = ART_DIRECTOR_SYSTEM_PROMPT;
       }
       // Professional / Claude V1: learn from Leonxlnx/taste-skill on GitHub, then build.
       if (isNewSite && !isAnimationalMode && !useGemini) {
@@ -5260,7 +5303,7 @@ export async function registerRoutes(
       if (researchData) {
         systemContent += `\n\n═══ РЕЗУЛЬТАТЫ DEEP RESEARCH ═══\nИспользуй следующие РЕАЛЬНЫЕ факты и данные из исследования при создании контента сайта:\n${researchData}\n═══ КОНЕЦ ИССЛЕДОВАНИЯ ═══\n`;
       }
-      if (isNewSite && !isAnimationalMode && multiPagesData && typeof multiPagesData === "string" && multiPagesData.trim()) {
+      if (isNewSite && !isAnimationalMode && !isArtDirectorMode && multiPagesData && typeof multiPagesData === "string" && multiPagesData.trim()) {
         const pageList = multiPagesData.split(",").map((p: string) => p.trim()).filter(Boolean);
         const fileNames = pageList.map((p: string) => {
           const slug = p.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
@@ -5270,7 +5313,7 @@ export async function registerRoutes(
       } else if (isNewSite) {
         systemContent += `\n\n⚠️ ОДНОСТРАНИЧНЫЙ РЕЖИМ: Создай ОДИН файл index.html. ЗАПРЕЩЕНО использовать маркеры --- FILE: --- или разбивать на несколько файлов. Весь сайт — один HTML-документ.`;
       }
-      if (interactiveMode && isNewSite && !isAnimationalMode) {
+      if (interactiveMode && isNewSite && !isAnimationalMode && !isArtDirectorMode) {
         const isSplitLayout = interactiveStyle === "split";
         const hasProductImage = !!absoluteProductImageUrl;
         if (isSplitLayout) {
@@ -6748,13 +6791,21 @@ ${designAnalysis}
           } else if (interactiveStyle === "motion") {
             videoPromptAuto = "premium niche brand scene in full vivid color, iconic commercial subject, cinematic lighting /// same subject and framing in richer alternate color mood, brighter premium commercial lighting, day-to-night or calm-to-energy metamorphosis reveal";
             textsAuto = "Прикоснись::Открой другую сторону бренда||Характер::Сила в деталях||Преображение::Когда результат виден сразу||Твой ход::Начни прямо сейчас";
+          } else if (interactiveStyle === "artdirector") {
+            // Free-form mode: the agent writes its own hero copy, so no text pairs.
+            videoPromptAuto = "slow cinematic push-in through a premium brand environment, volumetric light and drifting atmospheric haze, calm negative space for overlaid typography, photorealistic, no text, no watermark";
+            textsAuto = "";
           } else {
             videoPromptAuto = absoluteProductImageUrl
               ? "premium product with soft cinematic accents — gentle drifting petals and slow sweeping light, studio lighting, clean solid background, cinematic macro detail"
               : "breathtaking cinematic forward flight into the scene, volumetric god rays and drifting atmospheric haze, the camera revealing depth and grandeur, epic film-still lighting, photorealistic";
             textsAuto = "Добро пожаловать::Откройте что-то новое||Наше качество::Только лучшее||Начните прямо сейчас::Попробуйте сегодня";
           }
-          const markerAuto = `\n{{SCROLLANIM:${videoPromptAuto}|${textsAuto}}}\n`;
+          // Art Director markers must sit inside a positioned, sized container —
+          // a bare marker after </header> would absolutely-position the video over <body>.
+          const markerAuto = interactiveStyle === "artdirector"
+            ? `\n<section style="position:relative;height:100svh;min-height:520px;overflow:hidden;">{{SCROLLANIM:${videoPromptAuto}}}<div style="position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.5),rgba(0,0,0,.2) 45%,rgba(0,0,0,.65));"></div></section>\n`
+            : `\n{{SCROLLANIM:${videoPromptAuto}|${textsAuto}}}\n`;
           if (code0.includes("</header>")) code0 = code0.replace("</header>", `</header>${markerAuto}`);
           else if (/<body[^>]*>/i.test(code0)) code0 = code0.replace(/<body[^>]*>/i, (m) => `${m}${markerAuto}`);
           else code0 = markerAuto + code0;
@@ -6836,7 +6887,22 @@ ${designAnalysis}
 
       // Always finish image generation even if the client disconnected — the site must
       // be saved complete. SSE status pings are already soft-fail via the write wrapper.
-      const genImgResult = await resolveGenImgMarkers(genFilesMap, project.id, user?.id, genRunKey, res, () => false, referenceImageUrlsForGen);
+      const genImgResult = await resolveGenImgMarkers(
+        genFilesMap,
+        project.id,
+        user?.id,
+        genRunKey,
+        res,
+        () => false,
+        referenceImageUrlsForGen,
+        interactiveStyle === "artdirector"
+          ? {
+              maxImages: ART_DIRECTOR_MAX_IMAGES,
+              maxBilled: ART_DIRECTOR_MAX_IMAGES,
+              phaseMs: ART_DIRECTOR_IMAGE_PHASE_MS,
+            }
+          : {},
+      );
       mainHtmlCode = genFilesMap.get("index.html") ?? mainHtmlCode;
       // Persist secondary pages that received GENIMG / IMGPENDING resolution
       for (const [filename, code] of Array.from(genFilesMap.entries())) {

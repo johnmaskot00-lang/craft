@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-export type InteractiveStyleId = "parallax" | "split" | "action" | "motion" | "trigger";
+export type InteractiveStyleId = "parallax" | "split" | "action" | "motion" | "trigger" | "artdirector";
 
 /** Token estimate for Interactive create (site + hero video + up to 6 images). */
 export const SITE_CREATE_COST = 100;
@@ -8,9 +8,18 @@ export const VIDEO_ANIMATION_COST = 120;
 export const IMAGE_TOKEN_COST = 15;
 export const MAX_BILLED_IMAGES = 6;
 
-/** Estimated total for video Interactive styles: 100 + 120 + 6×15 = 310. */
-export function interactiveModeTokenCost(_style?: InteractiveStyleId): number {
-  return SITE_CREATE_COST + VIDEO_ANIMATION_COST + IMAGE_TOKEN_COST * MAX_BILLED_IMAGES;
+/** «Арт Директор» gets a bigger media budget: up to 2 clips and 8 photos. */
+export const ART_DIRECTOR_MAX_VIDEOS = 2;
+export const ART_DIRECTOR_MAX_IMAGES = 8;
+
+/**
+ * Upper bound shown before generation. Charging happens per resolved marker, so a
+ * site that uses fewer photos or one clip costs less than the estimate.
+ */
+export function interactiveModeTokenCost(style?: InteractiveStyleId): number {
+  const videos = style === "artdirector" ? ART_DIRECTOR_MAX_VIDEOS : 1;
+  const images = style === "artdirector" ? ART_DIRECTOR_MAX_IMAGES : MAX_BILLED_IMAGES;
+  return SITE_CREATE_COST + VIDEO_ANIMATION_COST * videos + IMAGE_TOKEN_COST * images;
 }
 
 /** Real hero demo clips for Interactive style cards (public/ static). */
@@ -27,6 +36,7 @@ export const INTERACTIVE_STYLES: Array<{
   desc: string;
   tokenCost: number;
 }> = [
+  { id: "artdirector", label: "Арт Директор", desc: "Свобода агенту · до 2 видео и 8 фото", tokenCost: interactiveModeTokenCost("artdirector") },
   { id: "parallax", label: "Параллакс", desc: "Видео на весь экран, текст поверх", tokenCost: VIDEO_STYLE_COST },
   { id: "split", label: "Сплит", desc: "Текст слева, продукт справа", tokenCost: VIDEO_STYLE_COST },
   { id: "action", label: "Экшн", desc: "Слоумо и облёт камеры", tokenCost: VIDEO_STYLE_COST },
@@ -118,6 +128,22 @@ function HeroPreview({ id, playing }: { id: InteractiveStyleId; playing: boolean
         <div className="isp-parallax-copy isp-action-copy">
           <span className="isp-kicker">ACTION</span>
           <span className="isp-title">Slow-mo orbit</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (id === "artdirector") {
+    return (
+      <div className="isp-stage isp-ad" data-playing={playing ? "1" : "0"}>
+        <div className="isp-ad-cell isp-ad-c1" style={{ animationPlayState: play }} />
+        <div className="isp-ad-cell isp-ad-c2" style={{ animationPlayState: play }} />
+        <div className="isp-ad-cell isp-ad-c3" style={{ animationPlayState: play }} />
+        <div className="isp-ad-cell isp-ad-c4" style={{ animationPlayState: play }} />
+        <div className="isp-ad-sweep" style={{ animationPlayState: play }} />
+        <div className="isp-parallax-copy isp-ad-copy">
+          <span className="isp-kicker">ART DIRECTOR</span>
+          <span className="isp-title">Свой дизайн каждый раз</span>
         </div>
       </div>
     );
@@ -659,6 +685,35 @@ const ISP_CSS = `
   animation: isp-streak 4s linear infinite;
 }
 .isp-action-copy { bottom: 10%; left: 8%; }
+
+/* Art Director — blocks assembling themselves into a bespoke layout */
+.isp-ad { background: radial-gradient(120% 100% at 25% 15%, #23232b 0%, #131318 55%, #08080b 100%); }
+.isp-ad-cell {
+  position: absolute;
+  border-radius: 7px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: linear-gradient(150deg, rgba(255,255,255,0.14), rgba(255,255,255,0.03));
+  opacity: 0;
+  animation: isp-ad-in 5s ease-in-out infinite;
+}
+.isp-ad-c1 { left: 7%; top: 13%; width: 40%; height: 42%; animation-delay: 0s; }
+.isp-ad-c2 { right: 7%; top: 13%; width: 40%; height: 24%; animation-delay: .35s; background: linear-gradient(150deg, rgba(255,66,66,0.5), rgba(183,66,255,0.28)); }
+.isp-ad-c3 { right: 7%; top: 41%; width: 40%; height: 14%; animation-delay: .7s; }
+.isp-ad-c4 { left: 7%; top: 59%; right: 7%; width: auto; height: 12%; animation-delay: 1.05s; background: linear-gradient(90deg, rgba(66,165,255,0.4), rgba(66,230,255,0.16)); }
+.isp-ad-sweep {
+  position: absolute; inset: 0;
+  background: linear-gradient(105deg, transparent 42%, rgba(255,255,255,0.14) 50%, transparent 58%);
+  background-size: 220% 100%;
+  animation: isp-streak 5s linear infinite;
+  pointer-events: none;
+}
+.isp-ad-copy { bottom: 9%; left: 7%; }
+@keyframes isp-ad-in {
+  0%   { opacity: 0; transform: translateY(10px) scale(0.96); }
+  14%  { opacity: 1; transform: translateY(0) scale(1); }
+  76%  { opacity: 1; transform: translateY(0) scale(1); }
+  92%, 100% { opacity: 0; transform: translateY(-6px) scale(0.98); }
+}
 
 /* Motion */
 .isp-motion {

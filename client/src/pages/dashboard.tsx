@@ -49,8 +49,6 @@ import {
 
 /** Must match server NEW_SITE_GENERATION_COST — create is blocked until balance covers a new site. */
 const NEW_SITE_COST = 100;
-/** Interactive: site (100) + video anim (120) + up to 6 images × 15. */
-const INTERACTIVE_SITE_COST = interactiveModeTokenCost();
 const PENDING_CREATE_KEY = "craft_pending_create_after_pay";
 /** Autosaved create-modal draft (prompt/title/mode) so closing the dialog doesn't lose typing. */
 const CREATE_DRAFT_KEY = "craft_create_modal_draft";
@@ -392,7 +390,9 @@ export default function DashboardPage() {
               const u = queryClient.getQueryData<any>(["/api/auth/user"]);
               const credits = u?.credits ?? 0;
               const need =
-                draft.selectedMode === "interactive" ? INTERACTIVE_SITE_COST : NEW_SITE_COST;
+                draft.selectedMode === "interactive"
+                  ? interactiveModeTokenCost(draft.interactiveStyle)
+                  : NEW_SITE_COST;
               if (credits >= need) {
                 setTopUpFromCreate(false);
                 setShowTopUpModal(false);
@@ -663,7 +663,7 @@ export default function DashboardPage() {
   ]);
 
   const createTokenCost =
-    selectedMode === "interactive" ? INTERACTIVE_SITE_COST : NEW_SITE_COST;
+    selectedMode === "interactive" ? interactiveModeTokenCost(interactiveStyle) : NEW_SITE_COST;
 
   const requestCreateProject = () => {
     if ((user?.credits ?? 0) < createTokenCost) {
@@ -2079,9 +2079,7 @@ export default function DashboardPage() {
             </DialogHeader>
             <p style={{ fontSize: '0.85rem', color: 'rgba(255,255,255,0.45)', marginTop: '0.4rem', marginBottom: isMobile ? '1.25rem' : '1.25rem' }}>
               {topUpFromCreate
-                ? `Создание сайта спишет около ${
-                    selectedMode === "interactive" ? INTERACTIVE_SITE_COST : NEW_SITE_COST
-                  } токенов. Сначала выберите тариф — после оплаты проект создастся автоматически.`
+                ? `Создание сайта спишет около ${createTokenCost} токенов. Сначала выберите тариф — после оплаты проект создастся автоматически.`
                 : "Выберите подходящий тариф для пополнения токенов"}
             </p>
             <div style={{ marginBottom: isMobile ? '1.25rem' : '1.5rem' }}>
