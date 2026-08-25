@@ -273,9 +273,15 @@ export function ensureThreeUiRuntime(html: string): string {
   if (/data-craft-threeui-agent\s*=\s*["']1["']/i.test(out) && !hasAgentCode) {
     out = out.replace(/\s*data-craft-threeui-agent\s*=\s*["']1["']/gi, "");
     console.warn("[ThreeUI] stripped hollow data-craft-threeui-agent (no WebGLRenderer in HTML)");
-  } else if (hasAgentCode && /data-craft-threeui\b/i.test(out) && !/data-craft-threeui-has-code\s*=/i.test(out)) {
+  } else if (
+    hasAgentCode &&
+    /data-craft-threeui(?![\w-])/i.test(out) &&
+    !/data-craft-threeui-has-code\s*=/i.test(out)
+  ) {
+    // Match standalone data-craft-threeui only — NOT inside data-craft-threeui-agent
+    // (old regex used \b before "-agent" and produced has-code="1"-agent="1").
     out = out.replace(
-      /(<[^>]*\bdata-craft-threeui\b)([^>]*>)/i,
+      /(<[a-z][\w-]*\b[^>]*?\bdata-craft-threeui(?![\w-])[^>]*)(>)/i,
       `$1 data-craft-threeui-has-code="1"$2`,
     );
   }
