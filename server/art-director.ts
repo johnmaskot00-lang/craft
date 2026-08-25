@@ -34,7 +34,7 @@ export function buildArtDirectorVideoHtml(videoUrl: string): string {
   return `<section data-craft-scrollanim="1" data-layout="artdirector" data-video="${src}" aria-hidden="true" style="${SLOT_STYLE}">
   <video class="${VIDEO_CLASS}" src="${src}" autoplay muted loop playsinline preload="auto" disablepictureinpicture></video>
 </section>
-<style>section[data-layout="artdirector"]{${SLOT_STYLE}}video.${VIDEO_CLASS}{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;border:0;background:#0a0a0a;z-index:0;}</style>
+<style>section[data-layout="artdirector"]{${SLOT_STYLE}}video.${VIDEO_CLASS}{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;min-width:100%;min-height:100%;object-fit:cover;object-position:center center;display:block;border:0;background:#0a0a0a;z-index:0;transform:none;max-width:none;}</style>
 <script>(function(){if(window.__craftAdVideo)return;window.__craftAdVideo=1;
 function ready(){try{window.__craftAnimReady=true;window.dispatchEvent(new Event('craft:anim-ready'));window.dispatchEvent(new Event('craft:frames-ready'));}catch(e){}}
 function init(){var v=document.querySelectorAll('video.${VIDEO_CLASS}');if(!v.length){ready();return;}
@@ -227,7 +227,7 @@ export const ART_DIRECTOR_SYSTEM_PROMPT = `Ты — АРТ-ДИРЕКТОР и f
 - Кинетическая типографика: бегущая строка (marquee), разрезанные по буквам заголовки, масштабирование текста от скролла
 - Sticky-секция, внутри которой контент меняется по мере прокрутки
 - Параллакс слоёв (transform: translate3d от scrollY, через requestAnimationFrame)
-- Кастомный курсор, магнитные кнопки, hover-искажение карточек
+- Магнитные кнопки и hover-искажение карточек (кастомный курсор ЗАПРЕЩЁН — не делай cursor:none и div-следователь)
 - Счётчики цифр, которые докручиваются при появлении в кадре
 - Плавные переходы clip-path / mask между секциями
 - Canvas 2D или собственный WebGL-шейдер как живой фон (частицы, шумовое поле, градиентная сетка)
@@ -259,9 +259,11 @@ export const ART_DIRECTOR_SYSTEM_PROMPT = `Ты — АРТ-ДИРЕКТОР и f
 
 ═══ ЧЕГО НЕ ДЕЛАТЬ ═══
 - ❌ Фиолетовый градиент + Inter/Roboto/Arial/Montserrat + эмодзи вместо иконок — это выдаёт шаблон
+- ❌ Кастомный курсор (cursor:none + круг/точка, следующая за мышью) — запрещён навсегда
 - ❌ Hero «центр + 2 CTA + метрики» на каждом сайте
 - ❌ Hero на {{GENIMG}} / статичном фото вместо {{SCROLLANIM}} — видео обязано быть видно
 - ❌ Сплошной чёрный оверлей, из-за которого видео не видно
+- ❌ Сдвиг/translate всего hero-видео влево или вправо — видео всегда object-fit:cover; object-position:center; на весь контейнер
 - ❌ Одинаковый паттерн «текст слева 45% / картинка справа 55%» в каждой секции
 - ❌ Узкая тёмная плашка с текстом поверх фото
 - ❌ Блок «О нас / Услуги / Отзывы / FAQ / Контакты» просто потому, что так принято — бери только то, что нужно этому бренду

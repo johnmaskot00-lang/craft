@@ -477,6 +477,17 @@ function usesMp4Scrub(layout: ScrollAnimLayout): boolean {
 }
 
 /**
+ * Runtime sticky heal for interactive heroes.
+ *
+ * NEVER mutate html/body overflow: setting overflow-x to `clip` while overflow-y
+ * stays `visible` makes the browser compute overflow-y as `auto`, which adds a
+ * classic scrollbar and shifts the whole page (video) left by ~15px.
+ * Only rewrite intermediate `overflow:hidden` wrappers as a single `overflow:clip`.
+ * Art Director slots are absolute (not sticky) — skip them.
+ */
+const CRAFT_STICKY_OVERFLOW_FIX_JS = `function craftFixStickyOverflow(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;for(var i=0;i<s.length;i++){var root=s[i];if(root.getAttribute('data-layout')==='artdirector')continue;var el=root.parentElement;while(el&&el.nodeType===1&&el!==document.documentElement&&el!==document.body){var cs=getComputedStyle(el);if(cs.overflow==='hidden'||(cs.overflowX==='hidden'&&cs.overflowY==='hidden')){el.style.setProperty('overflow','clip');}else if(cs.overflowY==='hidden'&&cs.overflowX!=='hidden'&&cs.overflowX!=='scroll'&&cs.overflowX!=='auto'){el.style.setProperty('overflow-y','clip');}el=el.parentElement;}}}`;
+
+/**
  * Client scrub engine shared by parallax/split/action (and mirrored in site3d).
  * Loads the clip as a Blob (always seekable) — same approach as immersion's scroll-world.
  */
@@ -2390,7 +2401,7 @@ function buildScrollAnimHtml(
   //    section (marked with data-craft-scrollanim) has scrolled above the header.
   //    Uses a dedicated attribute (not the generic data-frames) to avoid clashes,
   //    and a header-height-aware threshold instead of a magic number.
-  const navCtl = `\n<style>header{transition:background .45s ease,background-color .45s ease,backdrop-filter .45s ease,-webkit-backdrop-filter .45s ease,border-color .45s ease,box-shadow .45s ease;}body:not(.craft-anim-passed) header{background:transparent!important;background-color:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;border-color:transparent!important;box-shadow:none!important;}</style>\n<script>(function(){if(window.__craftNavCtl)return;window.__craftNavCtl=true;function fixSticky(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;for(var i=0;i<s.length;i++){var el=s[i];while(el&&el.nodeType===1&&el!==document.documentElement){var cs=getComputedStyle(el);if(cs.overflowX==='hidden')el.style.overflowX='clip';if(cs.overflowY==='hidden')el.style.overflowY='clip';el=el.parentElement;}}var de=document.documentElement,b=document.body;[de,b].forEach(function(n){if(!n)return;var c=getComputedStyle(n);if(c.overflowX==='hidden')n.style.overflowX='clip';if(c.overflowY==='hidden')n.style.overflowY='clip';});}function u(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;var h=document.querySelector('header');var th=h?h.offsetHeight:64;var passed=true;for(var i=0;i<s.length;i++){if(s[i].getBoundingClientRect().bottom>th){passed=false;break;}}document.body.classList.toggle('craft-anim-passed',passed);}window.addEventListener('scroll',u,{passive:true});window.addEventListener('resize',u);if(document.readyState!=='loading'){fixSticky();u();}else{document.addEventListener('DOMContentLoaded',function(){fixSticky();u();});}fixSticky();u();})();</script>`;
+  const navCtl = `\n<style>header{transition:background .45s ease,background-color .45s ease,backdrop-filter .45s ease,-webkit-backdrop-filter .45s ease,border-color .45s ease,box-shadow .45s ease;}body:not(.craft-anim-passed) header{background:transparent!important;background-color:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;border-color:transparent!important;box-shadow:none!important;}</style>\n<script>(function(){if(window.__craftNavCtl)return;window.__craftNavCtl=true;${CRAFT_STICKY_OVERFLOW_FIX_JS}function u(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;var h=document.querySelector('header');var th=h?h.offsetHeight:64;var passed=true;for(var i=0;i<s.length;i++){if(s[i].getBoundingClientRect().bottom>th){passed=false;break;}}document.body.classList.toggle('craft-anim-passed',passed);}window.addEventListener('scroll',u,{passive:true});window.addEventListener('resize',u);function boot(){craftFixStickyOverflow();u();}if(document.readyState!=='loading')boot();else document.addEventListener('DOMContentLoaded',boot);craftFixStickyOverflow();u();})();</script>`;
 
   // «Арт Директор»: no server-built hero. Drop the marker's slot into whatever
   // container the agent designed and let its own CSS own the composition.
@@ -2432,7 +2443,7 @@ ${layers}
   @import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@700;800&family=Manrope:wght@400;500;600&display=swap');
   .${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;}
   .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#0a0a0a;}
-  .${cid}-video{position:absolute;inset:0;width:100%;height:100%;display:block;object-fit:cover;background:#0a0a0a;}
+  .${cid}-video{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;min-width:100%;min-height:100%;display:block;object-fit:cover;object-position:center center;background:#0a0a0a;transform:none;max-width:none;}
   .${cid}-veil{position:absolute;inset:0;pointer-events:none;background:linear-gradient(to top,rgba(0,0,0,0.62) 0%,rgba(0,0,0,0.18) 38%,rgba(0,0,0,0) 65%);}
   .${cid}-overlays{position:absolute;inset:0;pointer-events:none;}
   .${cid}-text{position:absolute;left:clamp(36px,5.5vw,96px);bottom:clamp(56px,8vh,108px);top:auto;transform:none;width:min(680px,86vw);text-align:left;opacity:0;will-change:opacity,transform;}
@@ -2458,7 +2469,7 @@ ${layers}
   @import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@700;800&family=Manrope:wght@400;500;600&display=swap');
   .${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;}
   .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#f8f7f4;}
-  .${cid}-video{position:absolute;inset:0;width:100%;height:100%;display:block;object-fit:cover;background:#111;}
+  .${cid}-video{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;min-width:100%;min-height:100%;display:block;object-fit:cover;object-position:center center;background:#111;transform:none;max-width:none;}
   .${cid}-panel{position:absolute;top:0;left:0;width:52%;height:100%;pointer-events:none;display:flex;align-items:center;padding:0 clamp(32px,5.5vw,96px);background:linear-gradient(to right,rgba(248,247,244,0.9) 0%,rgba(248,247,244,0.74) 42%,rgba(248,247,244,0) 100%);}
   .${cid}-text{position:absolute;left:clamp(32px,5.5vw,96px);top:50%;transform:translateY(-50%);width:min(50vw,640px);text-align:left;opacity:0;will-change:opacity,transform;}
   .${cid}-text:first-child{opacity:1;}
@@ -2890,7 +2901,7 @@ async function resolveScrollAnimMarkers(
       }
       if (pair?.baseUrl && pair?.revealUrl) {
         // Build navCtl the same way as buildScrollAnimHtml (header transparency + sticky fix).
-        const navCtl = `\n<style>header{transition:background .45s ease,background-color .45s ease,backdrop-filter .45s ease,-webkit-backdrop-filter .45s ease,border-color .45s ease,box-shadow .45s ease;}body:not(.craft-anim-passed) header{background:transparent!important;background-color:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;border-color:transparent!important;box-shadow:none!important;}</style>\n<script>(function(){if(window.__craftNavCtl)return;window.__craftNavCtl=true;function fixSticky(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;for(var i=0;i<s.length;i++){var el=s[i];while(el&&el.nodeType===1&&el!==document.documentElement){var cs=getComputedStyle(el);if(cs.overflowX==='hidden')el.style.overflowX='clip';if(cs.overflowY==='hidden')el.style.overflowY='clip';el=el.parentElement;}}var de=document.documentElement,b=document.body;[de,b].forEach(function(n){if(!n)return;var c=getComputedStyle(n);if(c.overflowX==='hidden')n.style.overflowX='clip';if(c.overflowY==='hidden')n.style.overflowY='clip';});}function u(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;var h=document.querySelector('header');var th=h?h.offsetHeight:64;var passed=true;for(var i=0;i<s.length;i++){if(s[i].getBoundingClientRect().bottom>th){passed=false;break;}}document.body.classList.toggle('craft-anim-passed',passed);}window.addEventListener('scroll',u,{passive:true});window.addEventListener('resize',u);if(document.readyState!=='loading'){fixSticky();u();}else{document.addEventListener('DOMContentLoaded',function(){fixSticky();u();});}fixSticky();u();})();</script>`;
+        const navCtl = `\n<style>header{transition:background .45s ease,background-color .45s ease,backdrop-filter .45s ease,-webkit-backdrop-filter .45s ease,border-color .45s ease,box-shadow .45s ease;}body:not(.craft-anim-passed) header{background:transparent!important;background-color:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;border-color:transparent!important;box-shadow:none!important;}</style>\n<script>(function(){if(window.__craftNavCtl)return;window.__craftNavCtl=true;${CRAFT_STICKY_OVERFLOW_FIX_JS}function u(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;var h=document.querySelector('header');var th=h?h.offsetHeight:64;var passed=true;for(var i=0;i<s.length;i++){if(s[i].getBoundingClientRect().bottom>th){passed=false;break;}}document.body.classList.toggle('craft-anim-passed',passed);}window.addEventListener('scroll',u,{passive:true});window.addEventListener('resize',u);function boot(){craftFixStickyOverflow();u();}if(document.readyState!=='loading')boot();else document.addEventListener('DOMContentLoaded',boot);craftFixStickyOverflow();u();})();</script>`;
         replaceMap.set(
           raw,
           buildMotionRevealHtml(pair.baseUrl, pair.revealUrl, parsed.texts, navCtl, csaEsc, {
@@ -4033,6 +4044,7 @@ const SYSTEM_PROMPT = `Ты — креативный frontend-разработч
 - ❌ Line-height меньше 1.6 для абзацев — строки слипаются
 - ❌ Max-width текстового блока больше 720px — слишком длинные строки трудно читать
 - ❌ Белый или светлый текст на светлом фоне без достаточного контраста
+- ❌ Кастомный курсор (cursor:none + круг/точка/follower за мышью) — запрещён; оставляй системный курсор
 
 ПРАВИЛЬНЫЕ ПАТТЕРНЫ — ВСЕГДА используй:
 - ✅ HERO: полноширинный фон (фото/градиент/видео), текст по центру или слева с max-width 700px, padding достаточный, контрастный цвет текста относительно фона
@@ -8854,7 +8866,7 @@ ${designAnalysis}
         // never break position:sticky via overflow-x:hidden (convert hidden→clip at runtime).
         if (/data-craft-scrollanim/.test(result)) {
           result = result.replace(/<script[^>]*data-craft-stickyfix[^>]*>[\s\S]*?<\/script>/gi, "");
-          const stickyFix = `<script data-craft-stickyfix>(function(){function f(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;for(var i=0;i<s.length;i++){var el=s[i];while(el&&el.nodeType===1&&el!==document.documentElement){var cs=getComputedStyle(el);if(cs.overflowX==='hidden')el.style.overflowX='clip';if(cs.overflowY==='hidden')el.style.overflowY='clip';el=el.parentElement;}}var de=document.documentElement,b=document.body;[de,b].forEach(function(n){if(!n)return;var c=getComputedStyle(n);if(c.overflowX==='hidden')n.style.overflowX='clip';if(c.overflowY==='hidden')n.style.overflowY='clip';});}if(document.readyState!=='loading')f();else document.addEventListener('DOMContentLoaded',f);})();<\/script>`;
+          const stickyFix = `<script data-craft-stickyfix>(function(){${CRAFT_STICKY_OVERFLOW_FIX_JS}if(document.readyState!=='loading')craftFixStickyOverflow();else document.addEventListener('DOMContentLoaded',craftFixStickyOverflow);})();<\/script>`;
           if (result.includes("</body>")) result = result.replace("</body>", stickyFix + "</body>");
           else result += stickyFix;
         }
