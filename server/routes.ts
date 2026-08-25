@@ -7237,7 +7237,13 @@ ${designAnalysis}
         genFilesMap.set("index.html", mainHtmlCode);
       }
       if (interactiveStyle === "threeui") {
+        const beforeThree = mainHtmlCode;
         mainHtmlCode = ensureThreeUiRuntime(mainHtmlCode);
+        if (!/new\s+THREE\s*\.\s*WebGLRenderer|THREE\s*\.\s*WebGLRenderer\s*\(/i.test(beforeThree)) {
+          console.warn(
+            `[ThreeUI] agent HTML had no WebGLRenderer — bootstrap/salvage applied (project ${project.id})`,
+          );
+        }
         genFilesMap.set("index.html", mainHtmlCode);
       }
 
