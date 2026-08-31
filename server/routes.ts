@@ -3919,6 +3919,10 @@ const MODEL_3D_COST = 100;
 
 const DAILY_PUBLISH_COST = 35;
 
+function hasBillableCustomDomain(customDomain?: string | null): boolean {
+  return Boolean(String(customDomain || "").trim());
+}
+
 const EDIT_SYSTEM_PROMPT = `Ты — автономный coding agent для существующего сайта, аналог Replit Agent.
 
 Твоя единственная задача — НАЙТИ нужный код и РЕАЛЬНО ВНЕСТИ все изменения из запроса пользователя.
@@ -8898,39 +8902,42 @@ ${designAnalysis}
         });
       }
 
-      const user = await storage.getUser((req.user as any).id);
-      if (!user) return res.status(401).json({ message: "Пользователь не найден" });
-
-
-      if (user.credits < DAILY_PUBLISH_COST) {
-        return res.status(403).json({ message: "Недостаточно токенов для публикации. Ежедневная стоимость хостинга — 35 токенов/сайт в день." });
-      }
-
       const alreadyLive = project.publishStatus === "published" || project.publishStatus === "publishing" || project.publishStatus === "suspended";
 
-      // Serialize publish charges per user to prevent concurrent double-charges
-      await db.execute(sql`SELECT pg_advisory_lock(${1000000 + user.id})`);
-      try {
-      // Charge first hosting day on new publish (daily cron continues afterwards)
-      if (!alreadyLive) {
-        const today = new Date().toISOString().slice(0, 10);
-        const publishCharge = await storage.deductCredits(
-          user.id,
-          DAILY_PUBLISH_COST,
-          "daily_publish",
-          `publish-start-${projectId}-${today}`,
-        );
-        if (!publishCharge.success) {
+      // Tech *.yandexcloud.net preview is free — hosting is billed only with a custom domain.
+      const billHosting = hasBillableCustomDomain(project.customDomain);
+      if (billHosting) {
+        const user = await storage.getUser((req.user as any).id);
+        if (!user) return res.status(401).json({ message: "Пользователь не найден" });
+        if (!alreadyLive && user.credits < DAILY_PUBLISH_COST) {
           return res.status(403).json({
-            message: "Недостаточно токенов для публикации. Ежедневная стоимость хостинга — 35 токенов/сайт в день.",
-            newBalance: publishCharge.newBalance,
+            message: "Недостаточно токенов для публикации на своём домене. Хостинг — 35 токенов/сайт в день.",
           });
         }
-      }
 
-      await storage.updateProject(projectId, { publishStatus: "publishing" });
-      } finally {
-        try { await db.execute(sql`SELECT pg_advisory_unlock(${1000000 + user.id})`); } catch {}
+        await db.execute(sql`SELECT pg_advisory_lock(${1000000 + user.id})`);
+        try {
+          if (!alreadyLive) {
+            const today = new Date().toISOString().slice(0, 10);
+            const publishCharge = await storage.deductCredits(
+              user.id,
+              DAILY_PUBLISH_COST,
+              "daily_publish",
+              `publish-start-${projectId}-${today}`,
+            );
+            if (!publishCharge.success) {
+              return res.status(403).json({
+                message: "Недостаточно токенов для публикации на своём домене. Хостинг — 35 токенов/сайт в день.",
+                newBalance: publishCharge.newBalance,
+              });
+            }
+          }
+          await storage.updateProject(projectId, { publishStatus: "publishing" });
+        } finally {
+          try { await db.execute(sql`SELECT pg_advisory_unlock(${1000000 + user.id})`); } catch {}
+        }
+      } else {
+        await storage.updateProject(projectId, { publishStatus: "publishing" });
       }
 
       const extraFiles = await storage.getProjectFiles(projectId);
@@ -9413,6 +9420,20 @@ ${fullHtml}`;
       }
 
       const oldDomain = project.customDomain;
+      const isFirstCustomDomain = !hasBillableCustomDomain(oldDomain);
+      const userId = (req.user as any).id as number;
+
+      if (isFirstCustomDomain) {
+        const user = await storage.getUser(userId);
+        if (!user) return res.status(401).json({ message: "Пользователь не найден" });
+        if (user.credits < DAILY_PUBLISH_COST) {
+          return res.status(403).json({
+            message: "Недостаточно токенов для привязки домена. Хостинг на своём домене — 35 токенов/сайт в день.",
+            newBalance: user.credits,
+          });
+        }
+      }
+
       if (oldDomain && oldDomain.replace(/^www\./, "") !== apexDomain) {
         removeCustomDomain(oldDomain, project.ycStoragePoolId).catch((e) =>
           console.warn("[domain change] cleanup old domain non-fatal:", e),
@@ -9427,6 +9448,25 @@ ${fullHtml}`;
         customDomain: apexDomain,
         ycStoragePoolId: result.ycStoragePoolId,
       });
+
+      if (isFirstCustomDomain) {
+        const today = new Date().toISOString().slice(0, 10);
+        const domainCharge = await storage.deductCredits(
+          userId,
+          DAILY_PUBLISH_COST,
+          "daily_publish",
+          `domain-start-${projectId}-${today}`,
+        );
+        if (!domainCharge.success) {
+          return res.status(403).json({
+            message: "Домен привязан, но не удалось списать токены за хостинг. Пополните баланс — иначе сайт будет приостановлен в полночь.",
+            newBalance: domainCharge.newBalance,
+            added: true,
+            ...result,
+          });
+        }
+      }
+
       res.json(result);
     } catch (err: any) {
       res.status(500).json({ message: err.message || "Ошибка добавления домена" });
@@ -10240,7 +10280,9 @@ ${fullHtml}`;
         if (!user) continue;
 
         const userProjects = await storage.getProjectsByUser(userId);
-        const publishedProjects = userProjects.filter(p => p.publishStatus === "published");
+        const publishedProjects = userProjects.filter(
+          (p) => p.publishStatus === "published" && hasBillableCustomDomain(p.customDomain),
+        );
 
         for (const proj of publishedProjects) {
           const idempotencyKey = `daily-publish-${proj.id}-${today}`;

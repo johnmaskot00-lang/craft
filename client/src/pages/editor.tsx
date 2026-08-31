@@ -1576,6 +1576,7 @@ export default function EditorPage() {
       setDomainResult({ added: true, instructions: true });
       setDomainVerified(data.verified || false);
       if (data.aRecordIp) setDomainIp(data.aRecordIp);
+      queryClient.invalidateQueries({ queryKey: ["/api/user"] });
     } catch (e: any) {
       setDomainError(e.message);
     } finally {
@@ -4875,7 +4876,11 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
               </div>
               <div>
                 <div style={{ fontSize: "1rem", fontWeight: 800, color: "#fff", letterSpacing: "-0.02em" }}>Публикация сайта</div>
-                <div style={{ fontSize: "0.72rem", color: "rgba(255,255,255,0.5)" }}>Хостинг сайта · 35 токенов/день</div>
+                <div style={{ fontSize: "0.72rem", color: "rgba(255,255,255,0.5)" }}>
+                  {project?.customDomain
+                    ? "Хостинг на своём домене · 35 токенов/день"
+                    : "Технический домен бесплатно · свой домен — 35 токенов/день"}
+                </div>
               </div>
             </div>
           </div>
@@ -4945,6 +4950,9 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
                         </Button>
                       </div>
                       <div style={{ marginTop: 7, fontSize: "0.8rem", color: "#6b7280" }}>
+                        {!project?.customDomain && (
+                          <>Привязка своего домена — 35 токенов/день. </>
+                        )}
                         Нет домена?{" "}
                         <a
                           href="https://www.reg.ru/domain/new/?rlink=reflink-32024207"
@@ -5058,6 +5066,9 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
                         </Button>
                       </div>
                       <div style={{ marginTop: 7, fontSize: "0.8rem", color: "#6b7280" }}>
+                        {!project?.customDomain && (
+                          <>Привязка своего домена — 35 токенов/день. </>
+                        )}
                         Нет домена?{" "}
                         <a
                           href="https://www.reg.ru/domain/new/?rlink=reflink-32024207"
