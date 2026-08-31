@@ -30,7 +30,10 @@ export function sitePublicOrigin(proj: {
 export function htmlFilenameToPath(filename: string): string {
   const name = String(filename || "").replace(/^\/+/, "");
   if (!name || name === "index.html") return "/";
-  if (name.endsWith("/index.html")) return `/${name.slice(0, -"index.html".length)}`;
+  if (name.endsWith("/index.html")) return `/${name.slice(0, -"index.html".length)}/`;
+  if (/^[a-z0-9][a-z0-9_-]*\.html$/i.test(name)) {
+    return `/${name.slice(0, -".html".length)}/`;
+  }
   if (!name.startsWith("/")) return `/${name}`;
   return name;
 }

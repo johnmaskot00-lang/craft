@@ -4645,6 +4645,14 @@ export async function registerRoutes(
   // (staticRequestHeaders configured on CDN resource per custom domain)
   // We proxy to the project's Yandex Object Storage bucket
   const OWN_HOSTS = new Set(["craft-ai.ru", "www.craft-ai.ru", "localhost"]);
+  function customDomainStorageCandidates(filePath: string): string[] {
+    if (filePath === "/" || filePath === "") return ["/index.html"];
+    const candidates = [filePath];
+    if (!filePath.includes(".")) {
+      candidates.push(`${filePath}.html`, `${filePath}/index.html`);
+    }
+    return [...new Set(candidates)];
+  }
   app.use(async (req, res, next) => {
     // CDN sends X-Custom-Domain header; fallback to Host for direct/legacy requests
     const xDomain = (req.headers["x-custom-domain"] || "").toString().toLowerCase().split(":")[0];
@@ -4660,8 +4668,7 @@ export async function registerRoutes(
     }
     if (!project?.vercelProjectId) return next();
     const bucket = project.vercelProjectId as string;
-    let filePath = req.path;
-    if (filePath === "/" || filePath === "") filePath = "/index.html";
+    const filePath = req.path;
     // Guard against path traversal (e.g. /%2e%2e/other-bucket/...) — the WHATWG URL
     // parser normalizes dot segments, which would allow cross-bucket reads.
     if (/(^|[\\/])\.\.([\\/]|$)|%2e|%2f|%5c/i.test(filePath)) {
@@ -4671,20 +4678,17 @@ export async function registerRoutes(
     // Responses vary by X-Custom-Domain (same URL path serves different projects) —
     // without Vary a shared cache could serve one project's content for another.
     res.setHeader("Vary", "X-Custom-Domain");
-    const s3Url = `https://storage.yandexcloud.net/${bucket}${filePath}`;
     try {
-      const upstream = await fetch(s3Url);
-      if (!upstream.ok) {
-        if (upstream.status === 404) {
-          const indexResp = await fetch(`https://storage.yandexcloud.net/${bucket}/index.html`);
-          if (indexResp.ok) {
-            res.setHeader("Content-Type", "text/html; charset=utf-8");
-            res.setHeader("Cache-Control", "public, max-age=86400");
-            res.send(Buffer.from(await indexResp.arrayBuffer()));
-            return;
-          }
+      let upstream: Response | null = null;
+      for (const candidate of customDomainStorageCandidates(filePath)) {
+        const resp = await fetch(`https://storage.yandexcloud.net/${bucket}${candidate}`);
+        if (resp.ok) {
+          upstream = resp;
+          break;
         }
-        res.status(upstream.status).send("Not found");
+      }
+      if (!upstream) {
+        res.status(404).send("Not found");
         return;
       }
       const contentType = upstream.headers.get("content-type") || "application/octet-stream";

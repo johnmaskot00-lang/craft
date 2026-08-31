@@ -8,6 +8,7 @@ import {
   ListObjectsV2Command,
   CopyObjectCommand,
 } from "@aws-sdk/client-s3";
+import { expandMultipageCleanUrlFiles } from "../shared/project-files";
 import {
   acquireStoragePool,
   bumpPoolBucketCount,
@@ -33,6 +34,7 @@ export interface DeployFile {
 }
 
 function contentTypeFor(filename: string): string {
+  if (!filename.includes(".")) return "text/html; charset=utf-8";
   const ext = (filename.split(".").pop() || "").toLowerCase();
   const map: Record<string, string> = {
     html: "text/html; charset=utf-8",
@@ -100,7 +102,6 @@ async function ensureBucketReady(
         Bucket: bucket,
         WebsiteConfiguration: {
           IndexDocument: { Suffix: "index.html" },
-          ErrorDocument: { Key: "index.html" },
         },
       }),
     );
@@ -113,7 +114,6 @@ async function ensureBucketReady(
           Bucket: bucket,
           WebsiteConfiguration: {
             IndexDocument: { Suffix: "index.html" },
-            ErrorDocument: { Key: "index.html" },
           },
         }),
       );
@@ -169,7 +169,8 @@ export async function deployFilesToBucket(
   } catch (err) {
     console.warn(`[Yandex] Failed to clear old objects in ${bucket} (non-fatal):`, err);
   }
-  for (const f of files) {
+  const expanded = expandMultipageCleanUrlFiles(files);
+  for (const f of expanded) {
     const buf = f.contentBuffer ?? Buffer.from(f.content ?? "", "utf8");
     const key = f.filename.replace(/^\/+/, "");
     await client.send(
