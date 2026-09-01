@@ -2,6 +2,7 @@ export {
   ObjectStorageService,
   ObjectNotFoundError,
   objectStorageClient,
+  YandexMediaFile,
 } from "./objectStorage";
 
 export type {

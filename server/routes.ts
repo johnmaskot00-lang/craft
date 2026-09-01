@@ -57,7 +57,8 @@ import { setupAuth } from "./auth";
 import { gemini } from "./gemini";
 import { deployToYandex, addCustomDomain, removeCustomDomain, checkDomainStatus, unpublishFromYandex, deleteProjectFromYandex, getDomainProxyIp } from "./yandex-deploy";
 import { registerSeoRoutes } from "./seo-routes";
-import { ObjectStorageService, objectStorageClient } from "./replit_integrations/object_storage";
+import { ObjectStorageService, ObjectNotFoundError, YandexMediaFile, objectStorageClient } from "./replit_integrations/object_storage";
+import { yandexMediaStorageEnabled } from "./yc-media-bucket";
 import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
 import { db } from "./db";
 import { sql } from "drizzle-orm";
@@ -296,6 +297,13 @@ async function uploadToObjectStorage(buffer: Buffer, mimeType: string, ext: stri
   }
   const objectId = crypto.randomUUID();
   const objectName = `uploads/${objectId}.${ext}`;
+
+  if (await yandexMediaStorageEnabled()) {
+    const ycFile = new YandexMediaFile(objectName, `${objectId}.${ext}`);
+    await ycFile.save(buffer, { contentType: mimeType, resumable: false });
+    return `/objects/${objectName}`;
+  }
+
   const privateDir = objectStorage.getPrivateObjectDir();
   const fullPath = `${privateDir}/${objectName}`;
   const parts = fullPath.startsWith("/") ? fullPath.slice(1).split("/") : fullPath.split("/");

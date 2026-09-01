@@ -3,6 +3,13 @@ import { randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
 import {
+  yandexMediaStorageEnabled,
+  ycMediaGetStream,
+  ycMediaHead,
+  ycMediaPut,
+  ycMediaGetBuffer,
+} from "../../yc-media-bucket";
+import {
   ObjectAclPolicy,
   ObjectPermission,
   canAccessObject,
@@ -19,9 +26,8 @@ const META = ".meta.json";
 let cachedWritablePrivateDir: string | null = null;
 
 // There is NO garbage-collector for /objects/uploads. Interactive hero frames,
-// mp4 scrub videos, motion base/reveal photos, and GENIMG assets stay on disk
-// for the lifetime of the deployment. Boot "cleanup" only touches DB tables
-// (project_versions / sessions) and HTML pending placeholders — never these files.
+// mp4 scrub videos, motion base/reveal photos, and GENIMG assets stay in object
+// storage (Yandex when enabled, else /data) for the lifetime of the deployment.
 
 function abs(p: string) {
   return path.posix.normalize(p.startsWith("/") ? p : `/${p}`);
@@ -75,6 +81,47 @@ function writablePrivateDir(): string {
   throw new Error(`No writable persistent object-storage directory (${failures.join("; ")})`);
 }
 
+export class ObjectNotFoundError extends Error {
+  constructor() {
+    super("Object not found");
+    this.name = "ObjectNotFoundError";
+    Object.setPrototypeOf(this, ObjectNotFoundError.prototype);
+  }
+}
+
+export class YandexMediaFile {
+  readonly kind = "yandex" as const;
+  constructor(public readonly key: string, public readonly name: string) {}
+  get absolutePath() {
+    return `/yandex/${this.key}`;
+  }
+  async exists(): Promise<[boolean]> {
+    const head = await ycMediaHead(this.key);
+    return [!!head];
+  }
+  async save(buf: Buffer, opts?: { contentType?: string; resumable?: boolean }) {
+    await ycMediaPut(this.key, buf, opts?.contentType || ctype(this.key));
+  }
+  createReadStream() {
+    throw new Error("Use downloadObject for Yandex media streams");
+  }
+  async download(): Promise<[Buffer]> {
+    return [await ycMediaGetBuffer(this.key)];
+  }
+  async getMetadata(): Promise<[any]> {
+    const head = await ycMediaHead(this.key);
+    if (!head) throw new ObjectNotFoundError();
+    return [{ size: head.size, contentType: head.contentType, metadata: {} }];
+  }
+  async setMetadata(_payload: { metadata?: Record<string, string> }) {}
+}
+
+export type CraftObjectFile = LocalFile | YandexMediaFile;
+
+function isYandexFile(file: CraftObjectFile): file is YandexMediaFile {
+  return (file as YandexMediaFile).kind === "yandex";
+}
+
 export class LocalFile {
   constructor(public absolutePath: string, public name: string) {}
   async exists(): Promise<[boolean]> {
@@ -115,14 +162,6 @@ export const objectStorageClient = {
   },
 };
 
-export class ObjectNotFoundError extends Error {
-  constructor() {
-    super("Object not found");
-    this.name = "ObjectNotFoundError";
-    Object.setPrototypeOf(this, ObjectNotFoundError.prototype);
-  }
-}
-
 export class ObjectStorageService {
   getPublicObjectSearchPaths() { return PUB().map(abs); }
   getPrivateObjectDir() { return writablePrivateDir(); }
@@ -136,7 +175,7 @@ export class ObjectStorageService {
     }
     return null;
   }
-  async downloadObject(file: any, res: Response, cacheTtlSec = 3600, req?: Request) {
+  async downloadObject(file: CraftObjectFile, res: Response, cacheTtlSec = 3600, req?: Request) {
     try {
       const [metadata] = await file.getMetadata();
       const acl = await getObjectAclPolicy(file);
@@ -148,19 +187,59 @@ export class ObjectStorageService {
         "Accept-Ranges": "bytes",
         "Cache-Control": `${isPublic ? "public" : "private"}, max-age=${cacheTtlSec}`,
         "X-Content-Type-Options": "nosniff",
-        // Allow published sites (other origins) to fetch → Blob for MP4 scrub.
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
       };
-      // Existing SVG blobs must not execute as active content on the app origin
       if (String(contentType).includes("svg")) {
         headers["Content-Disposition"] = "attachment";
         headers["Content-Security-Policy"] = "default-src 'none'; sandbox";
       }
 
-      // Byte-range support is required for scroll-scrub MP4: browsers seek before
-      // the whole file is buffered. Without 206 responses, hero video looks static.
       const range = req?.headers?.range;
+      if (isYandexFile(file) && range && size > 0) {
+        const m = /^bytes=(\d*)-(\d*)$/i.exec(String(range).trim());
+        if (m) {
+          let start = m[1] !== "" ? parseInt(m[1], 10) : 0;
+          let end = m[2] !== "" ? parseInt(m[2], 10) : size - 1;
+          if (!Number.isFinite(start) || start < 0) start = 0;
+          if (!Number.isFinite(end) || end >= size) end = size - 1;
+          if (start > end || start >= size) {
+            res.status(416);
+            res.set({ ...headers, "Content-Range": `bytes */${size}` });
+            res.end();
+            return;
+          }
+          const ranged = await ycMediaGetStream(file.key, { start, end });
+          res.status(206);
+          res.set({
+            ...headers,
+            "Content-Range": ranged.contentRange || `bytes ${start}-${end}/${size}`,
+            "Content-Length": String(ranged.size),
+          });
+          ranged.stream.on("error", (err: any) => {
+            if (err.code === "EPIPE" || err.code === "ECONNRESET") return;
+            console.error("Yandex stream error:", err);
+            if (!res.headersSent) res.status(500).json({ error: "Error streaming file" });
+          });
+          req?.on("close", () => ranged.stream.destroy());
+          ranged.stream.pipe(res);
+          return;
+        }
+      }
+
+      if (isYandexFile(file)) {
+        const full = await ycMediaGetStream(file.key);
+        res.set({ ...headers, "Content-Length": String(full.size) });
+        full.stream.on("error", (err: any) => {
+          if (err.code === "EPIPE" || err.code === "ECONNRESET") return;
+          console.error("Yandex stream error:", err);
+          if (!res.headersSent) res.status(500).json({ error: "Error streaming file" });
+        });
+        req?.on("close", () => full.stream.destroy());
+        full.stream.pipe(res);
+        return;
+      }
+
       if (range && size > 0) {
         const m = /^bytes=(\d*)-(\d*)$/i.exec(String(range).trim());
         if (m) {
@@ -212,11 +291,17 @@ export class ObjectStorageService {
     if (!objectPath.startsWith("/objects/")) throw new ObjectNotFoundError();
     const id = objectPath.replace(/^\/objects\//, "");
     if (!id) throw new ObjectNotFoundError();
+
+    if (id.startsWith("uploads/") && (await yandexMediaStorageEnabled())) {
+      const head = await ycMediaHead(id);
+      if (head) return new YandexMediaFile(id, id.split("/").pop() || id);
+    }
+
     for (const privateDir of this.getPrivateObjectSearchDirs()) {
       const full = path.posix.join(privateDir, id);
       const { bucketName, objectName } = parse(full);
       const file = objectStorageClient.bucket(bucketName).file(objectName);
-      if ((await file.exists())[0]) return file as any;
+      if ((await file.exists())[0]) return file as CraftObjectFile;
     }
     throw new ObjectNotFoundError();
   }
