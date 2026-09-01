@@ -301,9 +301,11 @@ async function uploadToObjectStorage(buffer: Buffer, mimeType: string, ext: stri
   if (await yandexMediaStorageEnabled()) {
     const ycFile = new YandexMediaFile(objectName, `${objectId}.${ext}`);
     await ycFile.save(buffer, { contentType: mimeType, resumable: false });
+    console.log(`[YC-MEDIA] Upload routed to Yandex: /objects/${objectName}`);
     return `/objects/${objectName}`;
   }
 
+  console.log(`[ObjectStorage] Upload routed to local disk: /objects/${objectName}`);
   const privateDir = objectStorage.getPrivateObjectDir();
   const fullPath = `${privateDir}/${objectName}`;
   const parts = fullPath.startsWith("/") ? fullPath.slice(1).split("/") : fullPath.split("/");

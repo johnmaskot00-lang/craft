@@ -77,7 +77,9 @@ async function ensureMediaBucket(pool: StoragePool): Promise<void> {
     console.log(`[YC-MEDIA] Created media bucket ${bucket} on pool #${pool.id}`);
   } catch (err: any) {
     const name = err?.name || err?.Code || "";
-    if (name !== "BucketAlreadyOwnedByYou" && name !== "BucketAlreadyExists") {
+    if (name === "BucketAlreadyOwnedByYou" || name === "BucketAlreadyExists") {
+      console.log(`[YC-MEDIA] Using existing media bucket ${bucket} on pool #${pool.id}`);
+    } else {
       throw err;
     }
   }
@@ -117,6 +119,7 @@ export async function ycMediaPut(key: string, body: Buffer, contentType?: string
       ACL: "public-read",
     }),
   );
+  console.log(`[YC-MEDIA] Stored ${normalized} (${body.length} bytes)`);
 }
 
 export async function ycMediaGetBuffer(key: string): Promise<Buffer> {
