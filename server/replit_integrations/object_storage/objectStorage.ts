@@ -292,7 +292,7 @@ export class ObjectStorageService {
     const id = objectPath.replace(/^\/objects\//, "");
     if (!id) throw new ObjectNotFoundError();
 
-    if (id.startsWith("uploads/") && (await yandexMediaStorageEnabled())) {
+    if (id.startsWith("uploads/") && yandexMediaStorageEnabled()) {
       const head = await ycMediaHead(id);
       if (head) return new YandexMediaFile(id, id.split("/").pop() || id);
     }

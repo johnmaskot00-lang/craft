@@ -57,9 +57,14 @@ import { setupAuth } from "./auth";
 import { gemini } from "./gemini";
 import { deployToYandex, addCustomDomain, removeCustomDomain, checkDomainStatus, unpublishFromYandex, deleteProjectFromYandex, getDomainProxyIp } from "./yandex-deploy";
 import { registerSeoRoutes } from "./seo-routes";
-import { ObjectStorageService, ObjectNotFoundError, YandexMediaFile, objectStorageClient } from "./replit_integrations/object_storage";
-import { yandexMediaStorageEnabled } from "./yc-media-bucket";
+import { ObjectStorageService, ObjectNotFoundError } from "./replit_integrations/object_storage";
 import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
+import {
+  getMediaBackendLabel,
+  initYandexMediaStorage,
+  probeMediaStorage,
+  uploadBufferToObjectStorage,
+} from "./media-upload";
 import { db } from "./db";
 import { sql } from "drizzle-orm";
 import { rateLimit, userOrIpKey } from "./rate-limit";
@@ -279,43 +284,7 @@ async function syncUserSiteImagesToLibrary(userId: number): Promise<number> {
   return inserted;
 }
 
-async function uploadToObjectStorage(buffer: Buffer, mimeType: string, ext: string): Promise<string> {
-  // Auto-detect actual image format from magic bytes so PNG data never gets saved
-  // with a .jpg extension (Nano Banana often returns PNG regardless of outputFormat).
-  // Object Storage serves files with Content-Type based on extension, so a wrong extension
-  // causes strict browsers (Yandex, Safari) to reject the image as invalid.
-  if (buffer.length >= 12) {
-    if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
-      mimeType = "image/png"; ext = "png";
-    } else if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
-      mimeType = "image/jpeg"; ext = "jpg";
-    } else if (buffer.slice(0, 4).toString("ascii") === "RIFF" && buffer.slice(8, 12).toString("ascii") === "WEBP") {
-      mimeType = "image/webp"; ext = "webp";
-    } else if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
-      mimeType = "image/gif"; ext = "gif";
-    }
-  }
-  const objectId = crypto.randomUUID();
-  const objectName = `uploads/${objectId}.${ext}`;
-
-  if (await yandexMediaStorageEnabled()) {
-    const ycFile = new YandexMediaFile(objectName, `${objectId}.${ext}`);
-    await ycFile.save(buffer, { contentType: mimeType, resumable: false });
-    console.log(`[YC-MEDIA] Upload routed to Yandex: /objects/${objectName}`);
-    return `/objects/${objectName}`;
-  }
-
-  console.log(`[ObjectStorage] Upload routed to local disk: /objects/${objectName}`);
-  const privateDir = objectStorage.getPrivateObjectDir();
-  const fullPath = `${privateDir}/${objectName}`;
-  const parts = fullPath.startsWith("/") ? fullPath.slice(1).split("/") : fullPath.split("/");
-  const bucketName = parts[0];
-  const objectKey = parts.slice(1).join("/");
-  const bucket = objectStorageClient.bucket(bucketName);
-  const file = bucket.file(objectKey);
-  await file.save(buffer, { contentType: mimeType, resumable: false });
-  return `/objects/${objectName}`;
-}
+const uploadToObjectStorage = uploadBufferToObjectStorage;
 
 // Compress a raster image for publishing so it lands around 150-300KB while staying
 // visually lossless. Photos (no transparency) → mozjpeg; images with an alpha channel
@@ -4498,6 +4467,9 @@ export async function registerRoutes(
   setupAuth(app);
   registerGeoRoutes(app);
   registerKieCallbackRoute(app);
+  void initYandexMediaStorage().catch((err: any) => {
+    console.error("[YC-MEDIA] startup init failed:", err?.message || err);
+  });
   void storage.ensureReferralSchema().catch((err: any) => {
     console.warn("[Referral] schema ensure failed:", err?.message || err);
   });
@@ -4516,17 +4488,18 @@ export async function registerRoutes(
         error: String(err?.code || "DB_ERROR"),
       });
     }
+    const mediaBackend = getMediaBackendLabel();
     try {
-      // Probes real file creation and selects the writable persistent fallback.
-      objectStorage.getPrivateObjectDir();
+      await probeMediaStorage();
     } catch (err: any) {
       return res.status(503).json({
         ok: false,
         database: "ok",
         objectStorage: "unavailable",
+        mediaBackend,
         message: "Object storage unavailable",
         uptime: Math.round(process.uptime()),
-        error: String(err?.code || "STORAGE_ERROR"),
+        error: String(err?.code || err?.message || "STORAGE_ERROR"),
       });
     }
     let gitSha: string | null = process.env.APP_GIT_SHA || process.env.GIT_SHA || null;
@@ -4546,6 +4519,7 @@ export async function registerRoutes(
       ok: true,
       database: "ok",
       objectStorage: "ok",
+      mediaBackend,
       gitSha,
       uptime: Math.round(process.uptime()),
       rssMb: Math.round(mem.rss / 1024 / 1024),

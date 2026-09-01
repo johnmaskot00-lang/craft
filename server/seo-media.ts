@@ -1,32 +1,15 @@
-import crypto from "crypto";
-import { ObjectStorageService, objectStorageClient } from "./replit_integrations/object_storage";
+import { ObjectStorageService } from "./replit_integrations/object_storage";
 import { compressImageForPublish, compressSeoCoverImage, detectImageFormat } from "./image-compress";
+import { uploadBufferToObjectStorage } from "./media-upload";
 import type { DeployFile } from "./yandex-deploy";
 
 const objectStorage = new ObjectStorageService();
 
 export async function uploadImageBuffer(buffer: Buffer, fallbackMime = "image/jpeg", fallbackExt = "jpg"): Promise<string> {
-  let mimeType = fallbackMime;
-  let ext = fallbackExt;
-  const detected = detectImageFormat(buffer);
-  if (detected) {
-    mimeType = detected.mime;
-    ext = detected.ext;
-  }
-  const objectId = crypto.randomUUID();
-  const objectName = `uploads/${objectId}.${ext}`;
-  const privateDir = objectStorage.getPrivateObjectDir();
-  const fullPath = `${privateDir}/${objectName}`;
-  const parts = fullPath.startsWith("/") ? fullPath.slice(1).split("/") : fullPath.split("/");
-  const bucketName = parts[0];
-  const objectKey = parts.slice(1).join("/");
-  const bucket = objectStorageClient.bucket(bucketName);
-  const file = bucket.file(objectKey);
-  await file.save(buffer, { contentType: mimeType, resumable: false });
-  return `/objects/${objectName}`;
+  return uploadBufferToObjectStorage(buffer, fallbackMime, fallbackExt);
 }
 
-/** Download KIE / external cover, compress, store locally. Returns /objects/ path or "" on failure. */
+/** Download KIE / external cover, compress, store in object storage. Returns /objects/ path or "" on failure. */
 export async function persistSeoCoverFromUrl(remoteUrl: string): Promise<string> {
   if (!remoteUrl || !/^https?:\/\//i.test(remoteUrl)) return remoteUrl.startsWith("/") ? remoteUrl : "";
   try {

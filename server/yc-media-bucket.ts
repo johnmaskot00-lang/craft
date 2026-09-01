@@ -11,12 +11,12 @@ import {
   HeadObjectCommand,
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
+import { S3Client } from "@aws-sdk/client-s3";
 import { Readable } from "stream";
-import { acquireStoragePool, bumpPoolBucketCount, getPoolS3Client, type StoragePool } from "./yc-storage-pools";
 
 export const CRAFT_MEDIA_BUCKET = () => process.env.CRAFT_MEDIA_BUCKET || "craft-ai-media";
 
-let cachedPool: StoragePool | null = null;
+let envClient: S3Client | null = null;
 let mediaBucketReady = false;
 
 function contentTypeForKey(key: string): string {
@@ -44,41 +44,48 @@ function contentTypeForKey(key: string): string {
   return map[ext] || "application/octet-stream";
 }
 
+export function hasYcMediaCredentials(): boolean {
+  return Boolean(process.env.YC_KEY_ID && process.env.YC_SECRET);
+}
+
 export function yandexMediaStorageRequested(): boolean {
   const mode = (process.env.CRAFT_OBJECT_STORAGE_BACKEND || "auto").toLowerCase();
   if (mode === "local") return false;
-  if (mode === "yandex") return true;
   return true;
 }
 
-export async function yandexMediaStorageEnabled(): Promise<boolean> {
+/** True when uploads must go to Yandex (auto/yandex mode + env credentials). */
+export function yandexMediaStorageEnabled(): boolean {
   if (!yandexMediaStorageRequested()) return false;
-  try {
-    await getMediaPool();
-    return true;
-  } catch {
-    return false;
+  return hasYcMediaCredentials();
+}
+
+function getMediaS3Client(): S3Client {
+  if (envClient) return envClient;
+  const keyId = process.env.YC_KEY_ID || "";
+  const secret = process.env.YC_SECRET || "";
+  if (!keyId || !secret) {
+    throw new Error("[YC-MEDIA] YC_KEY_ID and YC_SECRET must be set for Yandex media storage");
   }
+  envClient = new S3Client({
+    region: "ru-central1",
+    endpoint: "https://storage.yandexcloud.net",
+    credentials: { accessKeyId: keyId, secretAccessKey: secret },
+  });
+  return envClient;
 }
 
-async function getMediaPool(): Promise<StoragePool> {
-  if (cachedPool) return cachedPool;
-  cachedPool = await acquireStoragePool(1);
-  return cachedPool;
-}
-
-async function ensureMediaBucket(pool: StoragePool): Promise<void> {
+export async function ensureYandexMediaBucket(): Promise<void> {
   if (mediaBucketReady) return;
-  const client = getPoolS3Client(pool);
+  const client = getMediaS3Client();
   const bucket = CRAFT_MEDIA_BUCKET();
   try {
     await client.send(new CreateBucketCommand({ Bucket: bucket }));
-    await bumpPoolBucketCount(pool.id, 1);
-    console.log(`[YC-MEDIA] Created media bucket ${bucket} on pool #${pool.id}`);
+    console.log(`[YC-MEDIA] Created media bucket ${bucket}`);
   } catch (err: any) {
     const name = err?.name || err?.Code || "";
     if (name === "BucketAlreadyOwnedByYou" || name === "BucketAlreadyExists") {
-      console.log(`[YC-MEDIA] Using existing media bucket ${bucket} on pool #${pool.id}`);
+      console.log(`[YC-MEDIA] Using existing media bucket ${bucket}`);
     } else {
       throw err;
     }
@@ -86,10 +93,20 @@ async function ensureMediaBucket(pool: StoragePool): Promise<void> {
   mediaBucketReady = true;
 }
 
+/** Health / startup probe — ensures bucket exists and credentials work. */
+export async function probeYandexMediaStorage(): Promise<void> {
+  await ensureYandexMediaBucket();
+  const client = getMediaS3Client();
+  await client.send(new HeadObjectCommand({ Bucket: CRAFT_MEDIA_BUCKET(), Key: ".probe" })).catch((err: any) => {
+    const name = err?.name || err?.Code || "";
+    if (name === "NotFound" || name === "NoSuchKey" || err?.$metadata?.httpStatusCode === 404) return;
+    throw err;
+  });
+}
+
 export async function ycMediaHead(key: string): Promise<{ size: number; contentType: string } | null> {
-  const pool = await getMediaPool();
-  await ensureMediaBucket(pool);
-  const client = getPoolS3Client(pool);
+  await ensureYandexMediaBucket();
+  const client = getMediaS3Client();
   try {
     const out = await client.send(
       new HeadObjectCommand({ Bucket: CRAFT_MEDIA_BUCKET(), Key: key.replace(/^\/+/, "") }),
@@ -106,9 +123,8 @@ export async function ycMediaHead(key: string): Promise<{ size: number; contentT
 }
 
 export async function ycMediaPut(key: string, body: Buffer, contentType?: string): Promise<void> {
-  const pool = await getMediaPool();
-  await ensureMediaBucket(pool);
-  const client = getPoolS3Client(pool);
+  await ensureYandexMediaBucket();
+  const client = getMediaS3Client();
   const normalized = key.replace(/^\/+/, "");
   await client.send(
     new PutObjectCommand({
@@ -123,9 +139,8 @@ export async function ycMediaPut(key: string, body: Buffer, contentType?: string
 }
 
 export async function ycMediaGetBuffer(key: string): Promise<Buffer> {
-  const pool = await getMediaPool();
-  await ensureMediaBucket(pool);
-  const client = getPoolS3Client(pool);
+  await ensureYandexMediaBucket();
+  const client = getMediaS3Client();
   const out = await client.send(
     new GetObjectCommand({ Bucket: CRAFT_MEDIA_BUCKET(), Key: key.replace(/^\/+/, "") }),
   );
@@ -139,9 +154,8 @@ export async function ycMediaGetStream(
   key: string,
   range?: { start: number; end: number },
 ): Promise<{ stream: Readable; contentType: string; size: number; contentRange?: string }> {
-  const pool = await getMediaPool();
-  await ensureMediaBucket(pool);
-  const client = getPoolS3Client(pool);
+  await ensureYandexMediaBucket();
+  const client = getMediaS3Client();
   const normalized = key.replace(/^\/+/, "");
   const head = await ycMediaHead(normalized);
   if (!head) throw new Error("Object not found");
