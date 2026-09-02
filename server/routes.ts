@@ -4971,6 +4971,7 @@ export async function registerRoutes(
         admin_deduct: "Списание (админ)",
         promo: "Промокод",
         referral: "Реферальный бонус",
+        referral_exchange: "Обмен реферальных токенов",
       };
       const totalPages = Math.max(1, Math.ceil(total / limit));
       res.json({
@@ -9906,11 +9907,41 @@ ${fullHtml}`;
         referredCount: stats.referredCount,
         paidReferredCount: stats.paidReferredCount,
         totalTokensEarned: stats.totalTokensEarned,
+        availableBalance: stats.availableBalance,
+        pendingExchange: stats.pendingExchange
+          ? {
+              id: stats.pendingExchange.id,
+              tokens: stats.pendingExchange.tokens,
+              createdAt: stats.pendingExchange.createdAt,
+            }
+          : null,
         recent: stats.recent,
       });
     } catch (err: any) {
       console.error("[Referral] /me error:", err?.message || err);
       res.status(500).json({ message: err?.message || "Ошибка загрузки реферальной программы" });
+    }
+  });
+
+  app.post("/api/referral/exchange", requireAuth, async (req, res) => {
+    try {
+      const userId = (req.user as any).id as number;
+      const result = await storage.requestReferralExchange(userId);
+      if (!result.ok) {
+        if (result.error === "already_pending") {
+          return res.status(409).json({ message: "Заявка на обмен уже отправлена — дождитесь подтверждения" });
+        }
+        return res.status(400).json({ message: "Нет токенов для обмена" });
+      }
+      res.json({
+        ok: true,
+        exchangeId: result.exchangeId,
+        tokens: result.tokens,
+        message: `Заявка на обмен ${result.tokens} токенов отправлена. Токены будут зачислены после подтверждения администратором.`,
+      });
+    } catch (err: any) {
+      console.error("[Referral] exchange error:", err?.message || err);
+      res.status(500).json({ message: err?.message || "Ошибка обмена" });
     }
   });
 
@@ -10217,6 +10248,55 @@ ${fullHtml}`;
       res.json({ success: true, promo });
     } catch (err: any) {
       res.status(500).json({ message: err.message || "Ошибка обновления промокода" });
+    }
+  });
+
+  app.get("/api/admin/referral-exchanges", adminOnly, async (req, res) => {
+    try {
+      const status = typeof req.query.status === "string" ? req.query.status : "pending";
+      const items = await storage.listReferralExchanges(status || undefined);
+      res.json(items);
+    } catch (err: any) {
+      console.error("[admin referral-exchanges]", err);
+      res.status(500).json({ message: err.message || "Ошибка загрузки заявок" });
+    }
+  });
+
+  app.post("/api/admin/referral-exchanges/:id/approve", adminOnly, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid id" });
+      const admin = req.user as any;
+      const result = await storage.approveReferralExchange(id, admin.id);
+      if (!result.ok) {
+        const msg = result.error === "not_found" ? "Заявка не найдена"
+          : result.error === "not_pending" ? "Заявка уже обработана"
+          : "Не удалось подтвердить";
+        return res.status(400).json({ message: msg });
+      }
+      res.json({ success: true, newBalance: result.newBalance });
+    } catch (err: any) {
+      console.error("[admin referral approve]", err);
+      res.status(500).json({ message: err.message || "Ошибка подтверждения" });
+    }
+  });
+
+  app.post("/api/admin/referral-exchanges/:id/reject", adminOnly, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isFinite(id)) return res.status(400).json({ message: "Invalid id" });
+      const admin = req.user as any;
+      const result = await storage.rejectReferralExchange(id, admin.id);
+      if (!result.ok) {
+        const msg = result.error === "not_found" ? "Заявка не найдена"
+          : result.error === "not_pending" ? "Заявка уже обработана"
+          : "Не удалось отклонить";
+        return res.status(400).json({ message: msg });
+      }
+      res.json({ success: true });
+    } catch (err: any) {
+      console.error("[admin referral reject]", err);
+      res.status(500).json({ message: err.message || "Ошибка отклонения" });
     }
   });
 

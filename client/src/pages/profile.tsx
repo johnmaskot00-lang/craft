@@ -43,6 +43,8 @@ type ReferralMe = {
   referredCount: number;
   paidReferredCount: number;
   totalTokensEarned: number;
+  availableBalance: number;
+  pendingExchange: { id: number; tokens: number; createdAt: string } | null;
   recent: Array<{
     id: number;
     referredUserId: number;
@@ -92,6 +94,25 @@ export default function ProfilePage() {
     },
     enabled: !!user,
     staleTime: 30_000,
+  });
+
+  const exchangeMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/referral/exchange", {});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.message || "Не удалось отправить заявку");
+      return data;
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Заявка отправлена",
+        description: data.message || `Обмен ${data.tokens} токенов ожидает подтверждения`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/referral/me"] });
+    },
+    onError: (err: any) => {
+      toast({ title: "Ошибка", description: err?.message || "Не удалось обменять", variant: "destructive" });
+    },
   });
 
   const redeemMutation = useMutation({
@@ -285,11 +306,11 @@ export default function ProfilePage() {
                 </button>
               </div>
 
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: referral?.recent?.length ? "0.85rem" : 0 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: "0.85rem" }}>
                 {[
                   { label: "Друзей", value: referral?.referredCount ?? 0 },
                   { label: "С оплатой", value: referral?.paidReferredCount ?? 0 },
-                  { label: "Токенов", value: referral?.totalTokensEarned ?? 0 },
+                  { label: "К обмену", value: referral?.availableBalance ?? 0 },
                 ].map((s) => (
                   <div key={s.label} style={{ background: "rgba(0,0,0,0.025)", borderRadius: 12, padding: "0.65rem 0.5rem", textAlign: "center" }}>
                     <div style={{ fontSize: "1.05rem", fontWeight: 700, color: "#1D1D1F" }}>{s.value}</div>
@@ -297,6 +318,41 @@ export default function ProfilePage() {
                   </div>
                 ))}
               </div>
+
+              {referral?.pendingExchange ? (
+                <div style={{
+                  marginBottom: referral?.recent?.length ? "0.85rem" : 0,
+                  padding: "0.75rem 0.9rem", borderRadius: 12,
+                  background: "rgba(255,149,0,0.08)", border: "1px solid rgba(255,149,0,0.2)",
+                  fontSize: "0.8rem", color: "#1D1D1F", fontWeight: 600,
+                }}>
+                  Заявка на обмен {referral.pendingExchange.tokens} токенов на рассмотрении
+                </div>
+              ) : (referral?.availableBalance ?? 0) > 0 ? (
+                <button
+                  type="button"
+                  data-testid="button-referral-exchange"
+                  disabled={exchangeMutation.isPending}
+                  onClick={() => exchangeMutation.mutate()}
+                  style={{
+                    width: "100%", marginBottom: referral?.recent?.length ? "0.85rem" : 0,
+                    padding: "0.75rem 1rem", borderRadius: 12, border: "none",
+                    background: "#007AFF", color: "#fff",
+                    fontWeight: 700, fontSize: "0.88rem", cursor: exchangeMutation.isPending ? "default" : "pointer",
+                    opacity: exchangeMutation.isPending ? 0.7 : 1,
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                  }}
+                >
+                  {exchangeMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : null}
+                  Обменять {referral?.availableBalance} токенов
+                </button>
+              ) : null}
+
+              {(referral?.totalTokensEarned ?? 0) > 0 && (
+                <div style={{ fontSize: "0.72rem", color: "#AEAEB2", marginBottom: referral?.recent?.length ? "0.85rem" : 0 }}>
+                  Всего заработано: {referral?.totalTokensEarned} токенов
+                </div>
+              )}
 
               {!!referral?.recent?.length && (
                 <div style={{ borderTop: "1px solid rgba(0,0,0,0.06)", paddingTop: "0.75rem" }}>

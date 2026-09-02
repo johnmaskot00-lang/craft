@@ -4,7 +4,7 @@ import { useAuth } from "@/lib/auth";
 import { Redirect } from "wouter";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, Users, Coins, TrendingDown, TrendingUp, Search, ChevronRight, ArrowLeft, Plus, Minus, LayoutGrid, History, User as UserIcon, ExternalLink, ChevronLeft, Download, Ban, ShieldOff, Gift, Power } from "lucide-react";
+import { Loader2, Users, Coins, TrendingDown, TrendingUp, Search, ChevronRight, ArrowLeft, Plus, Minus, LayoutGrid, History, User as UserIcon, ExternalLink, ChevronLeft, Download, Ban, ShieldOff, Gift, Power, Check, X } from "lucide-react";
 
 const appleFont = '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif';
 const USERS_PER_PAGE = 20;
@@ -19,6 +19,7 @@ const OPERATION_LABELS: Record<string, { label: string; color: string }> = {
   admin_add: { label: "Начисление (admin)", color: "#27AE60" },
   admin_deduct: { label: "Списание (admin)", color: "#C0392B" },
   promo: { label: "Промокод", color: "#5856D6" },
+  referral_exchange: { label: "Обмен реферальных", color: "#34C759" },
 };
 
 function fmt(n: number) {
@@ -233,6 +234,118 @@ function PromoCodesPanel() {
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReferralExchangesPanel() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const { data: exchanges = [], isLoading } = useQuery<any[]>({
+    queryKey: ["/api/admin/referral-exchanges"],
+    queryFn: () => apiRequest("GET", "/api/admin/referral-exchanges?status=pending").then((r) => r.json()),
+    refetchInterval: 10000,
+  });
+
+  const approveMutation = useMutation({
+    mutationFn: (id: number) =>
+      apiRequest("POST", `/api/admin/referral-exchanges/${id}/approve`, {}).then(async (r) => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data?.message || "Ошибка");
+        return data;
+      }),
+    onSuccess: () => {
+      toast({ title: "Заявка подтверждена", description: "Токены зачислены на баланс пользователя" });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/referral-exchanges"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/stats"] });
+    },
+    onError: (err: any) => toast({ title: "Ошибка", description: err.message, variant: "destructive" }),
+  });
+
+  const rejectMutation = useMutation({
+    mutationFn: (id: number) =>
+      apiRequest("POST", `/api/admin/referral-exchanges/${id}/reject`, {}).then(async (r) => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data?.message || "Ошибка");
+        return data;
+      }),
+    onSuccess: () => {
+      toast({ title: "Заявка отклонена" });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/referral-exchanges"] });
+    },
+    onError: (err: any) => toast({ title: "Ошибка", description: err.message, variant: "destructive" }),
+  });
+
+  return (
+    <div style={{ background: "#fff", borderRadius: 18, border: "1px solid rgba(0,0,0,0.07)", boxShadow: "0 1px 6px rgba(0,0,0,0.06)", overflow: "hidden", marginBottom: 24 }}>
+      <div style={{ padding: "20px 24px", borderBottom: "1px solid #F2F2F7", display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ width: 40, height: 40, borderRadius: 12, background: "rgba(52,199,89,0.12)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <Users size={18} style={{ color: "#34C759" }} />
+        </div>
+        <div>
+          <h2 style={{ margin: 0, fontSize: "1rem", fontWeight: 700, color: "#1D1D1F" }}>Обмен реферальных токенов</h2>
+          <div style={{ fontSize: "0.72rem", color: "#86868B", marginTop: 2 }}>
+            Заявки пользователей · подтвердите, чтобы зачислить токены на баланс
+          </div>
+        </div>
+        {exchanges.length > 0 && (
+          <span style={{ marginLeft: "auto", fontSize: "0.75rem", fontWeight: 700, color: "#FF9500", background: "rgba(255,149,0,0.12)", padding: "4px 10px", borderRadius: 20 }}>
+            {exchanges.length} ожидают
+          </span>
+        )}
+      </div>
+
+      {isLoading ? (
+        <div style={{ padding: 40, textAlign: "center" }}>
+          <Loader2 className="animate-spin" size={24} style={{ color: "#34C759", margin: "0 auto" }} />
+        </div>
+      ) : exchanges.length === 0 ? (
+        <div style={{ padding: 32, textAlign: "center", color: "#86868B", fontSize: "0.85rem" }}>Нет заявок на обмен</div>
+      ) : (
+        <div>
+          {exchanges.map((ex: any) => (
+            <div key={ex.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "16px 24px", borderBottom: "1px solid #F9F9F9" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: "0.88rem", fontWeight: 700, color: "#1D1D1F" }}>
+                  {ex.displayName} <span style={{ color: "#86868B", fontWeight: 600 }}>#{ex.userId}</span>
+                </div>
+                <div style={{ fontSize: "0.75rem", color: "#86868B", marginTop: 2 }}>
+                  {ex.email || "—"} · {timeAgo(ex.createdAt)} · заявка #{ex.id}
+                </div>
+              </div>
+              <div style={{ fontSize: "1rem", fontWeight: 800, color: "#34C759", flexShrink: 0 }}>
+                {fmt(ex.tokens)} ток.
+              </div>
+              <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                <button
+                  onClick={() => approveMutation.mutate(ex.id)}
+                  disabled={approveMutation.isPending || rejectMutation.isPending}
+                  style={{
+                    padding: "8px 14px", borderRadius: 10, border: "none", cursor: "pointer",
+                    background: "#34C759", color: "#fff", fontWeight: 700, fontSize: "0.82rem",
+                    display: "flex", alignItems: "center", gap: 6,
+                    opacity: approveMutation.isPending ? 0.7 : 1,
+                  }}
+                >
+                  <Check size={14} /> Approve
+                </button>
+                <button
+                  onClick={() => rejectMutation.mutate(ex.id)}
+                  disabled={approveMutation.isPending || rejectMutation.isPending}
+                  style={{
+                    padding: "8px 14px", borderRadius: 10, border: "1px solid #E0E0E5", cursor: "pointer",
+                    background: "#fff", color: "#C0392B", fontWeight: 700, fontSize: "0.82rem",
+                    display: "flex", alignItems: "center", gap: 6,
+                  }}
+                >
+                  <X size={14} /> Reject
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -741,6 +854,8 @@ export default function AdminPage() {
             </div>
 
             <PromoCodesPanel />
+
+            <ReferralExchangesPanel />
 
             <div style={{ background: "#fff", borderRadius: 18, border: "1px solid rgba(0,0,0,0.07)", boxShadow: "0 1px 6px rgba(0,0,0,0.06)", overflow: "hidden" }}>
               <div style={{ padding: "20px 24px", borderBottom: "1px solid #F2F2F7", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>

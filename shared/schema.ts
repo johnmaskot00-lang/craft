@@ -433,6 +433,24 @@ export const referralRewards = pgTable("referral_rewards", {
 
 export type ReferralReward = typeof referralRewards.$inferSelect;
 
+/** User-requested exchange of referral earnings → main credit balance (admin approval). */
+export const referralExchanges = pgTable("referral_exchanges", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  tokens: integer("tokens").notNull(),
+  status: text("status").notNull().default("pending"),
+  /** Set for legacy rows migrated from auto-credited referral_rewards. */
+  paymentOrderId: integer("payment_order_id"),
+  reviewedByUserId: integer("reviewed_by_user_id"),
+  reviewedAt: timestamp("reviewed_at"),
+  note: text("note"),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+}, (t) => ({
+  paymentOrderUniq: uniqueIndex("referral_exchanges_payment_order_uniq").on(t.paymentOrderId),
+}));
+
+export type ReferralExchange = typeof referralExchanges.$inferSelect;
+
 /**
  * express-session / connect-pg-simple store.
  * MUST stay in the Drizzle schema: `drizzle-kit push --force` otherwise treats

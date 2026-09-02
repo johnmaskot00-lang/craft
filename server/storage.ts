@@ -1,5 +1,5 @@
 ﻿import { db } from "./db";
-import { users, projects, projectMessages, projectImages, projectVersions, projectFiles, leads, creditTransactions, paymentOrders, promoCodes, promoRedemptions, referralRewards, type User, type InsertUser, type Project, type InsertProject, type ProjectMessage, type InsertProjectMessage, type ProjectImage, type InsertProjectImage, type ProjectVersion, type InsertProjectVersion, type ProjectFile, type InsertProjectFile, type Lead, type InsertLead, type CreditTransaction, type PaymentOrder, type PromoCode } from "@shared/schema";
+import { users, projects, projectMessages, projectImages, projectVersions, projectFiles, leads, creditTransactions, paymentOrders, promoCodes, promoRedemptions, referralRewards, referralExchanges, type User, type InsertUser, type Project, type InsertProject, type ProjectMessage, type InsertProjectMessage, type ProjectImage, type InsertProjectImage, type ProjectVersion, type InsertProjectVersion, type ProjectFile, type InsertProjectFile, type Lead, type InsertLead, type CreditTransaction, type PaymentOrder, type PromoCode, type ReferralExchange } from "@shared/schema";
 import { eq, desc, and, sql, gte, isNull } from "drizzle-orm";
 import crypto from "crypto";
 import { referralBonusTokens, normalizeReferralCode } from "./referral";
@@ -100,6 +100,8 @@ export interface IStorage {
     referredCount: number;
     paidReferredCount: number;
     totalTokensEarned: number;
+    availableBalance: number;
+    pendingExchange: ReferralExchange | null;
     recent: Array<{
       id: number;
       referredUserId: number;
@@ -109,6 +111,16 @@ export interface IStorage {
       createdAt: Date;
     }>;
   }>;
+  getReferralAvailableBalance(referrerUserId: number): Promise<number>;
+  requestReferralExchange(userId: number): Promise<{
+    ok: boolean;
+    exchangeId?: number;
+    tokens?: number;
+    error?: "nothing_available" | "already_pending";
+  }>;
+  listReferralExchanges(status?: string): Promise<Array<ReferralExchange & { displayName: string; email: string | null }>>;
+  approveReferralExchange(exchangeId: number, adminUserId: number): Promise<{ ok: boolean; error?: string; newBalance?: number }>;
+  rejectReferralExchange(exchangeId: number, adminUserId: number): Promise<{ ok: boolean; error?: string }>;
 }
 
 export const NEW_USER_CREDITS = 0;
@@ -874,6 +886,34 @@ export class DatabaseStorage implements IStorage {
       CREATE UNIQUE INDEX IF NOT EXISTS referral_rewards_order_uniq
       ON referral_rewards (payment_order_id)
     `);
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS referral_exchanges (
+        id serial PRIMARY KEY,
+        user_id integer NOT NULL,
+        tokens integer NOT NULL,
+        status text NOT NULL DEFAULT 'pending',
+        payment_order_id integer,
+        reviewed_by_user_id integer,
+        reviewed_at timestamp,
+        note text,
+        created_at timestamp DEFAULT CURRENT_TIMESTAMP NOT NULL
+      )
+    `);
+    await db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS referral_exchanges_payment_order_uniq
+      ON referral_exchanges (payment_order_id)
+    `);
+    // Mark referral rewards that were already auto-credited before manual exchange flow.
+    await db.execute(sql`
+      INSERT INTO referral_exchanges (user_id, tokens, status, payment_order_id, created_at, reviewed_at, note)
+      SELECT rr.referrer_user_id, rr.tokens_awarded, 'approved', rr.payment_order_id, rr.created_at, rr.created_at, 'legacy-auto-credit'
+      FROM referral_rewards rr
+      WHERE EXISTS (
+        SELECT 1 FROM credit_transactions ct
+        WHERE ct.idempotency_key = 'referral_payment_' || rr.payment_order_id::text
+      )
+      ON CONFLICT (payment_order_id) DO NOTHING
+    `);
   }
 
   private async allocateReferralCode(): Promise<string> {
@@ -969,29 +1009,146 @@ export class DatabaseStorage implements IStorage {
         return { awarded: false };
       }
 
-      const idempotencyKey = `referral_payment_${order.id}`;
+      console.log(
+        `[Referral] +${bonus} referral tokens (pending exchange) -> user ${referrerId} from payment order ${order.id} (buyer ${order.userId})`,
+      );
+      return { awarded: true, tokens: bonus, referrerId };
+    });
+  }
+
+
+  async getReferralAvailableBalance(referrerUserId: number): Promise<number> {
+    await this.ensureReferralSchema();
+    const [earnedRow] = await db
+      .select({ total: sql<number>`coalesce(sum(${referralRewards.tokensAwarded}), 0)::int` })
+      .from(referralRewards)
+      .where(eq(referralRewards.referrerUserId, referrerUserId));
+
+    const [reservedRow] = await db
+      .select({ total: sql<number>`coalesce(sum(${referralExchanges.tokens}), 0)::int` })
+      .from(referralExchanges)
+      .where(and(
+        eq(referralExchanges.userId, referrerUserId),
+        sql`${referralExchanges.status} IN ('pending', 'approved')`,
+      ));
+
+    return Math.max(0, Number(earnedRow?.total || 0) - Number(reservedRow?.total || 0));
+  }
+
+  async requestReferralExchange(userId: number): Promise<{
+    ok: boolean;
+    exchangeId?: number;
+    tokens?: number;
+    error?: "nothing_available" | "already_pending";
+  }> {
+    await this.ensureReferralSchema();
+    const [pending] = await db
+      .select()
+      .from(referralExchanges)
+      .where(and(eq(referralExchanges.userId, userId), eq(referralExchanges.status, "pending")))
+      .limit(1);
+    if (pending) return { ok: false, error: "already_pending" };
+
+    const available = await this.getReferralAvailableBalance(userId);
+    if (available < 1) return { ok: false, error: "nothing_available" };
+
+    const [created] = await db.insert(referralExchanges).values({
+      userId,
+      tokens: available,
+      status: "pending",
+    }).returning();
+
+    console.log(`[Referral] exchange request #${created.id}: ${available} tokens for user ${userId}`);
+    return { ok: true, exchangeId: created.id, tokens: available };
+  }
+
+  async listReferralExchanges(status?: string): Promise<Array<ReferralExchange & { displayName: string; email: string | null }>> {
+    await this.ensureReferralSchema();
+    const rows = await db
+      .select({
+        id: referralExchanges.id,
+        userId: referralExchanges.userId,
+        tokens: referralExchanges.tokens,
+        status: referralExchanges.status,
+        paymentOrderId: referralExchanges.paymentOrderId,
+        reviewedByUserId: referralExchanges.reviewedByUserId,
+        reviewedAt: referralExchanges.reviewedAt,
+        note: referralExchanges.note,
+        createdAt: referralExchanges.createdAt,
+        displayName: users.displayName,
+        email: users.email,
+      })
+      .from(referralExchanges)
+      .leftJoin(users, eq(users.id, referralExchanges.userId))
+      .where(status ? eq(referralExchanges.status, status) : undefined)
+      .orderBy(desc(referralExchanges.createdAt))
+      .limit(100);
+    return rows.map((r) => ({
+      ...r,
+      displayName: r.displayName || `ID ${r.userId}`,
+      email: r.email ?? null,
+    }));
+  }
+
+  async approveReferralExchange(exchangeId: number, adminUserId: number): Promise<{ ok: boolean; error?: string; newBalance?: number }> {
+    await this.ensureReferralSchema();
+    return db.transaction(async (tx) => {
+      const [ex] = await tx
+        .select()
+        .from(referralExchanges)
+        .where(eq(referralExchanges.id, exchangeId))
+        .limit(1);
+      if (!ex) return { ok: false, error: "not_found" };
+      if (ex.status !== "pending") return { ok: false, error: "not_pending" };
+
+      const idempotencyKey = `referral_exchange_${exchangeId}`;
       const creditInserted = await tx.insert(creditTransactions).values({
-        userId: referrerId,
-        amount: bonus,
+        userId: ex.userId,
+        amount: ex.tokens,
         type: "credit",
-        operation: "referral",
-        note: `Р РµС„РµСЂР°Р»СЊРЅС‹Р№ Р±РѕРЅСѓСЃ 20% Р·Р° РѕРїР»Р°С‚Сѓ РґСЂСѓРіР° (#${order.id})`,
+        operation: "referral_exchange",
+        note: `Обмен реферальных токенов (заявка #${exchangeId})`,
         idempotencyKey,
       }).onConflictDoNothing().returning();
 
       if (creditInserted.length === 0) {
-        return { awarded: false };
+        return { ok: false, error: "already_credited" };
       }
 
-      await tx.execute(
-        sql`UPDATE users SET credits = credits + ${bonus} WHERE id = ${referrerId}`,
+      const updated = await tx.execute(
+        sql`UPDATE users SET credits = credits + ${ex.tokens} WHERE id = ${ex.userId} RETURNING credits`,
       );
+      const newBalance = Number((updated.rows as Array<{ credits: number }>)[0]?.credits ?? 0);
 
-      console.log(
-        `[Referral] +${bonus} tokens в†’ user ${referrerId} from payment order ${order.id} (buyer ${order.userId})`,
-      );
-      return { awarded: true, tokens: bonus, referrerId };
+      await tx.update(referralExchanges).set({
+        status: "approved",
+        reviewedByUserId: adminUserId,
+        reviewedAt: new Date(),
+      }).where(eq(referralExchanges.id, exchangeId));
+
+      console.log(`[Referral] exchange #${exchangeId} approved by admin ${adminUserId}: +${ex.tokens} -> user ${ex.userId}`);
+      return { ok: true, newBalance };
     });
+  }
+
+  async rejectReferralExchange(exchangeId: number, adminUserId: number): Promise<{ ok: boolean; error?: string }> {
+    await this.ensureReferralSchema();
+    const [ex] = await db
+      .select()
+      .from(referralExchanges)
+      .where(eq(referralExchanges.id, exchangeId))
+      .limit(1);
+    if (!ex) return { ok: false, error: "not_found" };
+    if (ex.status !== "pending") return { ok: false, error: "not_pending" };
+
+    await db.update(referralExchanges).set({
+      status: "rejected",
+      reviewedByUserId: adminUserId,
+      reviewedAt: new Date(),
+    }).where(eq(referralExchanges.id, exchangeId));
+
+    console.log(`[Referral] exchange #${exchangeId} rejected by admin ${adminUserId}`);
+    return { ok: true };
   }
 
   async getReferralStats(referrerUserId: number): Promise<{
@@ -999,6 +1156,8 @@ export class DatabaseStorage implements IStorage {
     referredCount: number;
     paidReferredCount: number;
     totalTokensEarned: number;
+    availableBalance: number;
+    pendingExchange: ReferralExchange | null;
     recent: Array<{
       id: number;
       referredUserId: number;
@@ -1010,6 +1169,13 @@ export class DatabaseStorage implements IStorage {
   }> {
     await this.ensureReferralSchema();
     const code = await this.ensureReferralCode(referrerUserId);
+    const availableBalance = await this.getReferralAvailableBalance(referrerUserId);
+
+    const [pendingExchange] = await db
+      .select()
+      .from(referralExchanges)
+      .where(and(eq(referralExchanges.userId, referrerUserId), eq(referralExchanges.status, "pending")))
+      .limit(1);
 
     const [countRow] = await db
       .select({ n: sql<number>`count(*)::int` })
@@ -1048,6 +1214,8 @@ export class DatabaseStorage implements IStorage {
       referredCount: Number(countRow?.n || 0),
       paidReferredCount: Number(paidRow?.n || 0),
       totalTokensEarned: Number(sumRow?.total || 0),
+      availableBalance,
+      pendingExchange: pendingExchange ?? null,
       recent: recentRows.map((r) => ({
         id: r.id,
         referredUserId: r.referredUserId,
