@@ -4,6 +4,12 @@ import { eq, desc, and, sql, gte, isNull } from "drizzle-orm";
 import crypto from "crypto";
 import { referralBonusTokens, normalizeReferralCode } from "./referral";
 
+/** Never serialize password hashes to API clients (admin or otherwise). */
+export function publicUser<T extends { password?: string | null }>(user: T): Omit<T, "password"> {
+  const { password: _pw, ...rest } = user;
+  return rest;
+}
+
 export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
@@ -21,6 +27,18 @@ export interface IStorage {
 
   getProject(id: number): Promise<Project | undefined>;
   getProjectsByUser(userId: number): Promise<Project[]>;
+  /** Status poll — never loads generatedCode / full message bodies. */
+  getProjectGenerationMeta(id: number): Promise<{
+    id: number;
+    userId: number;
+    updatedAt: Date;
+    codeBytes: number;
+    generatingPlaceholder: boolean;
+    animPending: boolean;
+    animReady: boolean;
+    messageCount: number;
+    lastModelAt: Date | null;
+  } | undefined>;
   createProject(project: InsertProject): Promise<Project>;
   updateProject(id: number, data: Partial<Project>): Promise<Project | undefined>;
   deleteProject(id: number): Promise<void>;
@@ -73,12 +91,15 @@ export interface IStorage {
   getAllPublishedProjects(): Promise<Project[]>;
   getAllUsersWithPublishedSites(): Promise<{ userId: number; publishedCount: number }[]>;
   getAllProjectsWithPendingAnim(): Promise<Project[]>;
+  /** Ids only — callers load one project at a time to avoid multi-MB heap spikes. */
+  listProjectIdsWithPendingAnim(limit?: number): Promise<number[]>;
+  listProjectIdsWithAnimTaskId(limit?: number): Promise<number[]>;
 
-  adminGetAllUsers(): Promise<User[]>;
+  adminGetAllUsers(): Promise<Omit<User, "password">[]>;
   adminGetUserTransactions(userId: number): Promise<import("@shared/schema").CreditTransaction[]>;
   getUserTransactionsPage(userId: number, limit: number, offset: number): Promise<{ items: import("@shared/schema").CreditTransaction[]; total: number }>;
-  adminAdjustCredits(userId: number, amount: number, type: "credit" | "debit", operation: string, note: string): Promise<User | undefined>;
-  adminGetUserProjects(userId: number): Promise<Project[]>;
+  adminAdjustCredits(userId: number, amount: number, type: "credit" | "debit", operation: string, note: string): Promise<Omit<User, "password"> | undefined>;
+  adminGetUserProjects(userId: number): Promise<Array<Omit<Project, "generatedCode"> & { generatedCode: ""; codeBytes: number }>>;
   adminGetStats(): Promise<{ totalUsers: number; totalProjects: number; totalTokensSpent: number; totalTokensAdded: number }>;
 
   createPaymentOrder(data: { userId: number; amount: number; tokens: number; orderId?: string; paymentUrl?: string }): Promise<PaymentOrder>;
@@ -360,8 +381,85 @@ export class DatabaseStorage implements IStorage {
     return project;
   }
 
+  async getProjectGenerationMeta(id: number): Promise<{
+    id: number;
+    userId: number;
+    updatedAt: Date;
+    codeBytes: number;
+    generatingPlaceholder: boolean;
+    animPending: boolean;
+    animReady: boolean;
+    messageCount: number;
+    lastModelAt: Date | null;
+  } | undefined> {
+    const [row] = await db
+      .select({
+        id: projects.id,
+        userId: projects.userId,
+        updatedAt: projects.updatedAt,
+        codeBytes: sql<number>`coalesce(octet_length(${projects.generatedCode}), 0)::int`,
+        generatingPlaceholder: sql<boolean>`(position('data-craft-generating="1"' in coalesce(${projects.generatedCode}, '')) > 0)`,
+        animPending: sql<boolean>`(position('data-scroll-anim-pending="1"' in coalesce(${projects.generatedCode}, '')) > 0)`,
+        hasScrollAnim: sql<boolean>`(position('data-craft-scrollanim' in coalesce(${projects.generatedCode}, '')) > 0)`,
+        hasAnimFallback: sql<boolean>`(position('data-scroll-anim-fallback="1"' in coalesce(${projects.generatedCode}, '')) > 0)`,
+      })
+      .from(projects)
+      .where(eq(projects.id, id));
+    if (!row) return undefined;
+
+    const [msg] = await db
+      .select({
+        messageCount: sql<number>`count(*)::int`,
+        lastModelAt: sql<Date | null>`max(case when ${projectMessages.role} in ('model', 'assistant') then ${projectMessages.createdAt} end)`,
+      })
+      .from(projectMessages)
+      .where(eq(projectMessages.projectId, id));
+
+    const animPending = Boolean(row.animPending);
+    return {
+      id: row.id,
+      userId: row.userId,
+      updatedAt: row.updatedAt,
+      codeBytes: Number(row.codeBytes || 0),
+      generatingPlaceholder: Boolean(row.generatingPlaceholder),
+      animPending,
+      animReady: !animPending && (Boolean(row.hasScrollAnim) || Boolean(row.hasAnimFallback)),
+      messageCount: Number(msg?.messageCount || 0),
+      lastModelAt: msg?.lastModelAt ?? null,
+    };
+  }
+
   async getProjectsByUser(userId: number): Promise<Project[]> {
-    return db.select().from(projects).where(eq(projects.userId, userId)).orderBy(desc(projects.createdAt));
+    // Never select generated_code for list views — full HTML OOMs the 1.8GB heap
+    // when dashboards load many projects (iframe srcDoc × N).
+    const rows = await db
+      .select({
+        id: projects.id,
+        userId: projects.userId,
+        title: projects.title,
+        description: projects.description,
+        geminiInteractionId: projects.geminiInteractionId,
+        publishedUrl: projects.publishedUrl,
+        publishStatus: projects.publishStatus,
+        vercelProjectId: projects.vercelProjectId,
+        ycStoragePoolId: projects.ycStoragePoolId,
+        customDomain: projects.customDomain,
+        type: projects.type,
+        seoConfig: projects.seoConfig,
+        createdAt: projects.createdAt,
+        updatedAt: projects.updatedAt,
+        hasPreview: sql<boolean>`(octet_length(coalesce(${projects.generatedCode}, '')) > 80)`,
+        codeBytes: sql<number>`coalesce(octet_length(${projects.generatedCode}), 0)::int`,
+      })
+      .from(projects)
+      .where(eq(projects.userId, userId))
+      .orderBy(desc(projects.createdAt));
+    return rows.map((r) => ({
+      ...r,
+      generatedCode: "",
+      hasPreview: Boolean(r.hasPreview),
+      codeBytes: Number(r.codeBytes || 0),
+    })) as Project[];
   }
 
   async createProject(insertProject: InsertProject): Promise<Project> {
@@ -711,13 +809,23 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAllProjectsWithPendingAnim(): Promise<Project[]> {
-    // SQL filter вЂ” avoid loading every project's generatedCode into Node.
+    // SQL filter — avoid loading every project's generatedCode into Node.
     return db.select().from(projects).where(
       sql`${projects.generatedCode} LIKE '%data-scroll-anim-pending="1"%'`,
     );
   }
 
-  // Returns all projects that have a Kling task ID stored вЂ” either in a pending
+  async listProjectIdsWithPendingAnim(limit = 12): Promise<number[]> {
+    const rows = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(sql`${projects.generatedCode} LIKE '%data-scroll-anim-pending="1"%'`)
+      .orderBy(desc(projects.updatedAt))
+      .limit(Math.max(1, Math.min(50, limit)));
+    return rows.map((r) => r.id);
+  }
+
+  // Returns all projects that have a Kling task ID stored — either in a pending
   // spinner section or in a fallback section written after a server restart.
   // Used by the periodic animation-resume job.
   async getAllProjectsWithAnimTaskId(): Promise<Project[]> {
@@ -726,8 +834,19 @@ export class DatabaseStorage implements IStorage {
     );
   }
 
-  async adminGetAllUsers(): Promise<User[]> {
-    return db.select().from(users).orderBy(desc(users.createdAt));
+  async listProjectIdsWithAnimTaskId(limit = 8): Promise<number[]> {
+    const rows = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(sql`${projects.generatedCode} LIKE '%data-scroll-anim-task-id="%'`)
+      .orderBy(desc(projects.updatedAt))
+      .limit(Math.max(1, Math.min(40, limit)));
+    return rows.map((r) => r.id);
+  }
+
+  async adminGetAllUsers(): Promise<Omit<User, "password">[]> {
+    const rows = await db.select().from(users).orderBy(desc(users.createdAt));
+    return rows.map(publicUser);
   }
 
   async adminGetUserTransactions(userId: number): Promise<CreditTransaction[]> {
@@ -750,22 +869,49 @@ export class DatabaseStorage implements IStorage {
     return { items, total };
   }
 
-  async adminAdjustCredits(userId: number, amount: number, type: "credit" | "debit", operation: string, note: string): Promise<User | undefined> {
+  async adminAdjustCredits(userId: number, amount: number, type: "credit" | "debit", operation: string, note: string): Promise<Omit<User, "password"> | undefined> {
     const idempotencyKey = `admin-${type}-${userId}-${Date.now()}-${Math.random()}`;
     if (type === "credit") {
       const result = await db.execute(sql`UPDATE users SET credits = credits + ${amount} WHERE id = ${userId} RETURNING credits`);
       const rows = result.rows as Array<{ credits: number }>;
       await db.insert(creditTransactions).values({ userId, amount, type: "credit", operation, note, idempotencyKey });
-      return this.getUser(userId);
+      const user = await this.getUser(userId);
+      return user ? publicUser(user) : undefined;
     } else {
       await db.execute(sql`UPDATE users SET credits = GREATEST(0, credits - ${amount}) WHERE id = ${userId}`);
       await db.insert(creditTransactions).values({ userId, amount, type: "debit", operation, note, idempotencyKey });
-      return this.getUser(userId);
+      const user = await this.getUser(userId);
+      return user ? publicUser(user) : undefined;
     }
   }
 
-  async adminGetUserProjects(userId: number): Promise<Project[]> {
-    return db.select().from(projects).where(eq(projects.userId, userId)).orderBy(desc(projects.createdAt));
+  async adminGetUserProjects(userId: number): Promise<Array<Omit<Project, "generatedCode"> & { generatedCode: ""; codeBytes: number }>> {
+    const rows = await db
+      .select({
+        id: projects.id,
+        userId: projects.userId,
+        title: projects.title,
+        description: projects.description,
+        geminiInteractionId: projects.geminiInteractionId,
+        publishedUrl: projects.publishedUrl,
+        publishStatus: projects.publishStatus,
+        vercelProjectId: projects.vercelProjectId,
+        ycStoragePoolId: projects.ycStoragePoolId,
+        customDomain: projects.customDomain,
+        type: projects.type,
+        seoConfig: projects.seoConfig,
+        createdAt: projects.createdAt,
+        updatedAt: projects.updatedAt,
+        codeBytes: sql<number>`coalesce(octet_length(${projects.generatedCode}), 0)::int`,
+      })
+      .from(projects)
+      .where(eq(projects.userId, userId))
+      .orderBy(desc(projects.createdAt));
+    return rows.map((r) => ({
+      ...r,
+      generatedCode: "" as const,
+      codeBytes: Number(r.codeBytes || 0),
+    }));
   }
 
   async adminGetStats(): Promise<{ totalUsers: number; totalProjects: number; totalTokensSpent: number; totalTokensAdded: number }> {

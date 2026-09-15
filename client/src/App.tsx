@@ -1,5 +1,5 @@
 import { Switch, Route, Redirect, useLocation } from "wouter";
-import { useEffect } from "react";
+import { useEffect, lazy, Suspense } from "react";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -8,17 +8,26 @@ import { AuthProvider, useAuth } from "@/lib/auth";
 import NotFound from "@/pages/not-found";
 import LandingPage from "@/pages/landing";
 import AuthPage from "@/pages/auth-page";
-import DashboardPage from "@/pages/dashboard";
-import EditorPage from "@/pages/editor";
-import SeoEditorPage from "@/pages/seo-editor";
-import LeadsPage from "@/pages/leads";
-import GenerationsPage from "@/pages/generations";
-import ProfilePage from "@/pages/profile";
-import LegalPage from "@/pages/legal";
-import AdminPage from "@/pages/admin";
 import CookieConsent from "@/components/cookie-consent";
 import { Loader2 } from "lucide-react";
 import { captureReferralFromUrl, storeReferralCode } from "@/lib/referral";
+
+const DashboardPage = lazy(() => import("@/pages/dashboard"));
+const EditorPage = lazy(() => import("@/pages/editor"));
+const SeoEditorPage = lazy(() => import("@/pages/seo-editor"));
+const LeadsPage = lazy(() => import("@/pages/leads"));
+const GenerationsPage = lazy(() => import("@/pages/generations"));
+const ProfilePage = lazy(() => import("@/pages/profile"));
+const LegalPage = lazy(() => import("@/pages/legal"));
+const AdminPage = lazy(() => import("@/pages/admin"));
+
+function RouteFallback() {
+  return (
+    <div className="min-h-screen flex items-center justify-center">
+      <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+    </div>
+  );
+}
 
 function ReferralCapture() {
   useEffect(() => {
@@ -36,40 +45,32 @@ function ReferralLanding({ params }: { params: { code?: string } }) {
     }
     setLocation(code ? `/auth?ref=${encodeURIComponent(code)}` : "/auth");
   }, [params.code, setLocation]);
-  return (
-    <div className="min-h-screen flex items-center justify-center">
-      <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
-    </div>
-  );
+  return <RouteFallback />;
 }
 
 function ProtectedRoute({ component: Component }: { component: React.ComponentType }) {
   const { user, isLoading } = useAuth();
 
   if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
-      </div>
-    );
+    return <RouteFallback />;
   }
 
   if (!user) {
     return <Redirect to="/auth" />;
   }
 
-  return <Component />;
+  return (
+    <Suspense fallback={<RouteFallback />}>
+      <Component />
+    </Suspense>
+  );
 }
 
 function AuthRoute() {
   const { user, isLoading } = useAuth();
 
   if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
-      </div>
-    );
+    return <RouteFallback />;
   }
 
   if (user) {
@@ -92,9 +93,21 @@ function Router() {
       <Route path="/editor/:id">{() => <ProtectedRoute component={EditorPage} />}</Route>
       <Route path="/seo/:id">{() => <ProtectedRoute component={SeoEditorPage} />}</Route>
       <Route path="/admin">{() => <ProtectedRoute component={AdminPage} />}</Route>
-      <Route path="/oferta">{() => <LegalPage doc="oferta" />}</Route>
-      <Route path="/privacy">{() => <LegalPage doc="privacy" />}</Route>
-      <Route path="/terms">{() => <LegalPage doc="terms" />}</Route>
+      <Route path="/oferta">{() => (
+        <Suspense fallback={<RouteFallback />}>
+          <LegalPage doc="oferta" />
+        </Suspense>
+      )}</Route>
+      <Route path="/privacy">{() => (
+        <Suspense fallback={<RouteFallback />}>
+          <LegalPage doc="privacy" />
+        </Suspense>
+      )}</Route>
+      <Route path="/terms">{() => (
+        <Suspense fallback={<RouteFallback />}>
+          <LegalPage doc="terms" />
+        </Suspense>
+      )}</Route>
       <Route component={NotFound} />
     </Switch>
   );

@@ -68,11 +68,11 @@ function seoEnvInt(name: string, fallback: number, max: number): number {
 }
 
 /**
- * How many articles to generate at once (text + cover). Article generation is
- * network-bound on KIE, not local CPU, so the old value of 4 left the pipeline
- * idle: a 500-keyword site took hours.
+ * How many articles to generate at once (text + cover). Network-bound on KIE,
+ * but each in-flight article holds HTML + cover buffers — default 4 on ≤2.5GB
+ * Amvera (was 12; override via SEO_ARTICLE_CONCURRENCY).
  */
-const SEO_ARTICLE_CONCURRENCY = seoEnvInt("SEO_ARTICLE_CONCURRENCY", 12, 32);
+const SEO_ARTICLE_CONCURRENCY = seoEnvInt("SEO_ARTICLE_CONCURRENCY", 4, 32);
 /** Pause between launching the next article — avoids bursting KIE. */
 const SEO_ARTICLE_STAGGER_MS = seoEnvInt("SEO_ARTICLE_STAGGER_MS", 400, 10_000);
 /** Cover image retries if KIE returns empty / error. */
