@@ -72,7 +72,7 @@ import {
   acquireBgAnim,
   getLoadStats,
   RESOURCE_PROFILE,
-  tryAcquireGenerate,
+  acquireGenerate,
   tryAcquirePublish,
   withFfmpegSlot,
   withImageSlot,
@@ -5228,12 +5228,27 @@ export async function registerRoutes(
         }
       }
 
-      const releaseGenerate = tryAcquireGenerate();
+      // Open SSE before the generate queue so proxies don't kill a silent wait,
+      // and the UI keeps showing normal "generating" status (no busy toast).
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      try {
+        res.write(`data: ${JSON.stringify({ status: "Генерируем сайт...", generating: true })}\n\n`);
+      } catch { /* ignore */ }
+
+      const releaseGenerate = await acquireGenerate({
+        onWait: () => {
+          try {
+            res.write(`data: ${JSON.stringify({ status: "Генерируем сайт...", generating: true })}\n\n`);
+          } catch { /* ignore */ }
+        },
+      });
       if (!releaseGenerate) {
-        return res.status(503).json({
-          message: "Сервер сейчас обрабатывает много генераций. Подождите 1–2 минуты и повторите.",
-          overloaded: true,
-        });
+        writeSseJson(res, { done: true, error: "Не удалось запустить генерацию. Попробуйте ещё раз." });
+        try { res.end(); } catch {}
+        return;
       }
       let generateSlotHeld = true;
       dropGenerateSlot = () => {
@@ -5274,8 +5289,14 @@ export async function registerRoutes(
         const chatDeduction = await storage.deductCredits(user.id, CHAT_COST, "generate", chatIkey);
         if (!chatDeduction.success) {
           dropGenerateSlot?.();
+          const msg = `Не хватает токенов. Нужно ${CHAT_COST}, у вас ${chatDeduction.newBalance}.`;
+          if (res.headersSent) {
+            writeSseJson(res, { done: true, error: msg, newBalance: chatDeduction.newBalance });
+            try { res.end(); } catch {}
+            return;
+          }
           return res.status(402).json({
-            message: `Не хватает токенов. Нужно ${CHAT_COST}, у вас ${chatDeduction.newBalance}.`,
+            message: msg,
             newBalance: chatDeduction.newBalance,
           });
         }
@@ -5309,9 +5330,7 @@ export async function registerRoutes(
         }
         chatHistory.push({ role: "user", content: [{ type: "input_text", text: prompt }] });
 
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("Connection", "keep-alive");
+        // SSE already opened before the generate queue.
         res.write(`data: ${JSON.stringify({ status: "Анализирую сайт и готовлю ответ…" })}\n\n`);
 
         const providers: Array<"gemini" | "claude"> = useGemini
@@ -5384,8 +5403,14 @@ export async function registerRoutes(
             isVolumeEstimate
               ? `до ${estimateImages} фото/текстур`
               : `${estimateVideos === 1 ? "видео" : `до ${estimateVideos} видео`} + до ${estimateImages} фото`;
+          const msg = `Для интерактивного режима нужно минимум ${interactiveEstimate} токенов (сайт + ${mediaHint}). У вас ${bal}.`;
+          if (res.headersSent) {
+            writeSseJson(res, { done: true, error: msg, newBalance: bal });
+            try { res.end(); } catch {}
+            return;
+          }
           return res.status(402).json({
-            message: `Для интерактивного режима нужно минимум ${interactiveEstimate} токенов (сайт + ${mediaHint}). У вас ${bal}.`,
+            message: msg,
             required: interactiveEstimate,
             newBalance: bal,
           });
@@ -5397,7 +5422,13 @@ export async function registerRoutes(
       const genDeduction = await storage.deductCredits(user.id, GENERATION_COST, "generate", genIkey);
       if (!genDeduction.success) {
         dropGenerateSlot?.();
-        return res.status(402).json({ message: `Не хватает токенов. Нужно ${GENERATION_COST}, у вас ${genDeduction.newBalance}.`, newBalance: genDeduction.newBalance });
+        const msg = `Не хватает токенов. Нужно ${GENERATION_COST}, у вас ${genDeduction.newBalance}.`;
+        if (res.headersSent) {
+          writeSseJson(res, { done: true, error: msg, newBalance: genDeduction.newBalance });
+          try { res.end(); } catch {}
+          return;
+        }
+        return res.status(402).json({ message: msg, newBalance: genDeduction.newBalance });
       }
       const genBilledFlag = !genDeduction.alreadyProcessed;
       genBilled = genBilledFlag;
@@ -5427,10 +5458,7 @@ export async function registerRoutes(
 
       const projectImgs = await storage.getProjectImages(project.id);
 
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("Connection", "keep-alive");
-
+      // SSE headers already set before the generate queue.
       // Persist a generating placeholder ASAP so reload/disconnect can poll the project
       // until the real HTML is written. Edits keep the previous site visible in DB.
       if (isNewSite) {
@@ -5448,10 +5476,7 @@ export async function registerRoutes(
 
       let enhancedPrompt = prompt;
 
-      if (isNewSite) {
-        res.write(`data: ${JSON.stringify({ status: "Генерируем сайт...", generating: true })}\n\n`);
-      }
-
+      // Status already streamed while waiting in the generate queue.
       // Existing-site edits use a dedicated lean coding-agent prompt. Sending the
       // full site-generation master prompt here added tens of thousands of tokens,
       // contradicted patch instructions, and made Gemini V2 answer with prose.

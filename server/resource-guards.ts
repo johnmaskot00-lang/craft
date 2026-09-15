@@ -253,14 +253,10 @@ function rejectIfHeapPressure(kind: string): boolean {
 
 /** Max wall-clock a generate slot may be held (covers hung KIE streams). */
 const GENERATE_SLOT_MAX_MS = envInt("CRAFT_GENERATE_SLOT_MAX_MS", 12 * 60 * 1000);
+/** How long a request may wait in the generate queue before failing silently-ish. */
+const GENERATE_QUEUE_MAX_MS = envInt("CRAFT_GENERATE_QUEUE_MAX_MS", 15 * 60 * 1000);
 
-export function tryAcquireGenerate(): Release | null {
-  if (rejectIfHeapPressure("generate")) return null;
-  const rel = generateSem.tryAcquire();
-  if (!rel) {
-    console.warn(`[LOAD] generate rejected — ${JSON.stringify(generateSem.stats())}`);
-    return null;
-  }
+function wrapGenerateRelease(rel: Release): Release {
   let released = false;
   const releaseOnce = () => {
     if (released) return;
@@ -274,9 +270,87 @@ export function tryAcquireGenerate(): Release | null {
     );
     releaseOnce();
   }, GENERATE_SLOT_MAX_MS);
-  // Don't keep the process awake solely for the watchdog.
   forceTimer.unref?.();
   return releaseOnce;
+}
+
+/**
+ * Non-blocking acquire — prefer acquireGenerate() so clients queue silently.
+ * Kept for callers that must not hold an HTTP request open.
+ */
+export function tryAcquireGenerate(): Release | null {
+  const rssMb = process.memoryUsage().rss / 1024 / 1024;
+  const rssRatio = rssMb / Math.max(256, RESOURCE_PROFILE.ramMb);
+  if (isHeapUnderPressure() || rssRatio >= 0.88) {
+    console.warn(
+      `[LOAD] generate tryAcquire skipped — heap ${(heapPressureRatio() * 100).toFixed(0)}% rss=${Math.round(rssMb)}MB`,
+    );
+    return null;
+  }
+  const rel = generateSem.tryAcquire();
+  if (!rel) return null;
+  return wrapGenerateRelease(rel);
+}
+
+/**
+ * Queue for a generate slot. The HTTP/SSE request stays open — user just sees
+ * normal loading, no "server busy" toast. Waits up to CRAFT_GENERATE_QUEUE_MAX_MS.
+ * Pass onWait to keep SSE/proxies alive while queued (called ~every 2s).
+ */
+export async function acquireGenerate(
+  timeoutMs: number | { timeoutMs?: number; onWait?: () => void } = GENERATE_QUEUE_MAX_MS,
+): Promise<Release | null> {
+  const opts = typeof timeoutMs === "number" ? { timeoutMs } : timeoutMs;
+  const maxWait = Math.max(5_000, opts.timeoutMs ?? GENERATE_QUEUE_MAX_MS);
+  const onWait = opts.onWait;
+  const deadline = Date.now() + maxWait;
+  const remaining = () => Math.max(0, deadline - Date.now());
+
+  const stats = generateSem.stats();
+  if (stats.active >= stats.max || stats.waiting > 0) {
+    console.log(`[LOAD] generate queued — ${JSON.stringify(stats)}`);
+  }
+
+  const heartbeat = onWait
+    ? setInterval(() => {
+        try { onWait(); } catch { /* ignore */ }
+      }, 2000)
+    : null;
+  heartbeat?.unref?.();
+
+  let rel: Release | null = null;
+  try {
+    rel = await generateSem.acquire(remaining());
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
+  }
+
+  if (!rel) {
+    console.warn(`[LOAD] generate queue timeout — ${JSON.stringify(generateSem.stats())}`);
+    return null;
+  }
+
+  // Hold the slot but wait for memory to cool if needed (other jobs finishing).
+  while (remaining() > 0) {
+    const rssMb = process.memoryUsage().rss / 1024 / 1024;
+    const rssRatio = rssMb / Math.max(256, RESOURCE_PROFILE.ramMb);
+    if (!isHeapUnderPressure() && rssRatio < 0.88) break;
+    try { onWait?.(); } catch { /* ignore */ }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+
+  const rssMb = process.memoryUsage().rss / 1024 / 1024;
+  const rssRatio = rssMb / Math.max(256, RESOURCE_PROFILE.ramMb);
+  if (isHeapUnderPressure() || rssRatio >= 0.88) {
+    console.warn(
+      `[LOAD] generate aborted after queue — memory still high ` +
+        `heap=${(heapPressureRatio() * 100).toFixed(0)}% rss=${Math.round(rssMb)}MB`,
+    );
+    rel();
+    return null;
+  }
+
+  return wrapGenerateRelease(rel);
 }
 
 export function tryAcquirePublish(): Release | null {

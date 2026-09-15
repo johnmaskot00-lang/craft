@@ -13,7 +13,7 @@ import type {
 import { resolveSeoOffer, seoOfferProductName, SEO_CONTENT_TYPES } from "@shared/schema";
 import crypto from "crypto";
 import { withKieCallback, waitForKieJob, kieResultUrl, type KieTaskData } from "./kie-jobs";
-import { tryAcquireGenerate, withImageSlot } from "./resource-guards";
+import { acquireGenerate, withImageSlot } from "./resource-guards";
 import {
   runToolCallingAgent,
   buildSeoMultipageEditSystemPrompt,
@@ -3959,9 +3959,11 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
       return;
     }
 
-    const releaseGenerate = tryAcquireGenerate();
+    const releaseGenerate = await acquireGenerate({
+      onWait: () => send({ type: "heartbeat", generated: 0, total: cfg.pagesTotal, ts: Date.now() }),
+    });
     if (!releaseGenerate) {
-      send({ type: "error", message: "Сервер сейчас обрабатывает много генераций. Подождите 1–2 минуты и повторите." });
+      send({ type: "error", message: "Не удалось запустить генерацию. Попробуйте ещё раз." });
       try { res.end(); } catch {}
       return;
     }
@@ -4641,12 +4643,22 @@ Respond ONLY with valid JSON (no markdown):
       return res.status(400).json({ message: "Сначала сгенерируйте статьи SEO-сайта" });
     }
 
-    const releaseGenerate = tryAcquireGenerate();
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    const earlySend = (data: object) => {
+      try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
+    };
+    earlySend({ status: "Готовлю правку…" });
+
+    const releaseGenerate = await acquireGenerate({
+      onWait: () => earlySend({ status: "Готовлю правку…" }),
+    });
     if (!releaseGenerate) {
-      return res.status(503).json({
-        message: "Сервер сейчас обрабатывает много генераций. Подождите 1–2 минуты и повторите.",
-        overloaded: true,
-      });
+      earlySend({ done: true, error: "Не удалось запустить генерацию. Попробуйте ещё раз." });
+      try { res.end(); } catch {}
+      return;
     }
 
     const ikey = `seo-edit-${proj.id}-${crypto.randomUUID()}`;
@@ -4654,20 +4666,18 @@ Respond ONLY with valid JSON (no markdown):
     try {
       const ded = await storage.deductCredits(userId, SEO_EDIT_COST, "seo-edit", ikey);
       if (!ded.success) {
-        return res.status(403).json({
-          message: `Недостаточно токенов. Правка стоит ${SEO_EDIT_COST} ток.`,
+        releaseGenerate();
+        earlySend({
+          done: true,
+          error: `Недостаточно токенов. Правка стоит ${SEO_EDIT_COST} ток.`,
           newBalance: ded.newBalance,
         });
+        try { res.end(); } catch {}
+        return;
       }
       billed = !ded.alreadyProcessed;
 
-      res.setHeader("Content-Type", "text/event-stream");
-      res.setHeader("Cache-Control", "no-cache");
-      res.setHeader("Connection", "keep-alive");
-      res.setHeader("X-Accel-Buffering", "no");
-      const send = (data: object) => {
-        try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
-      };
+      const send = earlySend;
 
       await storage.createProjectMessage({ projectId: proj.id, role: "user", content: prompt });
 
