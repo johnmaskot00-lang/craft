@@ -186,6 +186,9 @@ export function setupAuth(app: Express) {
       if (!email || !password || !displayName) {
         return res.status(400).json({ message: "Все поля обязательны" });
       }
+      if (String(password).length < 8) {
+        return res.status(400).json({ message: "Пароль должен быть не короче 8 символов" });
+      }
 
       const existing = await storage.getUserByEmail(email);
       if (existing) {

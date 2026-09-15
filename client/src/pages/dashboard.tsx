@@ -451,7 +451,22 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (userProjects.length > 0 && !isFetching) {
-      try { localStorage.setItem("craft_projects_cache", JSON.stringify(userProjects)); } catch {}
+      try {
+        // Never cache full HTML blobs — list API no longer returns generatedCode.
+        const slim = userProjects.map((p) => ({
+          id: p.id,
+          title: p.title,
+          description: p.description,
+          publishStatus: p.publishStatus,
+          publishedUrl: p.publishedUrl,
+          customDomain: p.customDomain,
+          type: p.type,
+          createdAt: p.createdAt,
+          updatedAt: p.updatedAt,
+          hasPreview: (p as any).hasPreview,
+        }));
+        localStorage.setItem("craft_projects_cache", JSON.stringify(slim));
+      } catch {}
     }
   }, [userProjects, isFetching]);
 
@@ -1177,18 +1192,30 @@ export default function DashboardPage() {
                 style={{ borderRadius: '2rem', overflow: 'hidden', background: '#fff', border: '1px solid rgba(0,0,0,0.06)', boxShadow: '0 2px 20px rgba(0,0,0,0.04)', position: 'relative' }}
               >
                 {/* Preview */}
-                <div style={{ height: 220, position: 'relative', overflow: 'hidden', background: '#FBFBFD', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  {project.generatedCode ? (
-                    <div style={{ width: '100%', height: '100%', transform: 'scale(0.4)', transformOrigin: 'center', opacity: 0.7, transition: 'all 0.7s', filter: 'blur(1px)' }}
-                      className="group-hover:opacity-100 group-hover:blur-none">
-                      <iframe srcDoc={project.generatedCode} sandbox="" loading="lazy" className="border-none pointer-events-none" style={{ width: '250%', height: '250%' }} />
+                <div style={{ height: 220, position: "relative", overflow: "hidden", background: "#F5F5F7", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  {(project as any).hasPreview || project.publishStatus === "published" ? (
+                    <div style={{
+                      width: "100%", height: "100%",
+                      background: project.type === "seo"
+                        ? "linear-gradient(145deg, #EEF2FF 0%, #F8FAFC 55%, #ECFDF5 100%)"
+                        : "linear-gradient(145deg, #F0F9FF 0%, #F8FAFC 50%, #FFF7ED 100%)",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>
+                      <div style={{
+                        width: 72, height: 72, borderRadius: 20,
+                        background: "rgba(255,255,255,0.85)", border: "1px solid rgba(0,0,0,0.06)",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: "1.6rem", fontWeight: 800, color: "#1D1D1F", letterSpacing: "-0.04em",
+                      }}>
+                        {(project.title || "C").trim().charAt(0).toUpperCase()}
+                      </div>
                     </div>
                   ) : (
-                    <div style={{ width: 64, height: 64, borderRadius: 20, background: 'rgba(0,0,0,0.04)', border: '1px solid rgba(0,0,0,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      <Code2 style={{ width: 32, height: 32, color: 'rgba(0,0,0,0.12)' }} />
+                    <div style={{ width: 64, height: 64, borderRadius: 20, background: "rgba(0,0,0,0.04)", border: "1px solid rgba(0,0,0,0.06)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <Code2 style={{ width: 32, height: 32, color: "rgba(0,0,0,0.12)" }} />
                     </div>
                   )}
-                  <div className="absolute inset-0 transition-opacity duration-500 group-hover:opacity-30" style={{ background: 'linear-gradient(to top, rgba(255,255,255,0.98) 0%, rgba(255,255,255,0.1) 100%)' }} />
+                  <div className="absolute inset-0 transition-opacity duration-500 group-hover:opacity-30" style={{ background: "linear-gradient(to top, rgba(255,255,255,0.98) 0%, rgba(255,255,255,0.1) 100%)" }} />
                 </div>
 
                 {/* Info */}

@@ -370,7 +370,7 @@ export async function acquireBgAnim(timeoutMs = 30_000): Promise<Release | null>
 
 export async function withFfmpegSlot<T>(fn: () => Promise<T>, timeoutMs = 180_000): Promise<T> {
   const rel = await ffmpegSem.acquire(timeoutMs);
-  if (!rel) throw new Error("Сервер занят обработкой видео. Подождите минуту и повторите.");
+  if (!rel) throw new Error("Сервер сейчас обрабатывает другое видео. Повторите через минуту.");
   try {
     return await fn();
   } finally {
@@ -380,10 +380,10 @@ export async function withFfmpegSlot<T>(fn: () => Promise<T>, timeoutMs = 180_00
 
 export async function withImageSlot<T>(fn: () => Promise<T>, timeoutMs = 120_000): Promise<T> {
   if (rejectIfHeapPressure("image-job")) {
-    throw new Error("Сервер перегружен (память). Подождите минуту и повторите.");
+    throw new Error("Сервер временно перегружен. Повторите через минуту.");
   }
   const rel = await imageSem.acquire(timeoutMs);
-  if (!rel) throw new Error("Очередь генерации изображений переполнена. Повторите через минуту.");
+  if (!rel) throw new Error("Очередь изображений полна. Повторите через минуту.");
   try {
     return await fn();
   } finally {
@@ -394,10 +394,10 @@ export async function withImageSlot<T>(fn: () => Promise<T>, timeoutMs = 120_000
 export async function withUploadSlot<T>(fn: () => Promise<T>, timeoutMs = 60_000): Promise<T> {
   if (isHeapUnderPressure(0.88)) {
     console.warn(`[LOAD] upload rejected — heap pressure ${(heapPressureRatio() * 100).toFixed(0)}%`);
-    throw new Error("Сервер перегружен (память). Подождите минуту и повторите.");
+    throw new Error("Сервер временно перегружен. Повторите через минуту.");
   }
   const rel = await uploadSem.acquire(timeoutMs);
-  if (!rel) throw new Error("Слишком много загрузок одновременно. Подождите и повторите.");
+  if (!rel) throw new Error("Слишком много загрузок сразу. Повторите чуть позже.");
   try {
     return await fn();
   } finally {

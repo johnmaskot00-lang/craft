@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import { storage, VERSION_RETENTION_PER_PROJECT } from "./storage";
+import { storage, VERSION_RETENTION_PER_PROJECT, publicUser } from "./storage";
 import {
   SCROLL_IMMERSION_COST,
   SW_SCENE_COUNT,
@@ -4476,7 +4476,6 @@ export async function registerRoutes(
   });
 
   app.get("/api/health", async (_req, res) => {
-    const mem = process.memoryUsage();
     try {
       await db.execute(sql`SELECT 1`);
     } catch (err: any) {
@@ -4523,9 +4522,6 @@ export async function registerRoutes(
       mediaBackend,
       gitSha,
       uptime: Math.round(process.uptime()),
-      rssMb: Math.round(mem.rss / 1024 / 1024),
-      heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
-      load: getLoadStats(),
     });
   });
 
@@ -4567,6 +4563,24 @@ export async function registerRoutes(
     `);
     // connect-pg-simple normally prunes hourly; clean any backlog left while DB was unhealthy.
     await db.execute(sql`DELETE FROM session WHERE expire < NOW()`).catch(() => undefined);
+
+    // Hot-path indexes — without these, version retention + message lists scan full tables.
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS project_versions_project_created_idx
+      ON project_versions (project_id, created_at DESC, id DESC)
+    `).catch((e: any) => console.warn("[boot] versions index:", e?.message?.slice?.(0, 120) || e));
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS project_messages_project_created_idx
+      ON project_messages (project_id, created_at DESC)
+    `).catch((e: any) => console.warn("[boot] messages index:", e?.message?.slice?.(0, 120) || e));
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS projects_user_created_idx
+      ON projects (user_id, created_at DESC)
+    `).catch((e: any) => console.warn("[boot] projects index:", e?.message?.slice?.(0, 120) || e));
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS credit_transactions_user_created_idx
+      ON credit_transactions (user_id, created_at DESC)
+    `).catch((e: any) => console.warn("[boot] credits index:", e?.message?.slice?.(0, 120) || e));
     const after = await db.execute(sql`
       SELECT
         (SELECT COUNT(*)::int FROM project_versions) AS count,
@@ -4852,23 +4866,19 @@ export async function registerRoutes(
   app.get("/api/projects/:id/generation-status", requireAuth, async (req, res) => {
     try {
       const projectId = parseInt(req.params.id);
-      const project = await storage.getProject(projectId);
-      if (!project) return res.status(404).json({ message: "Проект не найден" });
-      if (project.userId !== (req.user as any).id) {
+      const meta = await storage.getProjectGenerationMeta(projectId);
+      if (!meta) return res.status(404).json({ message: "Проект не найден" });
+      if (meta.userId !== (req.user as any).id) {
         return res.status(403).json({ message: "Доступ запрещён" });
       }
       const active = activeProjectGenerations.get(projectId);
-      const code = project.generatedCode || "";
-      const generatingPlaceholder = isCraftGeneratingHtml(code);
-      const animPending = code.includes('data-scroll-anim-pending="1"');
-      const animReady =
-        !animPending &&
-        (code.includes("data-craft-scrollanim") || code.includes('data-scroll-anim-fallback="1"'));
       // Orphan placeholder: DB says "generating" but this process has no in-flight job
       // (typical after Amvera SIGTERM / redeploy mid-LLM). Clear so the client can retry.
       let orphanPlaceholder = false;
-      if (generatingPlaceholder && !active && !animPending) {
+      let generatingPlaceholder = meta.generatingPlaceholder;
+      if (generatingPlaceholder && !active && !meta.animPending) {
         orphanPlaceholder = true;
+        generatingPlaceholder = false;
         try {
           await storage.updateProject(projectId, { generatedCode: "" });
           console.warn(`[GEN-STATUS] cleared orphan craft-generating for project ${projectId}`);
@@ -4876,20 +4886,19 @@ export async function registerRoutes(
           console.warn(`[GEN-STATUS] orphan clear failed for ${projectId}:`, e?.message || e);
         }
       }
-      const msgs = await storage.getProjectMessages(projectId).catch(() => []);
-      const lastModel = [...msgs].reverse().find((m: any) => m.role === "model" || m.role === "assistant");
       res.json({
         // Real in-memory work only — never lie "active" for a dead placeholder after restart.
-        active: !!active || animPending,
-        generatingPlaceholder: orphanPlaceholder ? false : generatingPlaceholder,
+        active: !!active || meta.animPending,
+        generatingPlaceholder,
         orphanPlaceholder,
-        animPending,
-        animReady,
+        animPending: meta.animPending,
+        animReady: meta.animReady,
         provider: active?.provider,
         elapsedSec: active ? Math.max(1, Math.round((Date.now() - active.startedAt) / 1000)) : 0,
-        updatedAt: project.updatedAt,
-        messageCount: msgs.length,
-        lastModelAt: lastModel?.createdAt || null,
+        updatedAt: meta.updatedAt,
+        codeBytes: meta.codeBytes,
+        messageCount: meta.messageCount,
+        lastModelAt: meta.lastModelAt,
       });
     } catch {
       res.status(500).json({ message: "Ошибка проверки генерации" });
@@ -10023,7 +10032,7 @@ ${fullHtml}`;
     }
   });
 
-  const ADMIN_TELEGRAM_ID = process.env.ADMIN_TELEGRAM_ID || "661325490";
+  const ADMIN_TELEGRAM_ID = (process.env.ADMIN_TELEGRAM_ID || "").trim();
   const adminOnly = (req: any, res: any, next: any) => {
     if (!req.user) return res.status(403).json({ message: "Forbidden" });
     const adminIds = (process.env.ADMIN_USER_IDS || "")
@@ -10032,9 +10041,7 @@ ${fullHtml}`;
       .filter((n: number) => Number.isFinite(n) && n > 0);
     const isAdmin =
       adminIds.includes(req.user.id)
-      || (ADMIN_TELEGRAM_ID && req.user.telegramId === ADMIN_TELEGRAM_ID)
-      // Legacy: only if ADMIN_USER_IDS unset — prefer setting ADMIN_USER_IDS in prod
-      || (adminIds.length === 0 && req.user.id === 1);
+      || (!!ADMIN_TELEGRAM_ID && req.user.telegramId === ADMIN_TELEGRAM_ID);
     if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
     next();
   };
@@ -10042,9 +10049,18 @@ ${fullHtml}`;
   app.get("/api/admin/stats", adminOnly, async (req, res) => {
     try {
       const stats = await storage.adminGetStats();
-      res.json(stats);
+      const mem = process.memoryUsage();
+      res.json({
+        ...stats,
+        gitSha: process.env.APP_GIT_SHA || process.env.GIT_SHA || null,
+        uptime: Math.round(process.uptime()),
+        rssMb: Math.round(mem.rss / 1024 / 1024),
+        heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
+        load: getLoadStats(),
+      });
     } catch (err: any) {
-      res.status(500).json({ message: err.message });
+      console.error("[admin/stats]", err);
+      res.status(500).json({ message: "Не удалось загрузить статистику" });
     }
   });
 
@@ -10053,7 +10069,8 @@ ${fullHtml}`;
       const allUsers = await storage.adminGetAllUsers();
       res.json(allUsers);
     } catch (err: any) {
-      res.status(500).json({ message: err.message });
+      console.error("[admin/users]", err);
+      res.status(500).json({ message: "Не удалось загрузить пользователей" });
     }
   });
 
@@ -10061,10 +10078,11 @@ ${fullHtml}`;
     try {
       const userId = parseInt(req.params.userId);
       const user = await storage.getUser(userId);
-      if (!user) return res.status(404).json({ message: "User not found" });
-      res.json(user);
+      if (!user) return res.status(404).json({ message: "Пользователь не найден" });
+      res.json(publicUser(user));
     } catch (err: any) {
-      res.status(500).json({ message: err.message });
+      console.error("[admin/user]", err);
+      res.status(500).json({ message: "Не удалось загрузить пользователя" });
     }
   });
 
@@ -10074,7 +10092,8 @@ ${fullHtml}`;
       const txns = await storage.adminGetUserTransactions(userId);
       res.json(txns);
     } catch (err: any) {
-      res.status(500).json({ message: err.message });
+      console.error("[admin/txns]", err);
+      res.status(500).json({ message: "Не удалось загрузить транзакции" });
     }
   });
 
@@ -10084,7 +10103,8 @@ ${fullHtml}`;
       const userProjects = await storage.adminGetUserProjects(userId);
       res.json(userProjects);
     } catch (err: any) {
-      res.status(500).json({ message: err.message });
+      console.error("[admin/projects]", err);
+      res.status(500).json({ message: "Не удалось загрузить проекты" });
     }
   });
 
@@ -10093,12 +10113,13 @@ ${fullHtml}`;
       const userId = parseInt(req.params.userId);
       const { amount, type, note } = req.body;
       if (!amount || !type || !["credit", "debit"].includes(type)) {
-        return res.status(400).json({ message: "amount, type (credit|debit) required" });
+        return res.status(400).json({ message: "Нужны amount и type (credit|debit)" });
       }
       const user = await storage.adminAdjustCredits(userId, Number(amount), type, type === "credit" ? "admin_add" : "admin_deduct", note || "");
       res.json({ success: true, user });
     } catch (err: any) {
-      res.status(500).json({ message: err.message });
+      console.error("[admin/credits]", err);
+      res.status(500).json({ message: "Не удалось изменить баланс" });
     }
   });
 
@@ -10445,20 +10466,24 @@ ${fullHtml}`;
   const STUCK_PENDING_MIN_AGE_MS = 50 * 60 * 1000; // > Kling ~38–40 min deadline
   async function cleanupStuckPendingAnims(label: string) {
     try {
-      const allProjects = await storage.getAllProjectsWithPendingAnim();
-      if (!allProjects || allProjects.length === 0) return;
+      // Ids first — never load N full HTML blobs into one array on 1.8GB heap.
+      const pendingIds = await storage.listProjectIdsWithPendingAnim(16);
+      if (!pendingIds.length) return;
       const now = Date.now();
-      const stale = allProjects.filter((proj) => {
-        if (activeProjectGenerations.has(proj.id)) return false;
+      const stale: Array<NonNullable<Awaited<ReturnType<typeof storage.getProject>>>> = [];
+      for (const id of pendingIds) {
+        if (activeProjectGenerations.has(id)) continue;
+        const proj = await storage.getProject(id);
+        if (!proj) continue;
         const updated = proj.updatedAt ? new Date(proj.updatedAt).getTime() : 0;
-        if (updated && now - updated < STUCK_PENDING_MIN_AGE_MS) return false;
-        return true;
-      });
+        if (updated && now - updated < STUCK_PENDING_MIN_AGE_MS) continue;
+        stale.push(proj);
+      }
       if (!stale.length) {
-        console.log(`[${label}] ${allProjects.length} pending anim(s) still fresh/active — skipping`);
+        console.log(`[${label}] ${pendingIds.length} pending anim(s) still fresh/active — skipping`);
         return;
       }
-      console.log(`[${label}] Found ${stale.length}/${allProjects.length} stuck animation placeholder(s) — replacing with fallback (no media delete)`);
+      console.log(`[${label}] Found ${stale.length}/${pendingIds.length} stuck animation placeholder(s) — replacing with fallback (no media delete)`);
       for (const proj of stale) {
         try {
           const html = proj.generatedCode || "";
@@ -10581,12 +10606,14 @@ ${fullHtml}`;
   // the original server connection was lost or the server was restarted mid-pipeline.
   async function resumeCompletedKlingTasks() {
     if (!KIE_API_KEY) return;
-    let projects: any[] = [];
-    try { projects = await storage.getAllProjectsWithAnimTaskId(); } catch { return; }
-    if (!projects.length) return;
-    console.log(`[KLINGTASK] Scanning ${projects.length} project(s) with saved task IDs…`);
+    let projectIds: number[] = [];
+    try { projectIds = await storage.listProjectIdsWithAnimTaskId(8); } catch { return; }
+    if (!projectIds.length) return;
+    console.log(`[KLINGTASK] Scanning ${projectIds.length} project(s) with saved task IDs…`);
 
-    for (const proj of projects) {
+    for (const projectId of projectIds) {
+      const proj = await storage.getProject(projectId);
+      if (!proj) continue;
       const html: string = proj.generatedCode || "";
 
       // Collect every task ID in this project (pending + fallback can coexist on rare edge)

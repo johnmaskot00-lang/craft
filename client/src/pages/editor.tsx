@@ -546,13 +546,28 @@ export default function EditorPage() {
 
     animPollRef.current = setInterval(async () => {
       try {
-        const [statusResp, projectResp] = await Promise.all([
-          fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" }),
-          fetch(`/api/projects/${projectId}`, { credentials: "include" }),
-        ]);
-        if (!projectResp.ok) return;
-        const status = statusResp.ok ? await statusResp.json().catch(() => null) : null;
-        const proj = await projectResp.json();
+        const statusResp = await fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" });
+        if (!statusResp.ok) return;
+        const status = await statusResp.json().catch(() => null);
+        if (!status) return;
+
+        const prevUpdated = (queryClient.getQueryData(["/api/projects", projectId]) as any)?.updatedAt;
+        const statusUpdated = status.updatedAt ? String(status.updatedAt) : "";
+        const needsHtml =
+          !prevUpdated ||
+          (statusUpdated && statusUpdated !== String(prevUpdated)) ||
+          status.orphanPlaceholder ||
+          status.animReady ||
+          (!status.active && !status.animPending);
+
+        let proj: any = queryClient.getQueryData(["/api/projects", projectId]);
+        if (needsHtml) {
+          const projectResp = await fetch(`/api/projects/${projectId}`, { credentials: "include" });
+          if (!projectResp.ok) return;
+          proj = await projectResp.json();
+        }
+        if (!proj) return;
+
         const c: string = proj?.generatedCode || "";
         const stillSite = isCraftGeneratingHtml(c);
         const stillAnim = c.includes('data-scroll-anim-pending="1"');
@@ -862,17 +877,15 @@ export default function EditorPage() {
             if (animPollRef.current) clearInterval(animPollRef.current);
             animPollRef.current = setInterval(async () => {
               try {
-                const [statusResp, projectResp] = await Promise.all([
-                  fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" }),
-                  fetch(`/api/projects/${projectId}`, { credentials: "include" }),
-                ]);
+                const statusResp = await fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" });
                 const status = statusResp.ok ? await statusResp.json().catch(() => null) : null;
-                const proj = projectResp.ok ? await projectResp.json() : null;
                 const idle = status && status.active === false && !status.generatingPlaceholder;
                 const timedOut = Date.now() - pollStart > 12 * 60 * 1000;
                 if (idle || timedOut) {
                   clearInterval(animPollRef.current!);
                   animPollRef.current = null;
+                  const projectResp = await fetch(`/api/projects/${projectId}`, { credentials: "include" });
+                  const proj = projectResp.ok ? await projectResp.json() : null;
                   if (proj?.generatedCode && !isCraftGeneratingHtml(proj.generatedCode)) {
                     applyBakedPreview(proj.generatedCode, proj);
                   }
@@ -896,21 +909,27 @@ export default function EditorPage() {
             if (animPollRef.current) clearInterval(animPollRef.current);
             animPollRef.current = setInterval(async () => {
               try {
+                const statusResp = await fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" });
+                if (!statusResp.ok) return;
+                const status = await statusResp.json().catch(() => null);
+                if (!status) return;
+                const done =
+                  (!status.active && !status.generatingPlaceholder) ||
+                  Date.now() - pollStart > POLL_TIMEOUT;
+                if (!done) return;
+                clearInterval(animPollRef.current!);
+                animPollRef.current = null;
                 const resp = await fetch(`/api/projects/${projectId}`, { credentials: "include" });
-                if (!resp.ok) return;
+                if (!resp.ok) { resolve(); return; }
                 const proj = await resp.json();
                 const c: string = proj?.generatedCode || "";
-                if (!isCraftGeneratingHtml(c) || Date.now() - pollStart > POLL_TIMEOUT) {
-                  clearInterval(animPollRef.current!);
-                  animPollRef.current = null;
-                  if (c && !isCraftGeneratingHtml(c)) {
-                    applyBakedPreview(c, proj);
-                    gotFinalCode = true;
-                  }
-                  queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
-                  queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "messages"] });
-                  resolve();
+                if (c && !isCraftGeneratingHtml(c)) {
+                  applyBakedPreview(c, proj);
+                  gotFinalCode = true;
                 }
+                queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+                queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "messages"] });
+                resolve();
               } catch {}
             }, 3000);
           });
@@ -1119,12 +1138,14 @@ export default function EditorPage() {
                   return;
                 }
                 try {
-                  const [statusResp, resp] = await Promise.all([
-                    fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" }),
-                    fetch(`/api/projects/${projectId}`, { credentials: "include" }),
-                  ]);
+                  const statusResp = await fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" });
+                  if (!statusResp.ok) return;
+                  const status = await statusResp.json().catch(() => null);
+                  if (!status) return;
+                  const ready = status.animReady || (!status.animPending && !status.active);
+                  if (!ready) return;
+                  const resp = await fetch(`/api/projects/${projectId}`, { credentials: "include" });
                   if (!resp.ok) return;
-                  const status = statusResp.ok ? await statusResp.json().catch(() => null) : null;
                   const proj = await resp.json();
                   const code: string = proj?.generatedCode || "";
                   const pending = code.includes('data-scroll-anim-pending="1"');
@@ -1212,31 +1233,29 @@ export default function EditorPage() {
         if (animPollRef.current) clearInterval(animPollRef.current);
         animPollRef.current = setInterval(async () => {
           try {
-            const [statusResp, projectResp] = await Promise.all([
-              fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" }),
-              fetch(`/api/projects/${projectId}`, { credentials: "include" }),
-            ]);
-            if (!projectResp.ok) return;
-            const status = statusResp.ok ? await statusResp.json() : null;
-            const proj = await projectResp.json();
-            const c: string = proj?.generatedCode || "";
-            const stillGenerating = isCraftGeneratingHtml(c);
-            const stillAnim = c.includes('data-scroll-anim-pending="1"');
-            const latestUpdatedAt = proj?.updatedAt ? new Date(proj.updatedAt).getTime() : 0;
-            const changedOnServer = c !== baselineCode || latestUpdatedAt > baselineUpdatedAt;
-            const messagesGrew = typeof status?.messageCount === "number" && status.messageCount > baselineMsgCount;
+            const statusResp = await fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" });
+            if (!statusResp.ok) return;
+            const status = await statusResp.json();
+            const stillGenerating = !!status.generatingPlaceholder;
+            const stillAnim = !!status.animPending;
             const timedOut = Date.now() - pollStart > POLL_TIMEOUT;
-            const serverIdle = status && status.active === false && !stillGenerating;
+            const serverIdle = status.active === false && !stillGenerating;
+            const messagesGrew = typeof status?.messageCount === "number" && status.messageCount > baselineMsgCount;
+            const statusUpdated = status.updatedAt ? new Date(status.updatedAt).getTime() : 0;
+            const changedOnServer = statusUpdated > baselineUpdatedAt || (typeof status.codeBytes === "number" && status.codeBytes !== (baselineCode?.length || 0));
 
             if (
               timedOut ||
               (serverIdle && (changedOnServer || messagesGrew || !stillGenerating)) ||
-              (!status?.active && changedOnServer && !stillGenerating && c && c.length > 80)
+              (!status?.active && changedOnServer && !stillGenerating)
             ) {
               clearInterval(animPollRef.current!);
               animPollRef.current = null;
               setIsGenerating(false);
               setGenerationStatus(null);
+              const projectResp = await fetch(`/api/projects/${projectId}`, { credentials: "include" });
+              const proj = projectResp.ok ? await projectResp.json() : null;
+              const c: string = proj?.generatedCode || "";
               if (c && !isCraftGeneratingHtml(c)) {
                 applyBakedPreview(c, proj);
               } else if (timedOut && (!c || isCraftGeneratingHtml(c))) {

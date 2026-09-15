@@ -115,6 +115,26 @@ app.use((req, res, next) => {
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
+
+  const shutdown = (signal: string) => {
+    console.warn(`[boot] ${signal} — closing HTTP server`);
+    httpServer.close(() => {
+      console.warn("[boot] HTTP server closed");
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(1), 12_000).unref?.();
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("unhandledRejection", (reason) => {
+    console.error("[boot] unhandledRejection:", reason);
+  });
+  process.on("uncaughtException", (err) => {
+    console.error("[boot] uncaughtException:", err);
+    // Exit so Amvera can restart a clean process instead of a wedged one.
+    setTimeout(() => process.exit(1), 500).unref?.();
+  });
+
   httpServer.listen(
     {
       port,
@@ -125,4 +145,7 @@ app.use((req, res, next) => {
       log(`serving on port ${port}`);
     },
   );
-})();
+})().catch((err) => {
+  console.error("[boot] fatal:", err);
+  process.exit(1);
+});
