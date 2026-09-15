@@ -1,3 +1,4 @@
+/**
  * Process-wide concurrency guards for local heavy work (ffmpeg / publish / uploads).
  *
  * Site HTML generation is mostly network I/O to KIE (stream + callbacks), but each
