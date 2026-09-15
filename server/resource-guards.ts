@@ -1,11 +1,12 @@
-/**
  * Process-wide concurrency guards for local heavy work (ffmpeg / publish / uploads).
  *
- * Site HTML generation is mostly network I/O to KIE (stream + callbacks). Do NOT
- * bottleneck those at 2 — default CRAFT_MAX_GENERATES=100. Memory safety comes from:
- *   - heap-pressure rejection (rejectIfHeapPressure)
+ * Site HTML generation is mostly network I/O to KIE (stream + callbacks), but each
+ * active generate still holds conversation + HTML in V8. On 2.5GB Amvera default
+ * CRAFT_MAX_GENERATES=8 (not 100). Memory safety comes from:
+ *   - heap + RSS pressure rejection (rejectIfHeapPressure)
  *   - SSE payload shrinking (buildSseDataFrame / fetchCode) so we never JSON.stringify
  *     dozens of multi‑MB HTML blobs at once
+ *   - version list metadata-only (getProjectVersionSummaries)
  *   - generate-slot watchdog (force-release hung streams)
  *   - releasing the generate slot as soon as the LLM stream finishes — GENIMG / Kling
  *     wait on KIE callbacks and use imageSem / bgAnimSem / ffmpegSem instead
@@ -15,6 +16,7 @@
  *   CRAFT_RAM_MB=2560|6144
  *   CRAFT_MAX_GENERATES / CRAFT_MAX_BG_ANIM / CRAFT_MAX_FFMPEG /
  *   CRAFT_MAX_PUBLISH / CRAFT_MAX_IMAGE_JOBS / CRAFT_MAX_UPLOADS
+ *   CRAFT_VERSION_RETENTION
  */
 
 function envInt(name: string, fallback: number): number {
@@ -25,17 +27,18 @@ function envInt(name: string, fallback: number): number {
 const ramMb = envInt("CRAFT_RAM_MB", 2560);
 
 /**
- * Defaults: up to ~100 concurrent KIE generate waits (network-bound).
- * Keep local media jobs capped on small RAM so ffmpeg/JPEG extract cannot OOM.
+ * Defaults tuned for Amvera 2.5GB: HTML generations are network-bound to KIE,
+ * but each open SSE + conversation + version write still holds tens of MB in V8.
+ * Cap concurrent generates hard — 100× on 1.8GB heap OOMs the whole site.
  */
 const defaults = ramMb >= 5000
-  ? { generates: 100, bgAnim: 6, ffmpeg: 2, publish: 2, images: 12, uploads: 4, heapMb: 4096 }
-  : { generates: 100, bgAnim: 4, ffmpeg: 1, publish: 1, images: 8, uploads: 2, heapMb: 1792 };
+  ? { generates: 24, bgAnim: 6, ffmpeg: 2, publish: 2, images: 12, uploads: 4, heapMb: 4096 }
+  : { generates: 8, bgAnim: 2, ffmpeg: 1, publish: 1, images: 4, uploads: 2, heapMb: 1792 };
 
 export const RESOURCE_PROFILE = {
   ramMb,
   heapMb: envInt("NODE_MAX_OLD_SPACE_SIZE", defaults.heapMb),
-  maxGenerates: Math.min(100, envInt("CRAFT_MAX_GENERATES", defaults.generates)),
+  maxGenerates: Math.min(40, envInt("CRAFT_MAX_GENERATES", defaults.generates)),
   maxBgAnim: envInt("CRAFT_MAX_BG_ANIM", defaults.bgAnim),
   maxFfmpeg: envInt("CRAFT_MAX_FFMPEG", defaults.ffmpeg),
   maxPublish: envInt("CRAFT_MAX_PUBLISH", defaults.publish),
@@ -167,7 +170,7 @@ export function buildSseDataFrame(
 
   const pressure = heapPressureRatio();
   const est = estimateStringHeavyBytes(body);
-  const mustShrink = est > maxBytes || pressure >= 0.78;
+  const mustShrink = est > maxBytes || pressure >= 0.65;
 
   if (mustShrink) {
     for (const key of SSE_HEAVY_KEYS) {
@@ -229,15 +232,20 @@ export function writeSseJson(
   }
 }
 
-export function isHeapUnderPressure(ratio = 0.82): boolean {
+/** Soft reject before V8 FATAL / cgroup OOM — leave headroom for JSON + GC. */
+export function isHeapUnderPressure(ratio = 0.70): boolean {
   return heapPressureRatio() >= ratio;
 }
 
 function rejectIfHeapPressure(kind: string): boolean {
-  if (!isHeapUnderPressure()) return false;
+  const heapRatio = heapPressureRatio();
+  const rssMb = process.memoryUsage().rss / 1024 / 1024;
+  const rssRatio = rssMb / Math.max(256, RESOURCE_PROFILE.ramMb);
+  if (heapRatio < 0.70 && rssRatio < 0.88) return false;
   console.warn(
-    `[LOAD] ${kind} rejected — heap pressure ${(heapPressureRatio() * 100).toFixed(0)}% ` +
-      `(${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB / ${RESOURCE_PROFILE.heapMb}MB)`,
+    `[LOAD] ${kind} rejected — heap ${(heapRatio * 100).toFixed(0)}% ` +
+      `(${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB / ${RESOURCE_PROFILE.heapMb}MB) ` +
+      `rss=${Math.round(rssMb)}MB / ${RESOURCE_PROFILE.ramMb}MB`,
   );
   return true;
 }
@@ -347,7 +355,7 @@ console.log(
 let lastHeapWarnAt = 0;
 setInterval(() => {
   const ratio = heapPressureRatio();
-  if (ratio < 0.75) return;
+  if (ratio < 0.60) return;
   const now = Date.now();
   if (now - lastHeapWarnAt < 60_000) return;
   lastHeapWarnAt = now;

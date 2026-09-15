@@ -10,7 +10,16 @@ import { useLocation, useParams } from "wouter";
 import { queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
-import type { Project, ProjectMessage, ProjectImage, ProjectVersion, ProjectFile } from "@shared/schema";
+import type { Project, ProjectMessage, ProjectImage, ProjectFile } from "@shared/schema";
+
+type VersionSummary = {
+  id: number;
+  projectId: number;
+  label: string;
+  createdAt: string;
+  codeBytes?: number;
+  hasFiles?: boolean;
+};
 import { isEditorVisibleProjectFile, isInternalAgentFile } from "@shared/project-files";
 import JSZip from "jszip";
 import { UITemplatesModal } from "@/components/ui-templates";
@@ -340,7 +349,7 @@ export default function EditorPage() {
     queryKey: ["/api/projects", projectId, "images"],
   });
 
-  const { data: versions = [] } = useQuery<ProjectVersion[]>({
+  const { data: versions = [] } = useQuery<VersionSummary[]>({
     queryKey: ["/api/projects", projectId, "versions"],
   });
 
@@ -3402,20 +3411,26 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
           <ScrollArea className="flex-1">
             <div className="py-5 space-y-4 px-4 min-w-0">
               {(() => {
-                const currentCodeStr = streamedCode || project?.generatedCode || "";
+                // Label/message markers only — never compare full HTML (versions API is metadata-only).
                 let activeModelIdx = -1;
-                // Prefer the exact message marker; fall back to legacy vN labels.
-                if (currentCodeStr && versions.length > 0) {
+                if (versions.length > 0) {
                   let matchedVNum = -1;
                   let matchedMessageId = -1;
                   for (const v of versions) {
+                    const messageMatch = (v.label || "").match(/\[msg:(\d+)\]/);
                     const m = (v.label || "").match(/^v(\d+)\b/);
-                    if (m && v.code === currentCodeStr) {
-                      matchedVNum = parseInt(m[1], 10);
-                      const messageMatch = (v.label || "").match(/\[msg:(\d+)\]/);
-                      if (messageMatch) matchedMessageId = parseInt(messageMatch[1], 10);
+                    if (messageMatch) {
+                      matchedMessageId = parseInt(messageMatch[1], 10);
+                      if (m) matchedVNum = parseInt(m[1], 10);
                       break;
                     }
+                    if (m && matchedVNum < 0) matchedVNum = parseInt(m[1], 10);
+                  }
+                  // Prefer newest result checkpoint as "active" when labels match chat.
+                  const newestResult = versions.find((v) => /^v\d+\b/.test(v.label || "") && /\[msg:\d+\]/.test(v.label || ""));
+                  if (newestResult) {
+                    const messageMatch = (newestResult.label || "").match(/\[msg:(\d+)\]/);
+                    if (messageMatch) matchedMessageId = parseInt(messageMatch[1], 10);
                   }
                   if (matchedMessageId > 0) {
                     activeModelIdx = messages.findIndex((message) => message.id === matchedMessageId);

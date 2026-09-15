@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import { storage } from "./storage";
+import { storage, VERSION_RETENTION_PER_PROJECT } from "./storage";
 import {
   SCROLL_IMMERSION_COST,
   SW_SCENE_COUNT,
@@ -584,7 +584,7 @@ async function saveChatResultVersion(
 ): Promise<void> {
   if (!code?.trim()) return;
   try {
-    const versions = await storage.getProjectVersions(projectId);
+    const versions = await storage.getProjectVersionSummaries(projectId);
     const messageMarker = messageId ? `[msg:${messageId}]` : "";
     const existingByMessage = messageMarker
       ? versions.find((version) => (version.label || "").includes(messageMarker))
@@ -2253,16 +2253,17 @@ async function healHollowCraftScrollAnimFromVersions(
 ): Promise<string> {
   if (!isHollowCraftScrollAnim(html)) return html;
   try {
-    const versions = await storage.getProjectVersions(projectId);
-    for (const v of versions) {
-      const code = v.code || "";
+    const summaries = await storage.getProjectVersionSummaries(projectId);
+    for (const summary of summaries) {
+      const v = await storage.getProjectVersion(summary.id);
+      const code = v?.code || "";
       if (!code.includes("data-craft-scrollanim")) continue;
       if (isHollowCraftScrollAnim(code)) continue;
       const blocks = extractFinishedCraftScrollAnimBlocks(code);
       if (!blocks.length) continue;
       const repaired = replaceHollowCraftScrollAnim(html, blocks);
       if (repaired !== html && !isHollowCraftScrollAnim(repaired)) {
-        console.log(`[HEAL] Restored hollow craft-scrollanim for project ${projectId} from version ${v.id}`);
+        console.log(`[HEAL] Restored hollow craft-scrollanim for project ${projectId} from version ${summary.id}`);
         await storage.updateProject(projectId, { generatedCode: repaired });
         return repaired;
       }
@@ -4544,9 +4545,8 @@ export async function registerRoutes(
 
   try {
     // DB retention only — NEVER deletes /objects media (interactive hero frames/mp4/photos).
-    // project_versions store full HTML snapshots and can fill the Postgres volume;
-    // keep the newest 80 per project. Object-storage blobs under /data/*/private/uploads
-    // are retained indefinitely for live sites.
+    // project_versions store full HTML snapshots and can fill the Postgres volume + Node heap;
+    // keep the newest N per project (see VERSION_RETENTION_PER_PROJECT).
     // Use relation size instead of SUM(octet_length(code)+files::text) — the latter
     // forces Postgres to materialize hundreds of MB of version snapshots on every boot.
     const before = await db.execute(sql`
@@ -4562,7 +4562,7 @@ export async function registerRoutes(
                  row_number() OVER (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS rn
           FROM project_versions
         ) ranked
-        WHERE rn > 80
+        WHERE rn > ${VERSION_RETENTION_PER_PROJECT}
       )
     `);
     // connect-pg-simple normally prunes hourly; clean any backlog left while DB was unhealthy.
@@ -8600,10 +8600,27 @@ ${designAnalysis}
       if (!project) return res.status(404).json({ message: "Проект не найден" });
       const user = req.user as any;
       if (project.userId !== user.id) return res.status(403).json({ message: "Доступ запрещён" });
-      const versions = await storage.getProjectVersions(project.id);
+      // Metadata only — full HTML for 20 versions was OOMing the 1.8GB heap.
+      const versions = await storage.getProjectVersionSummaries(project.id);
       res.json(versions);
     } catch (err) {
       res.status(500).json({ message: "Ошибка загрузки версий" });
+    }
+  });
+
+  app.get("/api/projects/:id/versions/:versionId", requireAuth, async (req, res) => {
+    try {
+      const project = await storage.getProject(parseInt(req.params.id));
+      if (!project) return res.status(404).json({ message: "Проект не найден" });
+      const user = req.user as any;
+      if (project.userId !== user.id) return res.status(403).json({ message: "Доступ запрещён" });
+      const version = await storage.getProjectVersion(parseInt(req.params.versionId));
+      if (!version || version.projectId !== project.id) {
+        return res.status(404).json({ message: "Версия не найдена" });
+      }
+      res.json(version);
+    } catch (err) {
+      res.status(500).json({ message: "Ошибка загрузки версии" });
     }
   });
 
@@ -8623,7 +8640,14 @@ ${designAnalysis}
         label: label || "Ручной чекпоинт",
         files: filesSnapshot.length > 0 ? filesSnapshot : null,
       });
-      res.status(201).json(version);
+      res.status(201).json({
+        id: version.id,
+        projectId: version.projectId,
+        label: version.label,
+        createdAt: version.createdAt,
+        codeBytes: Buffer.byteLength(version.code || "", "utf8"),
+        hasFiles: Array.isArray(version.files) && version.files.length > 0,
+      });
     } catch (err) {
       res.status(500).json({ message: "Ошибка сохранения версии" });
     }
@@ -8636,9 +8660,10 @@ ${designAnalysis}
       const user = req.user as any;
       if (project.userId !== user.id) return res.status(403).json({ message: "Доступ запрещён" });
 
-      const versions = await storage.getProjectVersions(project.id);
-      const version = versions.find(v => v.id === parseInt(req.params.versionId));
-      if (!version) return res.status(404).json({ message: "Версия не найдена" });
+      const version = await storage.getProjectVersion(parseInt(req.params.versionId));
+      if (!version || version.projectId !== project.id) {
+        return res.status(404).json({ message: "Версия не найдена" });
+      }
       if (!version.code?.trim()) {
         return res.status(400).json({ message: "В этой версии нет сохранённого кода" });
       }
@@ -10785,14 +10810,7 @@ ${fullHtml}`;
         // Prefer restoring last non-placeholder version; else empty so user can retry.
         let restored = "";
         try {
-          const versions = await storage.getProjectVersions(row.id);
-          for (const v of versions) {
-            const code = v.code || "";
-            if (code && !isCraftGeneratingHtml(code) && code.length > 80) {
-              restored = code;
-              break;
-            }
-          }
+          restored = (await storage.getLatestHealthyVersionCode(row.id)) || "";
         } catch {}
         await storage.updateProject(row.id, { generatedCode: restored });
         cleared++;

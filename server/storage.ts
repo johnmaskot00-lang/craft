@@ -35,6 +35,18 @@ export interface IStorage {
   deleteProjectImage(id: number): Promise<void>;
 
   getProjectVersions(projectId: number): Promise<ProjectVersion[]>;
+  /** Metadata only — never loads HTML/files into memory (list UI / label lookup). */
+  getProjectVersionSummaries(projectId: number): Promise<Array<{
+    id: number;
+    projectId: number;
+    label: string;
+    createdAt: Date;
+    codeBytes: number;
+    hasFiles: boolean;
+  }>>;
+  getProjectVersion(id: number): Promise<ProjectVersion | undefined>;
+  /** Latest non-placeholder version code without loading the whole history. */
+  getLatestHealthyVersionCode(projectId: number): Promise<string | null>;
   createProjectVersion(version: InsertProjectVersion): Promise<ProjectVersion>;
   updateProjectVersion(id: number, data: { code?: string; files?: { filename: string; code: string }[] | null; label?: string }): Promise<ProjectVersion | undefined>;
 
@@ -124,6 +136,12 @@ export interface IStorage {
 }
 
 export const NEW_USER_CREDITS = 0;
+
+/** Max version snapshots kept per project (full HTML). Was 80 — blew heap on list. */
+export const VERSION_RETENTION_PER_PROJECT = Math.max(
+  5,
+  Math.min(40, Number(process.env.CRAFT_VERSION_RETENTION) || 20),
+);
 
 export class DatabaseStorage implements IStorage {
   async getUser(id: number): Promise<User | undefined> {
@@ -445,14 +463,77 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getProjectVersions(projectId: number): Promise<ProjectVersion[]> {
-    return db.select().from(projectVersions).where(eq(projectVersions.projectId, projectId)).orderBy(desc(projectVersions.createdAt));
+    // Prefer getProjectVersionSummaries / getProjectVersion for new code paths.
+    // Kept for rare heal/admin callers that need full rows — always LIMIT.
+    return db
+      .select()
+      .from(projectVersions)
+      .where(eq(projectVersions.projectId, projectId))
+      .orderBy(desc(projectVersions.createdAt))
+      .limit(VERSION_RETENTION_PER_PROJECT);
+  }
+
+  async getProjectVersionSummaries(projectId: number): Promise<Array<{
+    id: number;
+    projectId: number;
+    label: string;
+    createdAt: Date;
+    codeBytes: number;
+    hasFiles: boolean;
+  }>> {
+    const rows = await db.execute(sql`
+      SELECT
+        id,
+        project_id AS "projectId",
+        label,
+        created_at AS "createdAt",
+        coalesce(octet_length(code), 0)::int AS "codeBytes",
+        (files IS NOT NULL)::boolean AS "hasFiles"
+      FROM project_versions
+      WHERE project_id = ${projectId}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ${VERSION_RETENTION_PER_PROJECT}
+    `);
+    return (rows.rows as Array<{
+      id: number;
+      projectId: number;
+      label: string;
+      createdAt: Date;
+      codeBytes: number;
+      hasFiles: boolean;
+    }>).map((r) => ({
+      id: Number(r.id),
+      projectId: Number(r.projectId),
+      label: r.label || "",
+      createdAt: r.createdAt,
+      codeBytes: Number(r.codeBytes || 0),
+      hasFiles: Boolean(r.hasFiles),
+    }));
+  }
+
+  async getProjectVersion(id: number): Promise<ProjectVersion | undefined> {
+    const [v] = await db.select().from(projectVersions).where(eq(projectVersions.id, id)).limit(1);
+    return v;
+  }
+
+  async getLatestHealthyVersionCode(projectId: number): Promise<string | null> {
+    const res = await db.execute(sql`
+      SELECT code
+      FROM project_versions
+      WHERE project_id = ${projectId}
+        AND octet_length(code) > 80
+        AND code NOT ILIKE '%data-craft-generating="1"%'
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `);
+    const code = (res.rows as Array<{ code: string }>)[0]?.code;
+    return code && code.trim() ? code : null;
   }
 
   async createProjectVersion(version: InsertProjectVersion): Promise<ProjectVersion> {
     const [v] = await db.insert(projectVersions).values(version).returning();
     // Version snapshots contain full HTML + multipage files and can be hundreds
-    // of KB each. Keep a bounded history per project to prevent PostgreSQL/WAL
-    // from filling the CNPG volume again. Does NOT delete /objects media files.
+    // of KB–MB each. Keep a tight history per project to protect Postgres + Node RAM.
     try {
       await db.execute(sql`
         DELETE FROM project_versions
@@ -461,7 +542,7 @@ export class DatabaseStorage implements IStorage {
           FROM project_versions
           WHERE project_id = ${version.projectId}
           ORDER BY created_at DESC, id DESC
-          OFFSET 80
+          OFFSET ${VERSION_RETENTION_PER_PROJECT}
         )
       `);
     } catch (err: any) {
