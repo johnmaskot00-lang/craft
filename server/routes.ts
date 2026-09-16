@@ -4475,11 +4475,11 @@ export async function registerRoutes(
       try {
         const metaPath = path.join(process.cwd(), "server", "deploy-meta.json");
         const altPath = path.join(process.cwd(), "deploy-meta.json");
-        const raw = fs.existsSync(metaPath)
+        const raw = (fs.existsSync(metaPath)
           ? fs.readFileSync(metaPath, "utf8")
           : fs.existsSync(altPath)
           ? fs.readFileSync(altPath, "utf8")
-          : "";
+          : "").replace(/^\uFEFF/, "");
         if (raw) gitSha = JSON.parse(raw)?.gitSha || null;
       } catch { /* ignore */ }
     }
