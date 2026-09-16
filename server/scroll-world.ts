@@ -95,8 +95,13 @@ type KieTaskResult = {
 // ─── Scrub engine (inlined into published HTML) ──────────────────────────────
 
 function loadScrubEngineJs(): string {
+  // Amvera slim artifacts ship `dist/` (vite copies public → dist/public).
+  // Older layouts keep client/public; flat artifact maps may put the file at /public.
   const candidates = [
+    path.resolve(process.cwd(), "dist/public/scroll-world-engine.js"),
     path.resolve(process.cwd(), "client/public/scroll-world-engine.js"),
+    path.resolve(process.cwd(), "public/scroll-world-engine.js"),
+    path.resolve(process.cwd(), "scroll-world-engine.js"),
     "/workspace/client/public/scroll-world-engine.js",
     "/tmp/scroll-world/scrub-engine.js",
   ];
@@ -115,8 +120,7 @@ function loadScrubEngineJs(): string {
     }
   }
   throw new Error(
-    "[SCROLLWORLD] scrub engine not found — expected " +
-      "client/public/scroll-world-engine.js or /tmp/scroll-world/scrub-engine.js",
+    "[SCROLLWORLD] scrub engine not found — expected dist/public or client/public scroll-world-engine.js",
   );
 }
 

@@ -17,8 +17,8 @@ build:
     "server": /
     "shared": /
     "scripts": /
-    # scroll-world.ts loads this at boot from client/public/...
-    "client/public": /
+    # Keep engine path for boot; also lands in dist/public via vite.
+    "client/public/scroll-world-engine.js": /client/public/
     "package.json": /
     "package-lock.json": /
     "amvera.yaml": /
