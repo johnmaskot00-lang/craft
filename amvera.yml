@@ -17,6 +17,8 @@ build:
     "server": /
     "shared": /
     "scripts": /
+    # scroll-world.ts loads this at boot from client/public/...
+    "client/public": /
     "package.json": /
     "package-lock.json": /
     "amvera.yaml": /
