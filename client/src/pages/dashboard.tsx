@@ -439,6 +439,7 @@ export default function DashboardPage() {
   const [mockupGenerating, setMockupGenerating] = useState(false);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [projectFilter, setProjectFilter] = useState<"all" | "published" | "draft" | "trash">("all");
+  const [projectSearch, setProjectSearch] = useState("");
   const [projectSort, setProjectSort] = useState<"updated" | "created">("updated");
   const [openProjectMenu, setOpenProjectMenu] = useState<number | null>(null);
 
@@ -463,13 +464,21 @@ export default function DashboardPage() {
     } else if (projectFilter === "trash") {
       list = [];
     }
+    const q = projectSearch.trim().toLowerCase();
+    if (q) {
+      list = list.filter((p) =>
+        (p.title || "").toLowerCase().includes(q) ||
+        (p.publishedUrl || "").toLowerCase().includes(q) ||
+        ((p as any).customDomain || "").toLowerCase().includes(q)
+      );
+    }
     list.sort((a, b) => {
       const aTime = new Date((projectSort === "created" ? a.createdAt : a.updatedAt || a.createdAt) as string | Date).getTime();
       const bTime = new Date((projectSort === "created" ? b.createdAt : b.updatedAt || b.createdAt) as string | Date).getTime();
       return bTime - aTime;
     });
     return list;
-  }, [userProjects, projectFilter, projectSort]);
+  }, [userProjects, projectFilter, projectSort, projectSearch]);
 
   const projectUrlLabel = (project: Project) => {
     const custom = (project as any).customDomain as string | undefined;
@@ -479,6 +488,16 @@ export default function DashboardPage() {
       try { return new URL(published).hostname; } catch { return published.replace(/^https?:\/\//i, ""); }
     }
     return (project as any).type === "seo" ? `seo/${project.id}` : `проект #${project.id}`;
+  };
+
+  /** First image found inside the generated site — used as the card thumbnail. */
+  const projectPreviewSrc = (project: Project): string | null => {
+    const raw = ((project as any).previewImage as string | undefined)?.trim();
+    if (!raw) return null;
+    const src = raw.replace(/^['"]|['"]$/g, "");
+    if (!src || src.startsWith("data:") || src.includes("{{")) return null;
+    if (src.startsWith("http://") || src.startsWith("https://") || src.startsWith("/objects/")) return src;
+    return null;
   };
 
   const projectStatusMeta = (project: Project) => {
@@ -503,6 +522,7 @@ export default function DashboardPage() {
           createdAt: p.createdAt,
           updatedAt: p.updatedAt,
           hasPreview: (p as any).hasPreview,
+          previewImage: (p as any).previewImage ?? null,
         }));
         localStorage.setItem("craft_projects_cache", JSON.stringify(slim));
       } catch {}
@@ -821,6 +841,10 @@ export default function DashboardPage() {
           background: linear-gradient(#fff, #fff) padding-box, var(--rainbow-grad) border-box;
           background-size: 200% auto; animation: db-rainbow 3s linear infinite;
         }
+        @media (max-width: 1023px) {
+          .db-shell-row { flex-direction: column !important; }
+          .db-side { display: none !important; }
+        }
         @media (max-width: 639px) {
           .db-magic-btn { height: 2.25rem; padding: 0 0.75rem; font-size: 0.8rem; }
           .db-tpl-layout { flex-direction: column !important; height: min(85dvh, 720px) !important; min-height: 0 !important; }
@@ -1029,12 +1053,15 @@ export default function DashboardPage() {
       ` }} />
       {/* Soft landscape wash behind glass content */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden>
-        <div style={{ position: 'absolute', inset: '-10% 0 auto', height: '55%', background: 'radial-gradient(ellipse at 40% 30%, rgba(255,255,255,0.55) 0%, transparent 60%)', filter: 'blur(2px)' }} />
-        <div style={{ position: 'absolute', bottom: '-8%', left: '-5%', right: '-5%', height: '42%', background: 'linear-gradient(180deg, transparent, rgba(120,140,160,0.12))', borderRadius: '50% 50% 0 0 / 40% 40% 0 0', filter: 'blur(28px)' }} />
+        <div style={{ position: 'absolute', inset: '-6% -4% auto', height: '58%', background: 'radial-gradient(ellipse at 35% 25%, rgba(255,255,255,0.7) 0%, transparent 62%)' }} />
+        {/* Distant ridge silhouettes — the reference photo backdrop */}
+        <div style={{ position: 'absolute', left: '-8%', right: '-8%', bottom: '6%', height: '34%', background: 'linear-gradient(180deg, rgba(150,175,200,0.30), rgba(150,175,200,0.05))', clipPath: 'polygon(0 62%, 12% 40%, 24% 55%, 38% 26%, 52% 48%, 66% 22%, 79% 46%, 90% 33%, 100% 52%, 100% 100%, 0 100%)', filter: 'blur(6px)' }} />
+        <div style={{ position: 'absolute', left: '-10%', right: '-10%', bottom: 0, height: '26%', background: 'linear-gradient(180deg, rgba(120,145,170,0.24), rgba(120,145,170,0.06))', clipPath: 'polygon(0 70%, 16% 48%, 30% 66%, 45% 38%, 60% 60%, 74% 40%, 88% 62%, 100% 46%, 100% 100%, 0 100%)', filter: 'blur(10px)' }} />
+        <div style={{ position: 'absolute', inset: 'auto 0 0', height: '30%', background: 'linear-gradient(180deg, transparent, rgba(232,240,248,0.75))' }} />
       </div>
 
-      {/* Header — matching landing page nav */}
-      <header className="fixed top-0 left-0 right-0 z-50" style={{ padding: '0.75rem 0', transition: 'all 0.3s', background: 'rgba(251,251,253,0.85)', backdropFilter: 'blur(20px)', borderBottom: '1px solid rgba(0,0,0,0.04)' }}>
+      {/* Header — same structure as before, tinted glass instead of the white bar */}
+      <header className="fixed top-0 left-0 right-0 z-50" style={{ padding: '0.75rem 0', transition: 'all 0.3s', background: 'linear-gradient(180deg, rgba(226,236,247,0.72), rgba(226,236,247,0.48))', backdropFilter: 'blur(28px) saturate(1.4)', WebkitBackdropFilter: 'blur(28px) saturate(1.4)', borderBottom: '1px solid rgba(255,255,255,0.55)', boxShadow: '0 8px 30px rgba(30,50,80,0.06)' }}>
         <div className="max-w-7xl mx-auto px-3 sm:px-6 flex items-center justify-between gap-2">
           {/* Logo identical to landing page */}
           <div className="flex items-center gap-2 sm:gap-2.5 cursor-pointer shrink-0" onClick={() => setLocation("/")}>
@@ -1176,27 +1203,129 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      <main className="relative z-10 max-w-7xl mx-auto px-3 sm:px-6" style={{ paddingTop: '5.25rem', flex: 1, paddingBottom: '2.5rem', width: '100%' }}>
+      <main className="relative z-10 max-w-7xl mx-auto px-3 sm:px-6 db-shell-row" style={{ paddingTop: '5.25rem', flex: 1, paddingBottom: '2.5rem', width: '100%', display: 'flex', gap: isMobile ? 0 : 18, alignItems: 'stretch' }}>
+        {/* Liquid-glass sidebar — reference layout */}
+        <aside className="db-side" style={{
+          width: 214,
+          flexShrink: 0,
+          borderRadius: 28,
+          background: 'rgba(255,255,255,0.34)',
+          backdropFilter: 'blur(40px) saturate(1.5)',
+          WebkitBackdropFilter: 'blur(40px) saturate(1.5)',
+          border: '1px solid rgba(255,255,255,0.6)',
+          boxShadow: '0 24px 70px rgba(30,50,80,0.10), inset 0 1px 0 rgba(255,255,255,0.75)',
+          padding: '1.1rem 0.85rem',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+        }}>
+          {([
+            { id: 'sites', label: 'Мои сайты', icon: <FolderOpen className="w-4 h-4" />, onClick: () => setProjectFilter('all') },
+            { id: 'templates', label: 'Шаблоны', icon: <Wand2 className="w-4 h-4" />, onClick: () => { openCreateModal(); setCreateStep('templates'); } },
+            { id: 'domains', label: 'Домены', icon: <Globe className="w-4 h-4" />, onClick: () => setProjectFilter('published') },
+            { id: 'plans', label: 'Тарифы', icon: <Coins className="w-4 h-4" />, onClick: () => { setTopUpFromCreate(false); setShowTopUpModal(true); } },
+            { id: 'settings', label: 'Настройки', icon: <Rocket className="w-4 h-4" />, onClick: () => setLocation('/profile') },
+          ]).map((item) => {
+            const active = item.id === 'sites';
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={item.onClick}
+                className="transition-all"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  width: '100%', textAlign: 'left',
+                  padding: '0.62rem 0.75rem',
+                  borderRadius: 14,
+                  border: active ? '1px solid rgba(255,255,255,0.9)' : '1px solid transparent',
+                  background: active ? 'rgba(255,255,255,0.78)' : 'transparent',
+                  boxShadow: active ? '0 8px 22px rgba(30,50,80,0.08)' : 'none',
+                  color: active ? '#1a1d24' : 'rgba(26,29,36,0.6)',
+                  fontSize: '0.88rem', fontWeight: 600, cursor: 'pointer',
+                  fontFamily: appleFont,
+                }}
+              >
+                <span style={{ color: active ? '#4f7ed8' : 'rgba(26,29,36,0.45)', display: 'flex' }}>{item.icon}</span>
+                {item.label}
+              </button>
+            );
+          })}
+
+          {/* Pro upsell card */}
+          <div style={{ marginTop: 'auto' }}>
+            <button
+              type="button"
+              onClick={() => { setTopUpFromCreate(false); setShowTopUpModal(true); }}
+              className="transition-all hover:-translate-y-0.5"
+              style={{
+                width: '100%', textAlign: 'left', cursor: 'pointer',
+                borderRadius: 20,
+                border: '1px solid rgba(255,255,255,0.75)',
+                background: 'linear-gradient(160deg, rgba(255,255,255,0.72), rgba(226,236,247,0.5))',
+                padding: '0.95rem 0.95rem 0.85rem',
+                fontFamily: appleFont,
+                boxShadow: '0 12px 30px rgba(30,50,80,0.08)',
+              }}
+            >
+              <div style={{ fontSize: '0.88rem', fontWeight: 700, color: '#1a1d24', lineHeight: 1.3, letterSpacing: '-0.02em' }}>
+                Создавайте<br />больше с Pro
+              </div>
+              <div style={{ fontSize: '0.72rem', color: 'rgba(26,29,36,0.5)', marginTop: 6, lineHeight: 1.35 }}>
+                Больше возможностей для роста
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+                <span style={{ width: 28, height: 28, borderRadius: '50%', background: 'rgba(255,255,255,0.9)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#1a1d24', fontSize: '0.85rem', boxShadow: '0 6px 16px rgba(30,50,80,0.1)' }}>→</span>
+              </div>
+            </button>
+          </div>
+        </aside>
+
         <div
           className="db-glass-shell"
           style={{
-            background: 'rgba(255,255,255,0.42)',
-            backdropFilter: 'blur(36px) saturate(1.35)',
-            WebkitBackdropFilter: 'blur(36px) saturate(1.35)',
-            border: '1px solid rgba(255,255,255,0.65)',
+            flex: 1,
+            minWidth: 0,
+            background: 'rgba(255,255,255,0.38)',
+            backdropFilter: 'blur(40px) saturate(1.5)',
+            WebkitBackdropFilter: 'blur(40px) saturate(1.5)',
+            border: '1px solid rgba(255,255,255,0.62)',
             borderRadius: isMobile ? 22 : 32,
             boxShadow: '0 24px 80px rgba(30,50,80,0.10), inset 0 1px 0 rgba(255,255,255,0.7)',
-            padding: isMobile ? '1.15rem 1rem 1.35rem' : '1.75rem 1.85rem 2rem',
+            padding: isMobile ? '1.15rem 1rem 1.35rem' : '1.6rem 1.85rem 2rem',
           }}
         >
+          {/* Search — reference top row */}
+          <div className="relative mb-5 sm:mb-6" style={{ maxWidth: 420 }}>
+            <Search className="w-4 h-4 absolute" style={{ left: 14, top: '50%', transform: 'translateY(-50%)', color: 'rgba(26,29,36,0.38)' }} />
+            <input
+              value={projectSearch}
+              onChange={(e) => setProjectSearch(e.target.value)}
+              placeholder="Поиск сайтов..."
+              style={{
+                width: '100%',
+                borderRadius: 100,
+                border: '1px solid rgba(255,255,255,0.85)',
+                background: 'rgba(255,255,255,0.72)',
+                padding: '0.66rem 1rem 0.66rem 2.35rem',
+                fontSize: '0.88rem',
+                fontWeight: 500,
+                color: '#1a1d24',
+                outline: 'none',
+                fontFamily: appleFont,
+                boxShadow: '0 8px 22px rgba(30,50,80,0.06)',
+              }}
+            />
+          </div>
+
           {/* Greeting + create */}
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6 sm:mb-8">
             <div className="min-w-0">
               <h1 style={{ fontSize: 'clamp(1.55rem, 3.6vw, 2.35rem)', fontWeight: 700, letterSpacing: '-0.045em', color: '#1a1d24', lineHeight: 1.15, margin: 0 }}>
                 Добро пожаловать, {user?.displayName || user?.email?.split('@')[0] || 'друг'}
               </h1>
-              <p style={{ margin: '0.45rem 0 0', fontSize: '0.92rem', color: 'rgba(26,29,36,0.55)', fontWeight: 500 }}>
-                Управляйте сайтами и запускайте новые проекты
+              <p style={{ margin: '0.45rem 0 0', fontSize: '0.92rem', color: 'rgba(26,29,36,0.5)', fontWeight: 500 }}>
+                Здесь ваши сайты. Продолжайте создавать.
               </p>
             </div>
             <div className="flex flex-col sm:flex-row gap-2 sm:gap-2.5 w-full sm:w-auto">
@@ -1346,6 +1475,7 @@ export default function DashboardPage() {
                 const status = projectStatusMeta(project);
                 const urlLabel = projectUrlLabel(project);
                 const menuOpen = openProjectMenu === project.id;
+                const previewSrc = projectPreviewSrc(project);
                 return (
                   <div
                     key={project.id}
@@ -1362,8 +1492,24 @@ export default function DashboardPage() {
                       flexDirection: 'column',
                     }}
                   >
-                    <div style={{ height: 168, position: 'relative', overflow: 'hidden', background: '#eef2f6' }}>
-                      {(project as any).hasPreview || project.publishStatus === "published" ? (
+                    <div style={{ height: 176, position: 'relative', overflow: 'hidden', background: '#eef2f6' }}>
+                      {previewSrc ? (
+                        <>
+                          <img
+                            src={previewSrc}
+                            alt={project.title}
+                            loading="lazy"
+                            decoding="async"
+                            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                            className="transition-transform duration-500 group-hover:scale-[1.04]"
+                            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                          />
+                          <div className="absolute inset-0 pointer-events-none" style={{ background: 'linear-gradient(180deg, rgba(255,255,255,0.12), transparent 45%)' }} />
+                          <span style={{ position: 'absolute', top: 10, left: 12, fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.14em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.92)', textShadow: '0 1px 6px rgba(0,0,0,0.35)' }}>
+                            {(project.title || 'Craft').slice(0, 14)}
+                          </span>
+                        </>
+                      ) : (project as any).hasPreview || project.publishStatus === "published" ? (
                         <div style={{
                           width: '100%', height: '100%',
                           background: project.type === "seo"

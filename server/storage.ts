@@ -456,12 +456,45 @@ export class DatabaseStorage implements IStorage {
       .from(projects)
       .where(eq(projects.userId, userId))
       .orderBy(desc(projects.createdAt));
+    const previews = await this.getProjectPreviewImages(userId);
     return rows.map((r) => ({
       ...r,
       generatedCode: "",
       hasPreview: Boolean(r.hasPreview),
       codeBytes: Number(r.codeBytes || 0),
+      previewImage: previews.get(r.id) ?? null,
     })) as Project[];
+  }
+
+  /**
+   * First image URL of each site, extracted in Postgres so list views never load
+   * full HTML into the heap. Thumbnails are cosmetic — failures must not break
+   * the dashboard, so any error yields an empty map.
+   */
+  private async getProjectPreviewImages(userId: number): Promise<Map<number, string>> {
+    const map = new Map<number, string>();
+    try {
+      const rows = await db.execute(sql`
+        SELECT id,
+               coalesce(
+                 substring(head from 'src="(https?://[^"]+\\.(?:png|jpe?g|webp|avif)[^"]*)"'),
+                 substring(head from 'src="(/objects/[^"]+)"'),
+                 substring(head from 'url\\((?:"|'')?(https?://[^)"'' ]+)')
+               ) AS preview_image
+        FROM (
+          SELECT id, left(coalesce(generated_code, ''), 400000) AS head
+          FROM projects
+          WHERE user_id = ${userId}
+        ) src
+      `);
+      for (const row of (rows.rows as Array<{ id: number; preview_image: string | null }>) ?? []) {
+        if (row.preview_image) map.set(Number(row.id), row.preview_image);
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(`[projects] preview image extraction skipped: ${msg}`);
+    }
+    return map;
   }
 
   async createProject(insertProject: InsertProject): Promise<Project> {
