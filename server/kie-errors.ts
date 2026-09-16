@@ -178,6 +178,16 @@ function messageLooksLikeConfirmedKie(msg: string): boolean {
  * True only when the thrown value is a confirmed KIE API / transport failure.
  * Patch-apply, parse, safety/recitation content blocks → false.
  */
+/** Refund site/chat generate debits when the user got no usable model output. */
+export function shouldRefundGenerationAttempt(err: unknown): boolean {
+  if (!err) return false;
+  if (isConfirmedKieApiFailure(err)) return true;
+  if (isDefinitelyUnsentTransportError(err)) return true;
+  const msg = String((err as any)?.message || err).toLowerCase();
+  if (msg.includes("empty response") || msg.includes("empty chat response")) return true;
+  return false;
+}
+
 export function isConfirmedKieApiFailure(err: unknown): boolean {
   if (!err) return false;
   if (err instanceof KieApiError) return true;

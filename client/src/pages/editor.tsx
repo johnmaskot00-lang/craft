@@ -1162,6 +1162,8 @@ export default function EditorPage() {
             errorShown = true;
             if (data.newBalance !== undefined) {
               queryClient.setQueryData(["/api/auth/user"], (old: any) => old ? { ...old, credits: data.newBalance } : old);
+            } else if (data.refunded) {
+              queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
             }
             toast({
               title: data.refunded ? "Ошибка · токены возвращены" : "Ошибка генерации",

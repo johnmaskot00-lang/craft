@@ -121,6 +121,7 @@ import {
 import {
   KieApiError,
   isConfirmedKieApiFailure,
+  shouldRefundGenerationAttempt,
   isConfirmedKieJobBodyFailure,
   isKieModerationFailure,
   isKieTaskInfraFailure,
@@ -5355,7 +5356,9 @@ export async function registerRoutes(
               : kieGenerateStream(chatHistory, chatSystemContent, "high");
             let candidate = "";
             for await (const chunk of stream) candidate += chunk;
-            if (!candidate.trim()) throw new Error(`${provider} returned an empty chat response`);
+            if (!candidate.trim()) {
+              throw new KieApiError(`${provider} returned an empty chat response`, { status: 502, source: "stream" });
+            }
             chatReply = candidate.trim().slice(0, 12_000);
             break;
           } catch (chatErr: any) {
@@ -6395,7 +6398,7 @@ ${designAnalysis}
             try {
               await storage.createProjectMessage({ projectId: project.id, role: "model", content: failMsg });
             } catch {}
-            res.write(`data: ${JSON.stringify({ error: failMsg, newBalance: freshBal, refunded, refundAmount: refunded ? GENERATION_COST : 0 })}\n\n`);
+            res.write(`data: ${JSON.stringify({ done: true, error: failMsg, newBalance: freshBal, refunded, refundAmount: refunded ? GENERATION_COST : 0 })}\n\n`);
             res.end();
             return;
           } else {
@@ -6465,7 +6468,7 @@ ${designAnalysis}
                 })}\n\n`);
                 continue;
               }
-              throw new Error("KIE models returned an empty response");
+              throw new KieApiError("KIE models returned an empty response", { status: 502, source: "stream" });
             }
             if (
               retryCompleteTriggerSite &&
@@ -6652,6 +6655,7 @@ ${designAnalysis}
           } catch {}
           console.warn(`[EDIT] 0/${parsed.total} multipage patches applied for project ${project.id}`);
           res.write(`data: ${JSON.stringify({
+            done: true,
             error: failMsg,
             newBalance: refund.balance,
             refunded: refund.refunded,
@@ -6726,6 +6730,7 @@ ${designAnalysis}
               await storage.createProjectMessage({ projectId: project.id, role: "model", content: failMsg });
             } catch {}
             res.write(`data: ${JSON.stringify({
+              done: true,
               error: failMsg,
               newBalance: refund.balance,
               refunded: refund.refunded,
@@ -6824,6 +6829,45 @@ ${designAnalysis}
         }
       }
 
+      const isDeliverableSiteHtml = (code: string): boolean => {
+        const c = (code || "").trim();
+        if (!c || isCraftGeneratingHtml(c)) return false;
+        if (c.length < 200) return false;
+        return /<!DOCTYPE\s+html|<html[\s>]/i.test(c);
+      };
+
+      if (isNewSite && !isDeliverableSiteHtml(mainHtmlCode || "")) {
+        console.warn(
+          `[GENERATE] New site produced no deliverable HTML (len=${(mainHtmlCode || "").length}, agent=${useGemini ? "v2" : "v1"}) — refund`,
+        );
+        let refunded = false;
+        if (genBilled && user?.id && GENERATION_COST > 0) {
+          try {
+            await storage.refundCredits(user.id, GENERATION_COST, genIkey);
+            refunded = true;
+            genBilled = false;
+            console.log(`[REFUND] new-site-no-html: +${GENERATION_COST} tokens`);
+          } catch (re: any) {
+            console.warn("[REFUND] new-site-no-html failed:", re?.message);
+          }
+        }
+        if (wroteGeneratingPlaceholder) {
+          try {
+            await storage.updateProject(project.id, { generatedCode: "" });
+          } catch {}
+        }
+        const freshBal = user?.id ? (await storage.getUser(user.id))?.credits : undefined;
+        const failMsg = refunded
+          ? "ИИ не вернул готовый HTML сайта. Токены возвращены — попробуйте ещё раз через минуту."
+          : "ИИ не вернул готовый HTML сайта. Попробуйте ещё раз через минуту.";
+        try {
+          await storage.createProjectMessage({ projectId: project.id, role: "model", content: failMsg });
+        } catch {}
+        res.write(`data: ${JSON.stringify({ done: true, error: failMsg, newBalance: freshBal, refunded, refundAmount: refunded ? GENERATION_COST : 0 })}\n\n`);
+        res.end();
+        return;
+      }
+
       // ── Edit integrity: never charge «Сайт обновлён» when code did not change ──
       // Architecture bug (seen in prod): tool agent / stream returned no mutations,
       // but we still persisted the old HTML, billed 30 tokens, and showed success.
@@ -6913,7 +6957,7 @@ ${designAnalysis}
           try {
             await storage.createProjectMessage({ projectId: project.id, role: "model", content: failMsg });
           } catch {}
-          res.write(`data: ${JSON.stringify({ error: failMsg, newBalance: freshBal, refunded, refundAmount: refunded ? GENERATION_COST : 0 })}\n\n`);
+          res.write(`data: ${JSON.stringify({ done: true, error: failMsg, newBalance: freshBal, refunded, refundAmount: refunded ? GENERATION_COST : 0 })}\n\n`);
           res.end();
           return;
         }
@@ -7568,7 +7612,7 @@ ${designAnalysis}
           genBilled &&
           billedUserId &&
           generationCost > 0 &&
-          (isConfirmedKieApiFailure(err) || localStorageFailure)
+          (shouldRefundGenerationAttempt(err) || localStorageFailure)
         ) {
           await storage.refundCredits(billedUserId, generationCost, genIkeyForRefund);
           refunded = true;
@@ -7600,6 +7644,7 @@ ${designAnalysis}
         : `Ошибка генерации: ${_em.substring(0, 150) || "неизвестная ошибка"}`;
       const freshBal = billedUserId ? (await storage.getUser(billedUserId))?.credits : undefined;
       const errPayload = {
+        done: true,
         error: refunded ? `${errMsg} Токены возвращены.` : errMsg,
         newBalance: freshBal,
         refunded,
