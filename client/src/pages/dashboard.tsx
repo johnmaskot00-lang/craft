@@ -472,7 +472,7 @@ export default function DashboardPage() {
 
   const { data: unreadData } = useQuery<{ count: number }>({
     queryKey: ["/api/leads/unread-count"],
-    refetchInterval: 30000,
+    refetchInterval: 60_000,
   });
 
   const resetCreateState = () => {

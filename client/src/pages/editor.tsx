@@ -29,6 +29,10 @@ function isCraftGeneratingHtml(code?: string | null): boolean {
   return !!(code && code.includes('data-craft-generating="1"'));
 }
 
+/** Background generation-status polls — keep light under many concurrent editors. */
+const GEN_STATUS_POLL_MS = 8000;
+const GEN_STATUS_POLL_FAST_MS = 6000;
+
 type InteractiveHeroStatus = {
   present?: boolean;
   pending?: boolean;
@@ -613,7 +617,7 @@ export default function EditorPage() {
           finishAll(c, proj);
         }
       } catch {}
-    }, 4000);
+    }, GEN_STATUS_POLL_MS);
   }, [project, projectId, applyBakedPreview, queryClient]);
 
   const handleAddPage = useCallback(async () => {
@@ -895,7 +899,7 @@ export default function EditorPage() {
                   resolve();
                 }
               } catch {}
-            }, 3000);
+            }, GEN_STATUS_POLL_FAST_MS);
           });
           return;
         }
@@ -931,7 +935,7 @@ export default function EditorPage() {
                 queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "messages"] });
                 resolve();
               } catch {}
-            }, 3000);
+            }, GEN_STATUS_POLL_FAST_MS);
           });
           return;
         }
@@ -1111,7 +1115,7 @@ export default function EditorPage() {
               setGenerationStatus("Создаём видеоанимацию... (2–10 мин)");
               if (animPollRef.current) clearInterval(animPollRef.current);
               const pollStart = Date.now();
-              const POLL_INTERVAL = 4000;
+              const POLL_INTERVAL = GEN_STATUS_POLL_MS;
               const POLL_TIMEOUT = 45 * 60 * 1000; // match Kling queue (up to ~35 min)
               const finishAnim = (rawCode: string, proj?: any, timedOut = false) => {
                 clearInterval(animPollRef.current!);
@@ -1547,7 +1551,7 @@ export default function EditorPage() {
             if (c) applyBakedPreview(c, p);
             queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
           } catch {}
-        }, 4000);
+        }, GEN_STATUS_POLL_MS);
       }
     } catch (e: any) {
       toast({ title: "Ошибка", description: e?.message || "Не удалось запустить генерацию анимации", variant: "destructive" });

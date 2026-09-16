@@ -319,6 +319,33 @@ export const insertProjectVersionSchema = createInsertSchema(projectVersions).om
 export type ProjectVersion = typeof projectVersions.$inferSelect;
 export type InsertProjectVersion = z.infer<typeof insertProjectVersionSchema>;
 
+/**
+ * Durable AI / publish jobs — source of truth survives SSE disconnects and
+ * enables multi-instance workers (API enqueues, worker executes).
+ * kind: site-generate | seo-generate | seo-edit | publish
+ * state: queued | running | completed | failed | cancelled
+ * priority: lower number = higher priority (edit=1, site/publish=5, seo=10)
+ */
+export const generationJobs = pgTable("generation_jobs", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  projectId: integer("project_id").notNull(),
+  kind: varchar("kind", { length: 32 }).notNull(),
+  state: varchar("state", { length: 16 }).notNull().default("queued"),
+  priority: integer("priority").notNull().default(5),
+  progress: json("progress").$type<Record<string, unknown>>().default({}),
+  payload: json("payload").$type<Record<string, unknown>>().default({}),
+  result: json("result").$type<Record<string, unknown>>(),
+  error: text("error"),
+  kieTaskIds: json("kie_task_ids").$type<string[]>().default([]),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+  updatedAt: timestamp("updated_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+  startedAt: timestamp("started_at"),
+  finishedAt: timestamp("finished_at"),
+});
+
+export type GenerationJob = typeof generationJobs.$inferSelect;
+
 export const projectFiles = pgTable("project_files", {
   id: serial("id").primaryKey(),
   projectId: integer("project_id").notNull(),

@@ -10,6 +10,8 @@ build:
   additionalCommands: npm config set registry https://registry.npmjs.org/ && npm install --include=dev --registry=https://registry.npmjs.org/ && npm run build
 
 run:
+  # Scale-out: set REDIS_URL, CRAFT_API_INSTANCES, CRAFT_RUN_WORKER=1 (or separate worker process).
+  # Optional: CRAFT_JOB_QUEUE_MAX, CRAFT_WORKER_INTERVAL_MS, CRAFT_MAX_SEO.
   command: npm run start
   containerPort: 5000
   persistenceMount: /data

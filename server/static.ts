@@ -15,7 +15,10 @@ export function serveStatic(app: Express) {
       if (filePath.endsWith(".html")) {
         res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       } else {
+        // Hashed assets — safe for CDN edge + browser (phase 2 scale).
         res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        res.setHeader("CDN-Cache-Control", "public, max-age=31536000, immutable");
+        res.setHeader("Surrogate-Control", "public, max-age=31536000");
       }
     },
   }));

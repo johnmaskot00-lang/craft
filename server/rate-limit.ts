@@ -1,4 +1,9 @@
+/**
+ * Lightweight rate limiter — in-memory by default; Redis when REDIS_URL is set
+ * so multiple API instances share the same buckets.
+ */
 import type { Request, Response, NextFunction } from "express";
+import { redisRateLimit, redisEnabled } from "./redis";
 
 type Bucket = { count: number; resetAt: number };
 
@@ -16,8 +21,8 @@ function sweep() {
   const now = Date.now();
   if (now - lastSweep < 60_000) return;
   lastSweep = now;
-  for (const store of stores.values()) {
-    for (const [key, bucket] of store.entries()) {
+  for (const store of Array.from(stores.values())) {
+    for (const [key, bucket] of Array.from(store.entries())) {
       if (bucket.resetAt <= now) store.delete(key);
     }
   }
@@ -27,18 +32,28 @@ function clientIp(req: Request): string {
   return (req.ip || req.socket?.remoteAddress || "unknown").toString();
 }
 
-/**
- * Lightweight in-memory fixed-window rate limiter.
- * Suitable for a single-instance deployment. Each named limiter keeps its own store.
- */
 export function rateLimit(name: string, opts: RateLimitOptions) {
   if (!stores.has(name)) stores.set(name, new Map());
   const store = stores.get(name)!;
   const message = opts.message || "Слишком много запросов. Попробуйте позже.";
 
-  return (req: Request, res: Response, next: NextFunction) => {
-    sweep();
+  return async (req: Request, res: Response, next: NextFunction) => {
     const key = opts.keyGenerator ? opts.keyGenerator(req) : clientIp(req);
+
+    if (redisEnabled()) {
+      const rl = await redisRateLimit(name, key, opts.max, opts.windowMs);
+      if (rl) {
+        res.setHeader("X-RateLimit-Limit", String(opts.max));
+        res.setHeader("X-RateLimit-Remaining", String(rl.remaining));
+        if (!rl.ok) {
+          res.setHeader("Retry-After", String(rl.retryAfterSec));
+          return res.status(429).json({ message });
+        }
+        return next();
+      }
+    }
+
+    sweep();
     const now = Date.now();
     let bucket = store.get(key);
     if (!bucket || bucket.resetAt <= now) {

@@ -20,6 +20,8 @@ export type KieTerminalResult =
   | { ok: true; data: KieTaskData }
   | { ok: false; data: KieTaskData | null; reason: "fail" | "timeout" | "abort" };
 
+import { redisGet, redisSet } from "./redis";
+
 type Waiter = {
   resolve: (r: KieTerminalResult) => void;
   settled: boolean;
@@ -28,6 +30,11 @@ type Waiter = {
 const waiters = new Map<string, Waiter>();
 const resultCache = new Map<string, KieTerminalResult>();
 const CACHE_TTL_MS = 15 * 60 * 1000;
+const REDIS_RESULT_TTL_SEC = 15 * 60;
+
+function redisResultKey(taskId: string) {
+  return `craft:kie:result:${taskId}`;
+}
 
 /** Peek cached terminal result (used by /api/images/status fast path). */
 export function getCachedKieResult(taskId: string): KieTerminalResult | undefined {
@@ -75,6 +82,21 @@ function cacheResult(taskId: string, result: KieTerminalResult): void {
     const cur = resultCache.get(taskId);
     if (cur === result) resultCache.delete(taskId);
   }, CACHE_TTL_MS).unref?.();
+  void redisSet(redisResultKey(taskId), JSON.stringify(result), REDIS_RESULT_TTL_SEC);
+}
+
+async function loadCachedResult(taskId: string): Promise<KieTerminalResult | undefined> {
+  const local = resultCache.get(taskId);
+  if (local) return local;
+  const raw = await redisGet(redisResultKey(taskId));
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as KieTerminalResult;
+    resultCache.set(taskId, parsed);
+    return parsed;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -124,8 +146,8 @@ export async function waitForKieJob(
     label?: string;
   },
 ): Promise<KieTerminalResult> {
-  const cached = resultCache.get(taskId);
-  if (cached) return cached;
+  const fromStore = await loadCachedResult(taskId);
+  if (fromStore) return fromStore;
 
   const shouldStop = opts.shouldStop || (() => false);
   const pollIntervalMs = opts.pollIntervalMs ?? 4000;
@@ -156,6 +178,18 @@ export async function waitForKieJob(
             resolve({ ok: false, data: null, reason: "abort" });
           }
           return;
+        }
+        // Cross-instance: webhook may have settled on another API → Redis.
+        try {
+          const remote = await loadCachedResult(taskId);
+          if (remote && !entry.settled) {
+            entry.settled = true;
+            waiters.delete(taskId);
+            resolve(remote);
+            return;
+          }
+        } catch {
+          /* ignore */
         }
         await new Promise((r) => setTimeout(r, pollIntervalMs));
         if (entry.settled) return;

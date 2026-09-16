@@ -60,6 +60,21 @@ async function buildAll() {
     logLevel: "info",
   });
 
+  await esbuild({
+    entryPoints: ["server/worker-main.ts"],
+    platform: "node",
+    bundle: true,
+    format: "cjs",
+    outfile: "dist/worker.cjs",
+    define: {
+      "process.env.NODE_ENV": '"production"',
+    },
+    minify: true,
+    external: externals,
+    logLevel: "info",
+  });
+  console.log("built dist/worker.cjs");
+
   const tableSqlSrc = "node_modules/connect-pg-simple/table.sql";
   const tableSqlDest = "dist/table.sql";
   await copyFile(tableSqlSrc, tableSqlDest);

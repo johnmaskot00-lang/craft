@@ -80,6 +80,19 @@ import {
   writeSseJson,
 } from "./resource-guards";
 import { getPublishMediaCached, setPublishMediaCached } from "./publish-media-cache";
+import {
+  createGenerationJob,
+  getGenerationJob,
+  listProjectJobs,
+  updateGenerationJob,
+  completeGenerationJob,
+  failGenerationJob,
+  ensureGenerationJobsTable,
+  queueDepth,
+  jobQueueOverloaded,
+} from "./jobs";
+import { registerJobHandler, startInProcessWorker } from "./job-worker";
+import { redisEnabled } from "./redis";
 import { assertPublicHttpUrl, safeFetch } from "./url-guard";
 import { isPublishableProjectFile } from "@shared/project-files";
 import { applyClientGeoToPublishFiles, sitePublicOrigin } from "./site-geo";
@@ -183,7 +196,10 @@ setInterval(() => {
 }, 5 * 60 * 1000).unref?.();
 
 /** One in-flight site generation/edit per project. Never submit a second KIE job while the first is pending. */
-const activeProjectGenerations = new Map<number, { token: symbol; startedAt: number; provider: "gemini" | "claude" }>();
+const activeProjectGenerations = new Map<
+  number,
+  { token: symbol; startedAt: number; provider: "gemini" | "claude"; jobId?: number }
+>();
 /** Force-clear hung in-memory locks so the editor overlay cannot stick forever. */
 const ACTIVE_GENERATION_MAX_MS = Number(process.env.CRAFT_ACTIVE_GENERATION_MAX_MS) || 12 * 60 * 1000;
 setInterval(() => {
@@ -198,9 +214,21 @@ setInterval(() => {
   }
 }, 60_000).unref?.();
 
-// Rate limiters (in-memory, single-instance)
+// Rate limiters — shared via Redis when REDIS_URL is set (multi-instance).
 const leadIntakeLimiter = rateLimit("lead-intake", { windowMs: 60_000, max: 20, message: "Слишком много заявок. Попробуйте позже." });
 const aiLimiter = rateLimit("ai", { windowMs: 60_000, max: 20, keyGenerator: userOrIpKey, message: "Слишком много запросов к ИИ. Подождите минуту." });
+const publishLimiter = rateLimit("publish", {
+  windowMs: 60_000,
+  max: 8,
+  keyGenerator: userOrIpKey,
+  message: "Слишком много публикаций. Подождите минуту.",
+});
+const seoGenerateLimiter = rateLimit("seo-generate", {
+  windowMs: 60_000,
+  max: 6,
+  keyGenerator: userOrIpKey,
+  message: "Слишком много SEO-генераций. Подождите минуту.",
+});
 const proxyLimiter = rateLimit("proxy", { windowMs: 60_000, max: 60, keyGenerator: userOrIpKey });
 
 const objectStorage = new ObjectStorageService();
@@ -4489,9 +4517,28 @@ export async function registerRoutes(
       objectStorage: "ok",
       mediaBackend,
       gitSha,
+      redis: redisEnabled(),
       uptime: Math.round(process.uptime()),
     });
   });
+
+  try {
+    await ensureGenerationJobsTable();
+  } catch (e: any) {
+    console.warn("[boot] generation_jobs:", e?.message?.slice?.(0, 200) || e);
+  }
+
+  startInProcessWorker({ kinds: ["publish"] });
+
+  // Queued publish jobs (optional CRAFT_ASYNC_PUBLISH path / future workers).
+  registerJobHandler("publish", async (job) => {
+    throw new Error(
+      `Queued publish job ${job.id} for project ${job.projectId} — use sync POST /publish for now`,
+    );
+  });
+
+  // Export limiter for SEO routes (same process).
+  (app as any)._craftSeoGenerateLimiter = seoGenerateLimiter;
 
   try {
     // Deduplicate any legacy rows before creating the unique index
@@ -4858,9 +4905,10 @@ export async function registerRoutes(
           console.warn(`[GEN-STATUS] orphan clear failed for ${projectId}:`, e?.message || e);
         }
       }
+      const activeJobs = await listProjectJobs(projectId, { activeOnly: true, limit: 3 }).catch(() => []);
       res.json({
         // Real in-memory work only — never lie "active" for a dead placeholder after restart.
-        active: !!active || meta.animPending,
+        active: !!active || meta.animPending || activeJobs.length > 0,
         generatingPlaceholder,
         orphanPlaceholder,
         animPending: meta.animPending,
@@ -4871,9 +4919,82 @@ export async function registerRoutes(
         codeBytes: meta.codeBytes,
         messageCount: meta.messageCount,
         lastModelAt: meta.lastModelAt,
+        jobId: activeJobs[0]?.id ?? active?.jobId ?? null,
+        jobs: activeJobs.map((j) => ({
+          id: j.id,
+          kind: j.kind,
+          state: j.state,
+          progress: j.progress,
+        })),
       });
     } catch {
       res.status(500).json({ message: "Ошибка проверки генерации" });
+    }
+  });
+
+  app.get("/api/jobs/:id", requireAuth, async (req, res) => {
+    try {
+      const jobId = parseInt(req.params.id);
+      if (!Number.isFinite(jobId)) return res.status(400).json({ message: "Bad id" });
+      const job = await getGenerationJob(jobId);
+      if (!job) return res.status(404).json({ message: "Job not found" });
+      if (job.userId !== (req.user as any).id) return res.status(403).json({ message: "Нет доступа" });
+      res.setHeader("Cache-Control", "no-store");
+      return res.json({
+        id: job.id,
+        projectId: job.projectId,
+        kind: job.kind,
+        state: job.state,
+        priority: job.priority,
+        progress: job.progress || {},
+        result: job.result || null,
+        error: job.error || null,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+        startedAt: job.startedAt,
+        finishedAt: job.finishedAt,
+      });
+    } catch (e: any) {
+      return res.status(500).json({ message: e?.message || "Ошибка job" });
+    }
+  });
+
+  app.get("/api/projects/:id/jobs", requireAuth, async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.id);
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Not found" });
+      if (project.userId !== (req.user as any).id) return res.status(403).json({ message: "Нет доступа" });
+      const activeOnly = String(req.query.active || "") === "1";
+      const jobs = await listProjectJobs(projectId, { activeOnly, limit: 20 });
+      res.setHeader("Cache-Control", "no-store");
+      return res.json({
+        items: jobs.map((j) => ({
+          id: j.id,
+          kind: j.kind,
+          state: j.state,
+          priority: j.priority,
+          progress: j.progress,
+          error: j.error,
+          createdAt: j.createdAt,
+          updatedAt: j.updatedAt,
+        })),
+      });
+    } catch (e: any) {
+      return res.status(500).json({ message: e?.message || "Ошибка" });
+    }
+  });
+
+  app.get("/api/jobs/queue-stats", requireAuth, async (req, res) => {
+    try {
+      const user = req.user as any;
+      if (!user?.isAdmin && String(user?.id) !== process.env.ADMIN_USER_IDS?.split(",")[0]) {
+        // Allow any authed user a slim public-ish depth for backpressure UX
+      }
+      const depth = await queueDepth();
+      return res.json({ ...depth, overloaded: jobQueueOverloaded(depth) });
+    } catch {
+      return res.json({ queued: 0, running: 0, overloaded: false });
     }
   });
 
@@ -5072,6 +5193,7 @@ export async function registerRoutes(
     let dropGenerateSlot: (() => void) | null = null;
     let projectGenerationToken: symbol | null = null;
     let projectGenerationContinuesInBackground = false;
+    let durableJobId: number | null = null;
     try {
       const project = await storage.getProject(parseInt(req.params.id));
       if (!project) {
@@ -5242,6 +5364,36 @@ export async function registerRoutes(
         releaseGenerate();
       };
 
+      try {
+        const depth = await queueDepth();
+        if (jobQueueOverloaded(depth)) {
+          dropGenerateSlot();
+          writeSseJson(res, {
+            done: true,
+            error: "Очередь генераций переполнена. Попробуйте через минуту.",
+            queue: depth,
+          });
+          try { res.end(); } catch {}
+          return;
+        }
+        const job = await createGenerationJob({
+          userId: user.id,
+          projectId: project.id,
+          kind: "site-generate",
+          state: "running",
+          progress: { status: "started" },
+          payload: { agentVersion: bodyAgentVersion || null },
+        });
+        durableJobId = job.id;
+        const cur = activeProjectGenerations.get(project.id);
+        if (cur) activeProjectGenerations.set(project.id, { ...cur, jobId: job.id });
+        try {
+          res.write(`data: ${JSON.stringify({ status: "Генерируем сайт...", generating: true, jobId: job.id })}\n\n`);
+        } catch { /* ignore */ }
+      } catch (e: any) {
+        console.warn("[GENERATE] durable job create failed:", e?.message || e);
+      }
+
       // Capture history BEFORE saving the current prompt so we don't duplicate it
       // in conversationHistory + the active user message.
       const priorMessages = await storage.getProjectMessages(project.id, 12);
@@ -5361,7 +5513,9 @@ export async function registerRoutes(
           creditsUsed: CHAT_COST,
           creditBreakdown: { generate: CHAT_COST, total: CHAT_COST },
           newBalance: freshBalance,
+          jobId: durableJobId,
         });
+        if (durableJobId) await completeGenerationJob(durableJobId, { chatOnly: true });
         res.end();
         return;
       }
@@ -7385,7 +7539,14 @@ ${designAnalysis}
         creditBreakdown,
         newBalance: immediateBalance,
         animPending: hasScrollMarkers,
+        jobId: durableJobId,
       });
+      if (durableJobId) {
+        await completeGenerationJob(durableJobId, {
+          codeBytes: immediateHtml?.length || 0,
+          animPending: hasScrollMarkers,
+        });
+      }
       res.end();
 
       // ── Background: finish animation (often already started in parallel with GENIMG) ──
@@ -7643,6 +7804,24 @@ ${designAnalysis}
         activeProjectGenerations.get(generateProjectId)?.token === projectGenerationToken
       ) {
         activeProjectGenerations.delete(generateProjectId);
+      }
+      if (durableJobId && !projectGenerationContinuesInBackground) {
+        const st = await getGenerationJob(durableJobId).catch(() => null);
+        if (st && (st.state === "queued" || st.state === "running")) {
+          // Success path should have completed the job; if still open, mark failed only on error paths that forgot.
+          // Prefer complete when project has real HTML.
+          try {
+            const p = generateProjectId ? await storage.getProject(generateProjectId) : null;
+            const ok =
+              p?.generatedCode &&
+              !isCraftGeneratingHtml(p.generatedCode) &&
+              p.generatedCode.length > 80;
+            if (ok) await completeGenerationJob(durableJobId, { codeBytes: p!.generatedCode.length });
+            else await failGenerationJob(durableJobId, "generation ended without durable complete");
+          } catch {
+            /* ignore */
+          }
+        }
       }
     }
   });
@@ -8944,7 +9123,7 @@ ${designAnalysis}
 
   // ═══ PUBLISH API (Vercel) ═══
 
-  app.post("/api/projects/:id/publish", async (req, res) => {
+  app.post("/api/projects/:id/publish", requireAuth, publishLimiter, async (req, res) => {
     if (!req.isAuthenticated()) return res.status(401).json({ message: "Не авторизован" });
     const releasePublish = tryAcquirePublish();
     if (!releasePublish) {
@@ -8953,6 +9132,7 @@ ${designAnalysis}
         overloaded: true,
       });
     }
+    let publishJobId: number | null = null;
     try {
       const projectId = parseInt(req.params.id);
       const project = await storage.getProject(projectId);
@@ -8964,6 +9144,19 @@ ${designAnalysis}
           message: "Сайт заблокирован администратором за нарушение правил хостинга. Публикация недоступна.",
           banned: true,
         });
+      }
+
+      try {
+        const job = await createGenerationJob({
+          userId: (req.user as any).id,
+          projectId,
+          kind: "publish",
+          state: "running",
+          progress: { status: "publishing" },
+        });
+        publishJobId = job.id;
+      } catch (e: any) {
+        console.warn("[Publish] durable job create failed:", e?.message || e);
       }
 
       const alreadyLive = project.publishStatus === "published" || project.publishStatus === "publishing" || project.publishStatus === "suspended";
@@ -9267,9 +9460,11 @@ ${designAnalysis}
         ycStoragePoolId,
       });
 
-      res.json({ url });
+      if (publishJobId) await completeGenerationJob(publishJobId, { url });
+      res.json({ url, jobId: publishJobId });
     } catch (err: any) {
       await storage.updateProject(parseInt(req.params.id), { publishStatus: "error" });
+      if (publishJobId) await failGenerationJob(publishJobId, err?.message || "publish failed");
       res.status(500).json({ message: err.message || "Ошибка публикации" });
     } finally {
       releasePublish();

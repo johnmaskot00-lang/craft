@@ -14,6 +14,14 @@ import { resolveSeoOffer, seoOfferProductName, SEO_CONTENT_TYPES } from "@shared
 import crypto from "crypto";
 import { withKieCallback, waitForKieJob, kieResultUrl, type KieTaskData } from "./kie-jobs";
 import { acquireSeo, withImageSlot } from "./resource-guards";
+import { rateLimit, userOrIpKey } from "./rate-limit";
+import {
+  createGenerationJob,
+  completeGenerationJob,
+  failGenerationJob,
+  updateGenerationJob,
+  getGenerationJob,
+} from "./jobs";
 import {
   runToolCallingAgent,
   buildSeoMultipageEditSystemPrompt,
@@ -3885,7 +3893,15 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
 
   // POST /api/seo/:id/generate — SSE batch generation (runs to completion even if the
   // browser/proxy drops the stream — client can reconnect and watch progress).
-  app.post("/api/seo/:id/generate", async (req, res) => {
+  app.post(
+    "/api/seo/:id/generate",
+    rateLimit("seo-generate", {
+      windowMs: 60_000,
+      max: 6,
+      keyGenerator: userOrIpKey,
+      message: "Слишком много SEO-генераций. Подождите минуту.",
+    }),
+    async (req, res) => {
     const userId = requireAuth(req, res);
     if (!userId) return;
     const projectId = parseInt(req.params.id);
@@ -3975,6 +3991,21 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
       skipKeywordIds: new Set(),
     });
 
+    let durableJobId: number | null = null;
+    try {
+      const job = await createGenerationJob({
+        userId,
+        projectId,
+        kind: "seo-generate",
+        state: "running",
+        progress: { generated: 0, total: cfg.pagesTotal },
+      });
+      durableJobId = job.id;
+      send({ type: "job", jobId: job.id });
+    } catch (e: any) {
+      console.warn("[SEO] durable job create failed:", e?.message || e);
+    }
+
     let creditsDepleted = false;
     let generated = 0;
     const heartbeat = setInterval(() => {
@@ -3983,7 +4014,13 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
         generated,
         total: cfg.pagesTotal,
         ts: Date.now(),
+        jobId: durableJobId,
       });
+      if (durableJobId) {
+        void updateGenerationJob(durableJobId, {
+          progress: { generated, total: cfg.pagesTotal },
+        });
+      }
     }, 8000);
     heartbeat.unref?.();
 
@@ -4212,7 +4249,15 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
         total: finalCfg.pagesTotal,
         partial: creditsDepleted || stopped,
         stopped,
+        jobId: durableJobId,
       });
+      if (durableJobId) {
+        await completeGenerationJob(durableJobId, {
+          generated,
+          total: finalCfg.pagesTotal,
+          partial: creditsDepleted || stopped,
+        });
+      }
     }
 
     try { res.end(); } catch {}
@@ -4220,6 +4265,16 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
       clearInterval(heartbeat);
       seoGenerateInFlight.delete(projectId);
       releaseSeo();
+      if (durableJobId) {
+        try {
+          const st = await getGenerationJob(durableJobId);
+          if (st && (st.state === "queued" || st.state === "running")) {
+            await failGenerationJob(durableJobId, "seo generate ended unexpectedly");
+          }
+        } catch {
+          /* ignore */
+        }
+      }
     }
   });
 
@@ -4661,6 +4716,22 @@ Respond ONLY with valid JSON (no markdown):
       return;
     }
 
+    let durableEditJobId: number | null = null;
+    try {
+      const job = await createGenerationJob({
+        userId,
+        projectId: proj.id,
+        kind: "seo-edit",
+        state: "running",
+        progress: { status: "editing" },
+        payload: { activeFile, prompt: prompt.slice(0, 500) },
+      });
+      durableEditJobId = job.id;
+      earlySend({ status: "Готовлю правку…", jobId: job.id });
+    } catch (e: any) {
+      console.warn("[SEO-EDIT] durable job create failed:", e?.message || e);
+    }
+
     const ikey = `seo-edit-${proj.id}-${crypto.randomUUID()}`;
     let billed = false;
     try {
@@ -4882,13 +4953,16 @@ ${offerBlock}
         editedFiles: changedList,
         creditsUsed: SEO_EDIT_COST,
         newBalance: fresh?.credits,
+        jobId: durableEditJobId,
       });
+      if (durableEditJobId) await completeGenerationJob(durableEditJobId, { editedFiles: changedList });
       res.end();
     } catch (e: any) {
       console.error("[SEO-AGENT]", e?.message || e);
       if (billed) {
         try { await storage.refundCredits(userId, SEO_EDIT_COST, ikey); } catch {}
       }
+      if (durableEditJobId) await failGenerationJob(durableEditJobId, e?.message || "seo-edit failed");
       if (!res.headersSent) {
         res.status(500).json({ message: e?.message || "Ошибка агента" });
       } else {
