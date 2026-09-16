@@ -17,8 +17,6 @@ build:
     "server": /
     "shared": /
     "scripts": /
-    # Keep engine path for boot; also lands in dist/public via vite.
-    "client/public/scroll-world-engine.js": /client/public/
     "package.json": /
     "package-lock.json": /
     "amvera.yaml": /

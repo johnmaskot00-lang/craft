@@ -95,33 +95,9 @@ type KieTaskResult = {
 // ─── Scrub engine (inlined into published HTML) ──────────────────────────────
 
 function loadScrubEngineJs(): string {
-  // Amvera slim artifacts ship `dist/` (vite copies public → dist/public).
-  // Older layouts keep client/public; flat artifact maps may put the file at /public.
-  const candidates = [
-    path.resolve(process.cwd(), "dist/public/scroll-world-engine.js"),
-    path.resolve(process.cwd(), "client/public/scroll-world-engine.js"),
-    path.resolve(process.cwd(), "public/scroll-world-engine.js"),
-    path.resolve(process.cwd(), "scroll-world-engine.js"),
-    "/workspace/client/public/scroll-world-engine.js",
-    "/tmp/scroll-world/scrub-engine.js",
-  ];
-  for (const p of candidates) {
-    try {
-      if (fs.existsSync(p)) {
-        const src = fs.readFileSync(p, "utf8");
-        if (src.includes("mountScrollWorld")) {
-          console.log(`[SCROLLWORLD] loaded scrub engine from ${p} (${src.length} bytes)`);
-          return src;
-        }
-      }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.warn(`[SCROLLWORLD] failed reading engine at ${p}: ${msg}`);
-    }
-  }
-  throw new Error(
-    "[SCROLLWORLD] scrub engine not found — expected dist/public or client/public scroll-world-engine.js",
-  );
+  // Engine file removed from the product — keep empty so boot never crashes.
+  // Immersion mount script no-ops when mountScrollWorld is missing.
+  return "";
 }
 
 const SCRUB_ENGINE_JS: string = loadScrubEngineJs();
