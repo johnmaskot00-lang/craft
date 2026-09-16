@@ -33,8 +33,8 @@ const ramMb = envInt("CRAFT_RAM_MB", 2560);
  * Cap concurrent generates hard — 100× on 1.8GB heap OOMs the whole site.
  */
 const defaults = ramMb >= 5000
-  ? { generates: 24, bgAnim: 6, ffmpeg: 2, publish: 2, images: 12, uploads: 4, heapMb: 4096 }
-  : { generates: 8, bgAnim: 2, ffmpeg: 1, publish: 1, images: 4, uploads: 2, heapMb: 1792 };
+  ? { generates: 24, bgAnim: 6, ffmpeg: 2, publish: 2, images: 12, uploads: 4, seo: 4, heapMb: 4096 }
+  : { generates: 8, bgAnim: 2, ffmpeg: 1, publish: 1, images: 4, uploads: 2, seo: 2, heapMb: 1792 };
 
 export const RESOURCE_PROFILE = {
   ramMb,
@@ -45,6 +45,8 @@ export const RESOURCE_PROFILE = {
   maxPublish: envInt("CRAFT_MAX_PUBLISH", defaults.publish),
   maxImageJobs: envInt("CRAFT_MAX_IMAGE_JOBS", defaults.images),
   maxUploads: envInt("CRAFT_MAX_UPLOADS", defaults.uploads),
+  /** SEO magazine runs — separate from site generate so one SEO job can't starve Craft. */
+  maxSeo: Math.min(8, envInt("CRAFT_MAX_SEO", defaults.seo)),
   /**
    * Never hold the generate slot through BG ANIM. Kling/ffmpeg use their own
    * bgAnim/ffmpeg semaphores — pinning generate slots blocked other users
@@ -116,6 +118,7 @@ class Semaphore {
 }
 
 const generateSem = new Semaphore(RESOURCE_PROFILE.maxGenerates, "generate");
+const seoSem = new Semaphore(RESOURCE_PROFILE.maxSeo, "seo");
 const bgAnimSem = new Semaphore(RESOURCE_PROFILE.maxBgAnim, "bg-anim");
 const ffmpegSem = new Semaphore(RESOURCE_PROFILE.maxFfmpeg, "ffmpeg");
 const publishSem = new Semaphore(RESOURCE_PROFILE.maxPublish, "publish");
@@ -353,6 +356,65 @@ export async function acquireGenerate(
   return wrapGenerateRelease(rel);
 }
 
+/** SEO magazine queue — does NOT consume CRAFT_MAX_GENERATES slots. */
+const SEO_QUEUE_MAX_MS = envInt("CRAFT_SEO_QUEUE_MAX_MS", 30 * 60 * 1000);
+
+export async function acquireSeo(
+  timeoutMs: number | { timeoutMs?: number; onWait?: () => void } = SEO_QUEUE_MAX_MS,
+): Promise<Release | null> {
+  const opts = typeof timeoutMs === "number" ? { timeoutMs } : timeoutMs;
+  const maxWait = Math.max(5_000, opts.timeoutMs ?? SEO_QUEUE_MAX_MS);
+  const onWait = opts.onWait;
+  const deadline = Date.now() + maxWait;
+  const remaining = () => Math.max(0, deadline - Date.now());
+
+  const stats = seoSem.stats();
+  if (stats.active >= stats.max || stats.waiting > 0) {
+    console.log(`[LOAD] seo queued — ${JSON.stringify(stats)}`);
+  }
+
+  const heartbeat = onWait
+    ? setInterval(() => {
+        try { onWait(); } catch { /* ignore */ }
+      }, 2000)
+    : null;
+  heartbeat?.unref?.();
+
+  let rel: Release | null = null;
+  try {
+    rel = await seoSem.acquire(remaining());
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
+  }
+
+  if (!rel) {
+    console.warn(`[LOAD] seo queue timeout — ${JSON.stringify(seoSem.stats())}`);
+    return null;
+  }
+
+  while (remaining() > 0) {
+    const rssMb = process.memoryUsage().rss / 1024 / 1024;
+    const rssRatio = rssMb / Math.max(256, RESOURCE_PROFILE.ramMb);
+    if (!isHeapUnderPressure() && rssRatio < 0.90) break;
+    try { onWait?.(); } catch { /* ignore */ }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+
+  const rssMb = process.memoryUsage().rss / 1024 / 1024;
+  const rssRatio = rssMb / Math.max(256, RESOURCE_PROFILE.ramMb);
+  if (isHeapUnderPressure(0.92) || rssRatio >= 0.92) {
+    console.warn(
+      `[LOAD] seo aborted after queue — memory still high ` +
+        `heap=${(heapPressureRatio() * 100).toFixed(0)}% rss=${Math.round(rssMb)}MB`,
+    );
+    rel();
+    return null;
+  }
+
+  // No short force-release — magazine runs can last hours; seoGenerateInFlight tracks them.
+  return rel;
+}
+
 export function tryAcquirePublish(): Release | null {
   if (rejectIfHeapPressure("publish")) return null;
   const rel = publishSem.tryAcquire();
@@ -409,6 +471,7 @@ export function getLoadStats() {
   return {
     profile: RESOURCE_PROFILE,
     generate: generateSem.stats(),
+    seo: seoSem.stats(),
     bgAnim: bgAnimSem.stats(),
     ffmpeg: ffmpegSem.stats(),
     publish: publishSem.stats(),
@@ -421,7 +484,7 @@ export function getLoadStats() {
 
 console.log(
   `[LOAD] resource profile RAM≈${RESOURCE_PROFILE.ramMb}MB heap≈${RESOURCE_PROFILE.heapMb}MB ` +
-    `generates=${RESOURCE_PROFILE.maxGenerates} bgAnim=${RESOURCE_PROFILE.maxBgAnim} ` +
+    `generates=${RESOURCE_PROFILE.maxGenerates} seo=${RESOURCE_PROFILE.maxSeo} bgAnim=${RESOURCE_PROFILE.maxBgAnim} ` +
     `ffmpeg=${RESOURCE_PROFILE.maxFfmpeg} publish=${RESOURCE_PROFILE.maxPublish} ` +
     `images=${RESOURCE_PROFILE.maxImageJobs} uploads=${RESOURCE_PROFILE.maxUploads}`,
 );
@@ -441,6 +504,7 @@ setInterval(() => {
       `rss=${Math.round(mem.rss / 1024 / 1024)}MB ` +
       `load=${JSON.stringify({
         g: generateSem.stats(),
+        seo: seoSem.stats(),
         bg: bgAnimSem.stats(),
         ff: ffmpegSem.stats(),
         p: publishSem.stats(),

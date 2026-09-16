@@ -13,7 +13,7 @@ import type {
 import { resolveSeoOffer, seoOfferProductName, SEO_CONTENT_TYPES } from "@shared/schema";
 import crypto from "crypto";
 import { withKieCallback, waitForKieJob, kieResultUrl, type KieTaskData } from "./kie-jobs";
-import { acquireGenerate, withImageSlot } from "./resource-guards";
+import { acquireSeo, withImageSlot } from "./resource-guards";
 import {
   runToolCallingAgent,
   buildSeoMultipageEditSystemPrompt,
@@ -3959,10 +3959,10 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
       return;
     }
 
-    const releaseGenerate = await acquireGenerate({
+    const releaseSeo = await acquireSeo({
       onWait: () => send({ type: "heartbeat", generated: 0, total: cfg.pagesTotal, ts: Date.now() }),
     });
-    if (!releaseGenerate) {
+    if (!releaseSeo) {
       send({ type: "error", message: "Не удалось запустить генерацию. Попробуйте ещё раз." });
       try { res.end(); } catch {}
       return;
@@ -4219,7 +4219,7 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
     } finally {
       clearInterval(heartbeat);
       seoGenerateInFlight.delete(projectId);
-      releaseGenerate();
+      releaseSeo();
     }
   });
 
@@ -4652,10 +4652,10 @@ Respond ONLY with valid JSON (no markdown):
     };
     earlySend({ status: "Готовлю правку…" });
 
-    const releaseGenerate = await acquireGenerate({
+    const releaseSeo = await acquireSeo({
       onWait: () => earlySend({ status: "Готовлю правку…" }),
     });
-    if (!releaseGenerate) {
+    if (!releaseSeo) {
       earlySend({ done: true, error: "Не удалось запустить генерацию. Попробуйте ещё раз." });
       try { res.end(); } catch {}
       return;
@@ -4666,7 +4666,7 @@ Respond ONLY with valid JSON (no markdown):
     try {
       const ded = await storage.deductCredits(userId, SEO_EDIT_COST, "seo-edit", ikey);
       if (!ded.success) {
-        releaseGenerate();
+        releaseSeo();
         earlySend({
           done: true,
           error: `Недостаточно токенов. Правка стоит ${SEO_EDIT_COST} ток.`,
@@ -4895,7 +4895,7 @@ ${offerBlock}
         try { res.write(`data: ${JSON.stringify({ error: e?.message || "Ошибка агента", done: true })}\n\n`); res.end(); } catch {}
       }
     } finally {
-      releaseGenerate();
+      releaseSeo();
     }
   });
 

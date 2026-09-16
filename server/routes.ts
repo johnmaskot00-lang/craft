@@ -79,6 +79,7 @@ import {
   withUploadSlot,
   writeSseJson,
 } from "./resource-guards";
+import { getPublishMediaCached, setPublishMediaCached } from "./publish-media-cache";
 import { assertPublicHttpUrl, safeFetch } from "./url-guard";
 import { isPublishableProjectFile } from "@shared/project-files";
 import { applyClientGeoToPublishFiles, sitePublicOrigin } from "./site-geo";
@@ -9139,35 +9140,48 @@ ${designAnalysis}
             }
             let buffer: Buffer | null = null;
             if (mediaUrl.startsWith("/objects/")) {
-              try {
-                const gcsFile = await publishObjStorage.getObjectEntityFile(mediaUrl);
-                const [fileContent] = await gcsFile.download();
-                buffer = fileContent as Buffer;
-                console.log(`[Publish] Object download OK: ${mediaUrl} (${buffer.length} bytes)`);
-              } catch (sdkErr: any) {
-                console.warn(`[Publish] Object download failed for ${mediaUrl}: ${sdkErr?.message || sdkErr} — trying localhost fallback`);
+              buffer = getPublishMediaCached(mediaUrl);
+              if (buffer) {
+                console.log(`[Publish] Cache hit: ${mediaUrl} (${buffer.length} bytes)`);
+              } else {
                 try {
-                  const fetchUrl = `http://localhost:${process.env.PORT || 5000}${mediaUrl}`;
-                  const mediaResp = await fetch(fetchUrl, { signal: AbortSignal.timeout(15000) });
-                  if (mediaResp.ok) {
-                    buffer = Buffer.from(await mediaResp.arrayBuffer());
-                    console.log(`[Publish] Localhost fallback OK: ${mediaUrl} (${buffer.length} bytes)`);
-                  } else {
-                    console.warn(`[Publish] Localhost fallback ${mediaUrl} returned ${mediaResp.status}`);
+                  const gcsFile = await publishObjStorage.getObjectEntityFile(mediaUrl);
+                  const [fileContent] = await gcsFile.download();
+                  buffer = fileContent as Buffer;
+                  setPublishMediaCached(mediaUrl, buffer);
+                  console.log(`[Publish] Object download OK: ${mediaUrl} (${buffer.length} bytes)`);
+                } catch (sdkErr: any) {
+                  console.warn(`[Publish] Object download failed for ${mediaUrl}: ${sdkErr?.message || sdkErr} — trying localhost fallback`);
+                  try {
+                    const fetchUrl = `http://localhost:${process.env.PORT || 5000}${mediaUrl}`;
+                    const mediaResp = await fetch(fetchUrl, { signal: AbortSignal.timeout(15000) });
+                    if (mediaResp.ok) {
+                      buffer = Buffer.from(await mediaResp.arrayBuffer());
+                      setPublishMediaCached(mediaUrl, buffer);
+                      console.log(`[Publish] Localhost fallback OK: ${mediaUrl} (${buffer.length} bytes)`);
+                    } else {
+                      console.warn(`[Publish] Localhost fallback ${mediaUrl} returned ${mediaResp.status}`);
+                    }
+                  } catch (fetchErr: any) {
+                    console.warn(`[Publish] Localhost fallback failed for ${mediaUrl}:`, fetchErr?.message);
                   }
-                } catch (fetchErr: any) {
-                  console.warn(`[Publish] Localhost fallback failed for ${mediaUrl}:`, fetchErr?.message);
                 }
               }
             } else {
               // Legacy /uploads/ static path — use localhost fetch
-              const fetchUrl = `http://localhost:${process.env.PORT || 5000}${mediaUrl}`;
-              const mediaResp = await fetch(fetchUrl, { signal: AbortSignal.timeout(15000) });
-              if (!mediaResp.ok) {
-                console.warn(`[Publish] Media fetch ${mediaUrl} returned ${mediaResp.status}`);
-                continue;
+              buffer = getPublishMediaCached(mediaUrl);
+              if (buffer) {
+                console.log(`[Publish] Cache hit: ${mediaUrl} (${buffer.length} bytes)`);
+              } else {
+                const fetchUrl = `http://localhost:${process.env.PORT || 5000}${mediaUrl}`;
+                const mediaResp = await fetch(fetchUrl, { signal: AbortSignal.timeout(15000) });
+                if (!mediaResp.ok) {
+                  console.warn(`[Publish] Media fetch ${mediaUrl} returned ${mediaResp.status}`);
+                  continue;
+                }
+                buffer = Buffer.from(await mediaResp.arrayBuffer());
+                setPublishMediaCached(mediaUrl, buffer);
               }
-              buffer = Buffer.from(await mediaResp.arrayBuffer());
             }
             if (!buffer) continue;
             const isHeroVideo = /\.(mp4|webm|mov)$/i.test(mediaUrl);
