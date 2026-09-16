@@ -9467,6 +9467,16 @@ ${designAnalysis}
       if (publishJobId) await failGenerationJob(publishJobId, err?.message || "publish failed");
       res.status(500).json({ message: err.message || "Ошибка публикации" });
     } finally {
+      if (publishJobId) {
+        try {
+          const st = await getGenerationJob(publishJobId);
+          if (st && (st.state === "queued" || st.state === "running")) {
+            await failGenerationJob(publishJobId, "publish aborted");
+          }
+        } catch {
+          /* ignore */
+        }
+      }
       releasePublish();
     }
   });
