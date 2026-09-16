@@ -8,9 +8,22 @@ build:
   # Force public npm registry — Amvera builds can inherit a broken Replit
   # package-firewall registry from historical .replit projects.
   additionalCommands: npm config set registry https://registry.npmjs.org/ && npm install --include=dev --registry=https://registry.npmjs.org/ && npm run build
+  # Ship only what the container needs at runtime. The default "*": / packed
+  # .git (~400MB) + attached_assets (~370MB) into every artifact (~890MB zipped),
+  # which exhausted artifact storage and broke deploys with "Artifact not found".
+  artifacts:
+    "dist": /
+    "node_modules": /
+    "server": /
+    "shared": /
+    "scripts": /
+    "package.json": /
+    "package-lock.json": /
+    "amvera.yaml": /
+    "amvera.yml": /
 
 run:
-  # Scale-out: set REDIS_URL, CRAFT_API_INSTANCES, CRAFT_RUN_WORKER=1 (or separate worker process).
+  # Scale-out: set REDIS_URL, CRAFT_API_INSTANCES, CRAFT_RUN_WORKER=1.
   # Optional: CRAFT_JOB_QUEUE_MAX, CRAFT_WORKER_INTERVAL_MS, CRAFT_MAX_SEO.
   command: npm run start
   containerPort: 5000
