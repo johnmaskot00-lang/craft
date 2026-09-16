@@ -1530,19 +1530,22 @@ export default function EditorPage() {
         const pollStart = Date.now();
         animPollRef.current = setInterval(async () => {
           try {
-            const r = await fetch(`/api/projects/${project.id}`, { credentials: "include" });
-            const p = await r.json();
-            const c: string = p?.generatedCode || "";
-            const isStillPending = c.includes('data-scroll-anim-pending="1"');
+            const statusResp = await fetch(`/api/projects/${project.id}/generation-status`, { credentials: "include" });
+            if (!statusResp.ok) return;
+            const status = await statusResp.json().catch(() => null);
+            if (!status) return;
             const timedOut = Date.now() - pollStart > 25 * 60 * 1000;
-            if (!isStillPending || timedOut) {
-              clearInterval(animPollRef.current!);
-              animPollRef.current = null;
-              setGenerationStatus(null);
-              setAnimBaking(false);
-              applyBakedPreview(c, p);
-              queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
-            }
+            const ready = status.animReady || (!status.animPending && !status.active);
+            if (!ready && !timedOut) return;
+            clearInterval(animPollRef.current!);
+            animPollRef.current = null;
+            setGenerationStatus(null);
+            setAnimBaking(false);
+            const r = await fetch(`/api/projects/${project.id}`, { credentials: "include" });
+            const p = r.ok ? await r.json() : null;
+            const c: string = p?.generatedCode || "";
+            if (c) applyBakedPreview(c, p);
+            queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
           } catch {}
         }, 4000);
       }
