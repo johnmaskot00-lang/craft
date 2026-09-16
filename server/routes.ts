@@ -287,42 +287,8 @@ async function syncUserSiteImagesToLibrary(userId: number): Promise<number> {
 
 const uploadToObjectStorage = uploadBufferToObjectStorage;
 
-// Compress a raster image for publishing so it lands around 150-300KB while staying
-// visually lossless. Photos (no transparency) → mozjpeg; images with an alpha channel
-// → WebP (preserves transparency at a fraction of PNG size). Returns the original
-// buffer unchanged when it's already small, isn't a raster image, or can't be processed.
-// Animation frames are NEVER passed here — they are bundled at full quality (no compression).
-async function compressImageForPublish(buffer: Buffer): Promise<Buffer> {
-  const TARGET_MAX = 300 * 1024;
-  if (buffer.length <= TARGET_MAX) return buffer; // already light enough — keep as-is
-  try {
-    const sharpMod = (await import("sharp")).default;
-    try { sharpMod.cache(false); sharpMod.concurrency(1); } catch { /* ignore */ }
-    const meta = await sharpMod(buffer).metadata();
-    if (!meta.width || !meta.height) return buffer;
-    const MAX_DIM = 1920; // full-width heroes never need more than this on the web
-    const resizeOpts = (meta.width > MAX_DIM || meta.height > MAX_DIM)
-      ? { width: MAX_DIM, height: MAX_DIM, fit: "inside" as const, withoutEnlargement: true }
-      : undefined;
-    const mk = () => { let p = sharpMod(buffer).rotate(); if (resizeOpts) p = p.resize(resizeOpts); return p; };
-    let out: Buffer;
-    if (meta.hasAlpha) {
-      out = await mk().webp({ quality: 72 }).toBuffer();
-      if (out.length > TARGET_MAX) out = await mk().webp({ quality: 55 }).toBuffer();
-    } else {
-      out = await mk().jpeg({ quality: 72, mozjpeg: true }).toBuffer();
-      if (out.length > TARGET_MAX) {
-        out = await sharpMod(buffer).rotate().resize({
-          width: 1280, height: 1280, fit: "inside", withoutEnlargement: true,
-        }).jpeg({ quality: 65, mozjpeg: true }).toBuffer();
-      }
-    }
-    return out.length < buffer.length ? out : buffer; // never grow the file
-  } catch (e: any) {
-    console.warn(`[Publish] Image compression skipped (using original):`, e?.message || e);
-    return buffer;
-  }
-}
+// Animation frames and publish assets are bundled as-is — re-encoding with sharp
+// on every publish pegged Amvera CPU and slowed the whole product.
 
 async function extractTextFromFile(base64Data: string, mimeType: string): Promise<string | null> {
   try {
@@ -9118,19 +9084,6 @@ ${designAnalysis}
       // are produced when Kling needs a public URL for the still image input.
       const publishAppBase = (process.env.APP_BASE_URL || "https://craft-ai.ru").replace(/\/$/, "");
       const allHtmlForScan = files.map(f => f.content || "").join("\n");
-      // Collect animation-frame URLs (from data-frames arrays) — these must NEVER be
-      // compressed; their crispness drives smooth scroll playback.
-      const frameUrls = new Set<string>();
-      {
-        const framesAttrRe = /data-frames\s*=\s*'([^']*)'/gi;
-        let fmatch: RegExpExecArray | null;
-        while ((fmatch = framesAttrRe.exec(allHtmlForScan)) !== null) {
-          try {
-            const arr = JSON.parse(fmatch[1].replace(/&#39;/g, "'"));
-            if (Array.isArray(arr)) arr.forEach((u: any) => { if (typeof u === "string") frameUrls.add(u); });
-          } catch { /* ignore malformed frame arrays */ }
-        }
-      }
       const localMediaUrls = new Set<string>(); // stores RELATIVE paths only
       const absoluteToRelative = new Map<string, string>(); // absolute URL → relative path
       const mediaRegexes = [
@@ -9221,27 +9174,12 @@ ${designAnalysis}
               buffer = null;
               continue;
             }
-            // Compress raster images at publish to keep deployed pages light. Heavy
-            // pages (especially multi-frame scroll animations) fail to load over
-            // throttled foreign-CDN connections (e.g. Russian ISPs without a VPN),
-            // which is why interactive sites showed broken images while light
-            // description sites loaded fine. Animation frames are bundled at FULL quality
-            // (no compression) — per user request, compressing them visibly degraded the
-            // scroll animation. Only non-frame rasters (e.g. heavy product photos) go through
-            // the ≤300KB compressor. GIFs (Sharp flattens animation), video, 3D and SVG are
-            // left untouched.
-            const isRaster = /\.(jpe?g|png|webp)$/i.test(mediaUrl.split("?")[0]);
-            if (isRaster && !frameUrls.has(mediaUrl)) {
-              const before = buffer.length;
-              buffer = await compressImageForPublish(buffer);
-              if (buffer.length !== before) {
-                console.log(`[Publish] Compressed ${mediaUrl}: ${(before/1024).toFixed(0)}KB → ${(buffer.length/1024).toFixed(0)}KB`);
-              }
-            }
+            // Bundle originals as-is. Re-encoding every PNG with sharp on each publish
+            // pegged Amvera CPU (>2.5 cores) for minutes and slowed the whole site.
             // Detect real format from magic bytes — Nano Banana returns PNG even when
             // requested as JPEG, so the stored file may have .jpg extension but PNG content.
-            // Compression above may also have changed the format. Yandex Object Storage
-            // assigns Content-Type from extension, so the extension must match the real bytes.
+            // Yandex Object Storage assigns Content-Type from extension, so the extension
+            // must match the real bytes.
             let base = (mediaUrl.split("/").pop() || "").split("?")[0].replace(/[^a-zA-Z0-9._-]/g, "_");
             if (!base || base === "_") base = `asset_${counter}`;
             // Fix extension if actual format differs from file extension
@@ -9251,7 +9189,7 @@ ${designAnalysis}
               const isWebp = buffer.slice(0,4).toString("ascii") === "RIFF" && buffer.slice(8,12).toString("ascii") === "WEBP";
               const isGif = buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46;
               // Always force the extension to match the real bytes (covers PNG-as-jpg from
-              // Nano Banana AND format changes from compression, e.g. png→webp / png→jpg).
+              // Nano Banana).
               const realExt = isPng ? "png" : isJpeg ? "jpg" : isWebp ? "webp" : isGif ? "gif" : null;
               if (realExt && !new RegExp(`\\.${realExt === "jpg" ? "jpe?g" : realExt}$`, "i").test(base)) {
                 base = /\.[^.]+$/.test(base) ? base.replace(/\.[^.]+$/, `.${realExt}`) : `${base}.${realExt}`;
