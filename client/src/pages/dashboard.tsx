@@ -37,6 +37,8 @@ import {
   Maximize2,
   X,
   Rocket,
+  MoreHorizontal,
+  ChevronDown,
 } from "lucide-react";
 import { useRef, useCallback } from "react";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -436,6 +438,9 @@ export default function DashboardPage() {
   const [mockupPrompt, setMockupPrompt] = useState("");
   const [mockupGenerating, setMockupGenerating] = useState(false);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const [projectFilter, setProjectFilter] = useState<"all" | "published" | "draft" | "trash">("all");
+  const [projectSort, setProjectSort] = useState<"updated" | "created">("updated");
+  const [openProjectMenu, setOpenProjectMenu] = useState<number | null>(null);
 
   const cachedProjects = useMemo<Project[] | undefined>(() => {
     try {
@@ -448,6 +453,40 @@ export default function DashboardPage() {
     queryKey: ["/api/projects"],
     placeholderData: cachedProjects,
   });
+
+  const filteredProjects = useMemo(() => {
+    let list = [...userProjects];
+    if (projectFilter === "published") {
+      list = list.filter((p) => p.publishStatus === "published");
+    } else if (projectFilter === "draft") {
+      list = list.filter((p) => p.publishStatus !== "published" && p.publishStatus !== "banned");
+    } else if (projectFilter === "trash") {
+      list = [];
+    }
+    list.sort((a, b) => {
+      const aTime = new Date((projectSort === "created" ? a.createdAt : a.updatedAt || a.createdAt) as string | Date).getTime();
+      const bTime = new Date((projectSort === "created" ? b.createdAt : b.updatedAt || b.createdAt) as string | Date).getTime();
+      return bTime - aTime;
+    });
+    return list;
+  }, [userProjects, projectFilter, projectSort]);
+
+  const projectUrlLabel = (project: Project) => {
+    const custom = (project as any).customDomain as string | undefined;
+    const published = project.publishedUrl as string | undefined;
+    if (custom) return custom.replace(/^https?:\/\//i, "");
+    if (published) {
+      try { return new URL(published).hostname; } catch { return published.replace(/^https?:\/\//i, ""); }
+    }
+    return (project as any).type === "seo" ? `seo/${project.id}` : `проект #${project.id}`;
+  };
+
+  const projectStatusMeta = (project: Project) => {
+    if (project.publishStatus === "published") return { label: "Опубликован", color: "#22c55e" };
+    if (project.publishStatus === "suspended") return { label: "Приостановлен", color: "#f59e0b" };
+    if (project.publishStatus === "banned") return { label: "Заблокирован", color: "#ef4444" };
+    return { label: "Черновик", color: "#94a3b8" };
+  };
 
   useEffect(() => {
     if (userProjects.length > 0 && !isFetching) {
@@ -750,8 +789,25 @@ export default function DashboardPage() {
     };
   }, [isMobile, showProfile]);
 
+  useEffect(() => {
+    if (openProjectMenu == null) return;
+    const close = () => setOpenProjectMenu(null);
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [openProjectMenu]);
+
   return (
-    <div className="min-h-screen relative overflow-x-hidden" style={{ background: '#FBFBFD', fontFamily: appleFont, display: 'flex', flexDirection: 'column' }}>
+    <div className="min-h-screen relative overflow-x-hidden" style={{
+      background: `
+        radial-gradient(ellipse 90% 55% at 15% 10%, rgba(180,210,240,0.55) 0%, transparent 55%),
+        radial-gradient(ellipse 70% 50% at 85% 5%, rgba(220,230,245,0.7) 0%, transparent 50%),
+        radial-gradient(ellipse 80% 60% at 50% 100%, rgba(210,220,230,0.45) 0%, transparent 55%),
+        linear-gradient(165deg, #dce6f0 0%, #eef1f5 28%, #f4f2ef 58%, #e8eef5 100%)
+      `,
+      fontFamily: appleFont,
+      display: 'flex',
+      flexDirection: 'column',
+    }}>
       <style dangerouslySetInnerHTML={{ __html: `
         :root { --rainbow-grad: linear-gradient(90deg, #FF4242, #A5FF42, #42A5FF, #42E6FF, #B742FF, #FF4242); }
         @keyframes db-rainbow { 0% { background-position: 0% 50%; } 100% { background-position: 200% 50%; } }
@@ -971,9 +1027,11 @@ export default function DashboardPage() {
           }
         }
       ` }} />
-      {/* Ambient glows matching landing page */}
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[80%] h-[60%] pointer-events-none" style={{ background: 'radial-gradient(ellipse at 50% 0%, rgba(66,165,255,0.07) 0%, transparent 70%)' }} />
-      <div className="absolute top-0 left-0 right-0 h-px pointer-events-none" style={{ background: 'linear-gradient(90deg, transparent, rgba(66,165,255,0.3), rgba(181,66,255,0.3), transparent)' }} />
+      {/* Soft landscape wash behind glass content */}
+      <div className="absolute inset-0 pointer-events-none overflow-hidden" aria-hidden>
+        <div style={{ position: 'absolute', inset: '-10% 0 auto', height: '55%', background: 'radial-gradient(ellipse at 40% 30%, rgba(255,255,255,0.55) 0%, transparent 60%)', filter: 'blur(2px)' }} />
+        <div style={{ position: 'absolute', bottom: '-8%', left: '-5%', right: '-5%', height: '42%', background: 'linear-gradient(180deg, transparent, rgba(120,140,160,0.12))', borderRadius: '50% 50% 0 0 / 40% 40% 0 0', filter: 'blur(28px)' }} />
+      </div>
 
       {/* Header — matching landing page nav */}
       <header className="fixed top-0 left-0 right-0 z-50" style={{ padding: '0.75rem 0', transition: 'all 0.3s', background: 'rgba(251,251,253,0.85)', backdropFilter: 'blur(20px)', borderBottom: '1px solid rgba(0,0,0,0.04)' }}>
@@ -1118,151 +1176,321 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6" style={{ paddingTop: '5.5rem', flex: 1, paddingBottom: '3rem' }}>
-        {/* Page header */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8 sm:mb-12">
-          <div className="min-w-0">
-            <p style={{ fontSize: '0.75rem', fontWeight: 600, color: '#86868B', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '0.5rem' }}>
-              Добро пожаловать, {user?.displayName || user?.email?.split('@')[0]}
-            </p>
-            <h1 style={{ fontSize: 'clamp(1.6rem,4vw,3rem)', fontWeight: 700, letterSpacing: '-0.04em', color: '#1D1D1F', lineHeight: 1.1, margin: 0 }}>
-              Ваши проекты
-            </h1>
-          </div>
-          <div className="flex flex-col sm:flex-row gap-2 sm:gap-2.5 w-full sm:w-auto">
-            <button
-              disabled={creatingSeo}
-              onClick={async () => {
-                if (creatingSeo) return;
-                setCreatingSeo(true);
-                try {
-                  const r = await fetch('/api/seo/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ title: 'SEO-сайт', niche: '' }) });
-                  const d = await r.json();
-                  if (d.project?.id) { setLocation(`/seo/${d.project.id}`); return; }
-                  throw new Error('no id');
-                } catch {
-                  toast({ title: 'Не удалось создать SEO-сайт', variant: 'destructive' });
-                  setCreatingSeo(false);
-                }
-              }}
-              className="flex w-full sm:w-auto items-center justify-center gap-2 transition-all hover:-translate-y-0.5 active:scale-[0.98]"
-              style={{ background: 'linear-gradient(135deg,#1a1a3e,#312e81)', color: '#a5b4fc', border: '1px solid rgba(99,102,241,0.3)', borderRadius: 16, padding: isMobile ? '0.75rem 1rem' : '0.85rem 1.4rem', fontSize: isMobile ? '0.8rem' : '0.88rem', fontWeight: 600, cursor: creatingSeo ? 'wait' : 'pointer', letterSpacing: '-0.01em', opacity: creatingSeo ? 0.7 : 1 }}
-              title="Создать SEO-сайт из ключевых слов"
-            >
-              {creatingSeo ? <Loader2 className="w-4 h-4 animate-spin" /> : <span style={{ fontSize: '1rem' }}>📊</span>}
-              {creatingSeo ? 'Создаём…' : 'SEO-машина'}
-            </button>
-            <button
-              onClick={openCreateModal}
-              className="flex flex-1 sm:flex-none items-center justify-center gap-2 transition-all hover:-translate-y-0.5 active:scale-[0.98]"
-              style={{ background: 'linear-gradient(135deg,#1D1D1F,#3a3a3c)', color: '#fff', border: 'none', borderRadius: 16, padding: isMobile ? '0.75rem 1rem' : '0.85rem 1.6rem', fontSize: isMobile ? '0.8rem' : '0.9rem', fontWeight: 600, cursor: 'pointer', boxShadow: '0 8px 30px rgba(0,0,0,0.15)', letterSpacing: '-0.01em' }}
-            >
-              <Plus className="w-5 h-5" />
-              Новый сайт
-            </button>
-          </div>
-        </div>
-
-        {isLoading ? (
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {Array.from({ length: cachedProjects?.length || 3 }).map((_, i) => (
-              <div key={i} className="rounded-[2rem] animate-pulse" style={{ height: 280, background: 'rgba(0,0,0,0.04)' }} />
-            ))}
-          </div>
-        ) : userProjects.length === 0 ? (
-          <GlassCard className="flex flex-col items-center justify-center py-16 sm:py-32 text-center space-y-6 sm:space-y-8">
-            <div className="w-16 h-16 sm:w-24 sm:h-24 rounded-[1.5rem] sm:rounded-[2rem] flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.03)', border: '1px solid rgba(0,0,0,0.06)' }}>
-              <FolderOpen className="w-8 h-8 sm:w-12 sm:h-12" style={{ color: 'rgba(0,0,0,0.12)' }} />
+      <main className="relative z-10 max-w-7xl mx-auto px-3 sm:px-6" style={{ paddingTop: '5.25rem', flex: 1, paddingBottom: '2.5rem', width: '100%' }}>
+        <div
+          className="db-glass-shell"
+          style={{
+            background: 'rgba(255,255,255,0.42)',
+            backdropFilter: 'blur(36px) saturate(1.35)',
+            WebkitBackdropFilter: 'blur(36px) saturate(1.35)',
+            border: '1px solid rgba(255,255,255,0.65)',
+            borderRadius: isMobile ? 22 : 32,
+            boxShadow: '0 24px 80px rgba(30,50,80,0.10), inset 0 1px 0 rgba(255,255,255,0.7)',
+            padding: isMobile ? '1.15rem 1rem 1.35rem' : '1.75rem 1.85rem 2rem',
+          }}
+        >
+          {/* Greeting + create */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6 sm:mb-8">
+            <div className="min-w-0">
+              <h1 style={{ fontSize: 'clamp(1.55rem, 3.6vw, 2.35rem)', fontWeight: 700, letterSpacing: '-0.045em', color: '#1a1d24', lineHeight: 1.15, margin: 0 }}>
+                Добро пожаловать, {user?.displayName || user?.email?.split('@')[0] || 'друг'}
+              </h1>
+              <p style={{ margin: '0.45rem 0 0', fontSize: '0.92rem', color: 'rgba(26,29,36,0.55)', fontWeight: 500 }}>
+                Управляйте сайтами и запускайте новые проекты
+              </p>
             </div>
-            <div className="space-y-3">
-              <h2 className="text-xl sm:text-[1.8rem]" style={{ fontWeight: 700, letterSpacing: '-0.03em', color: '#1D1D1F' }}>Пока здесь пусто</h2>
-              <p style={{ color: '#86868B', maxWidth: 360, margin: '0 auto', fontSize: '1rem', lineHeight: 1.6 }}>Создайте свой первый проект, используя возможности искусственного интеллекта.</p>
-            </div>
-            <button onClick={openCreateModal} className="transition-all hover:opacity-80" style={{ background: '#1D1D1F', color: '#fff', border: 'none', borderRadius: 14, padding: '0.85rem 2rem', fontSize: '0.95rem', fontWeight: 600, cursor: 'pointer' }}>
-              Создать первый сайт
-            </button>
-          </GlassCard>
-        ) : (
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {userProjects.map((project) => (
-              <div
-                key={project.id}
-                onClick={() => setLocation((project as any).type === "seo" ? `/seo/${project.id}` : `/editor/${project.id}`)}
-                className="group cursor-pointer transition-all duration-500 hover:-translate-y-1.5"
-                style={{ borderRadius: '2rem', overflow: 'hidden', background: '#fff', border: '1px solid rgba(0,0,0,0.06)', boxShadow: '0 2px 20px rgba(0,0,0,0.04)', position: 'relative' }}
+            <div className="flex flex-col sm:flex-row gap-2 sm:gap-2.5 w-full sm:w-auto">
+              <button
+                disabled={creatingSeo}
+                onClick={async () => {
+                  if (creatingSeo) return;
+                  setCreatingSeo(true);
+                  try {
+                    const r = await fetch('/api/seo/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ title: 'SEO-сайт', niche: '' }) });
+                    const d = await r.json();
+                    if (d.project?.id) { setLocation(`/seo/${d.project.id}`); return; }
+                    throw new Error('no id');
+                  } catch {
+                    toast({ title: 'Не удалось создать SEO-сайт', variant: 'destructive' });
+                    setCreatingSeo(false);
+                  }
+                }}
+                className="flex w-full sm:w-auto items-center justify-center gap-2 transition-all"
+                style={{
+                  background: 'rgba(255,255,255,0.55)',
+                  color: '#1a1d24',
+                  border: '1px solid rgba(255,255,255,0.8)',
+                  borderRadius: 100,
+                  padding: isMobile ? '0.72rem 1rem' : '0.78rem 1.25rem',
+                  fontSize: isMobile ? '0.8rem' : '0.86rem',
+                  fontWeight: 600,
+                  cursor: creatingSeo ? 'wait' : 'pointer',
+                  backdropFilter: 'blur(12px)',
+                  opacity: creatingSeo ? 0.7 : 1,
+                }}
+                title="Создать SEO-сайт из ключевых слов"
               >
-                {/* Preview */}
-                <div style={{ height: 220, position: "relative", overflow: "hidden", background: "#F5F5F7", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  {(project as any).hasPreview || project.publishStatus === "published" ? (
-                    <div style={{
-                      width: "100%", height: "100%",
-                      background: project.type === "seo"
-                        ? "linear-gradient(145deg, #EEF2FF 0%, #F8FAFC 55%, #ECFDF5 100%)"
-                        : "linear-gradient(145deg, #F0F9FF 0%, #F8FAFC 50%, #FFF7ED 100%)",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                    }}>
-                      <div style={{
-                        width: 72, height: 72, borderRadius: 20,
-                        background: "rgba(255,255,255,0.85)", border: "1px solid rgba(0,0,0,0.06)",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                        fontSize: "1.6rem", fontWeight: 800, color: "#1D1D1F", letterSpacing: "-0.04em",
-                      }}>
-                        {(project.title || "C").trim().charAt(0).toUpperCase()}
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ width: 64, height: 64, borderRadius: 20, background: "rgba(0,0,0,0.04)", border: "1px solid rgba(0,0,0,0.06)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                      <Code2 style={{ width: 32, height: 32, color: "rgba(0,0,0,0.12)" }} />
-                    </div>
-                  )}
-                  <div className="absolute inset-0 transition-opacity duration-500 group-hover:opacity-30" style={{ background: "linear-gradient(to top, rgba(255,255,255,0.98) 0%, rgba(255,255,255,0.1) 100%)" }} />
-                </div>
+                {creatingSeo ? <Loader2 className="w-4 h-4 animate-spin" /> : <span style={{ fontSize: '0.95rem' }}>📊</span>}
+                {creatingSeo ? 'Создаём…' : 'SEO-машина'}
+              </button>
+              <button
+                onClick={openCreateModal}
+                className="flex flex-1 sm:flex-none items-center justify-center gap-2 transition-all hover:opacity-95 active:scale-[0.98]"
+                style={{
+                  background: '#1a1d24',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: 100,
+                  padding: isMobile ? '0.75rem 1.1rem' : '0.8rem 1.45rem',
+                  fontSize: isMobile ? '0.85rem' : '0.92rem',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  boxShadow: '0 10px 28px rgba(20,24,32,0.22)',
+                  letterSpacing: '-0.01em',
+                }}
+              >
+                <Plus className="w-4 h-4" />
+                Создать сайт
+              </button>
+            </div>
+          </div>
 
-                {/* Info */}
-                <div style={{ padding: '1.25rem 1.5rem 1.5rem', position: 'absolute', bottom: 0, left: 0, right: 0, background: 'linear-gradient(to top, #fff 70%, transparent)' }}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div style={{ minWidth: 0 }}>
-                      <div className="flex items-center gap-2 flex-wrap mb-1">
-                        <h3 className="truncate transition-colors group-hover:text-[#0071e3]" style={{ fontSize: '1.05rem', fontWeight: 700, letterSpacing: '-0.02em', color: '#1D1D1F' }}>
+          {/* Filters + sort */}
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5 sm:mb-6">
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none' }}>
+              {([
+                { id: 'all' as const, label: 'Все сайты' },
+                { id: 'published' as const, label: 'Опубликованные' },
+                { id: 'draft' as const, label: 'Черновики' },
+                { id: 'trash' as const, label: 'Корзина' },
+              ]).map((tab) => {
+                const active = projectFilter === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setProjectFilter(tab.id)}
+                    style={{
+                      flexShrink: 0,
+                      borderRadius: 100,
+                      border: active ? '1px solid rgba(255,255,255,0.95)' : '1px solid transparent',
+                      background: active ? 'rgba(255,255,255,0.92)' : 'transparent',
+                      boxShadow: active ? '0 6px 18px rgba(30,50,80,0.08)' : 'none',
+                      color: active ? '#1a1d24' : 'rgba(26,29,36,0.55)',
+                      fontWeight: 600,
+                      fontSize: '0.82rem',
+                      padding: '0.48rem 0.95rem',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s ease',
+                    }}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })}
+            </div>
+            <label className="relative inline-flex items-center gap-1.5 self-start sm:self-auto" style={{
+              background: 'rgba(255,255,255,0.55)',
+              border: '1px solid rgba(255,255,255,0.75)',
+              borderRadius: 100,
+              padding: '0.42rem 0.85rem 0.42rem 1rem',
+              fontSize: '0.8rem',
+              fontWeight: 600,
+              color: 'rgba(26,29,36,0.7)',
+            }}>
+              <select
+                value={projectSort}
+                onChange={(e) => setProjectSort(e.target.value as "updated" | "created")}
+                style={{ appearance: 'none', background: 'transparent', border: 'none', outline: 'none', fontWeight: 600, fontSize: '0.8rem', color: 'rgba(26,29,36,0.75)', paddingRight: 14, cursor: 'pointer', fontFamily: appleFont }}
+              >
+                <option value="updated">По дате изменения</option>
+                <option value="created">По дате создания</option>
+              </select>
+              <ChevronDown className="w-3.5 h-3.5 absolute right-2.5 pointer-events-none" style={{ color: 'rgba(26,29,36,0.45)' }} />
+            </label>
+          </div>
+
+          {isLoading ? (
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5">
+              {Array.from({ length: cachedProjects?.length || 3 }).map((_, i) => (
+                <div key={i} className="animate-pulse" style={{ height: 290, borderRadius: 24, background: 'rgba(255,255,255,0.45)' }} />
+              ))}
+            </div>
+          ) : projectFilter === 'trash' ? (
+            <div className="flex flex-col items-center justify-center text-center" style={{ padding: '3.5rem 1rem', borderRadius: 24, background: 'rgba(255,255,255,0.35)', border: '1px dashed rgba(26,29,36,0.12)' }}>
+              <Trash2 className="w-8 h-8 mb-3" style={{ color: 'rgba(26,29,36,0.25)' }} />
+              <p style={{ margin: 0, fontWeight: 700, color: '#1a1d24' }}>Корзина пуста</p>
+              <p style={{ margin: '0.4rem 0 0', fontSize: '0.88rem', color: 'rgba(26,29,36,0.5)' }}>Удалённые сайты появятся здесь</p>
+            </div>
+          ) : userProjects.length === 0 ? (
+            <div className="flex flex-col items-center justify-center text-center space-y-5" style={{ padding: '3.25rem 1.25rem', borderRadius: 24, background: 'rgba(255,255,255,0.4)', border: '1px solid rgba(255,255,255,0.7)' }}>
+              <div className="w-16 h-16 rounded-[1.35rem] flex items-center justify-center" style={{ background: 'rgba(255,255,255,0.7)', border: '1px solid rgba(255,255,255,0.9)' }}>
+                <FolderOpen className="w-8 h-8" style={{ color: 'rgba(26,29,36,0.22)' }} />
+              </div>
+              <div className="space-y-2">
+                <h2 style={{ margin: 0, fontSize: '1.35rem', fontWeight: 700, letterSpacing: '-0.03em', color: '#1a1d24' }}>Пока здесь пусто</h2>
+                <p style={{ margin: 0, color: 'rgba(26,29,36,0.55)', maxWidth: 340, fontSize: '0.95rem', lineHeight: 1.55 }}>Создайте первый сайт — с описанием, интерактивом или по макету.</p>
+              </div>
+              <button onClick={openCreateModal} style={{ background: '#1a1d24', color: '#fff', border: 'none', borderRadius: 100, padding: '0.8rem 1.6rem', fontSize: '0.92rem', fontWeight: 700, cursor: 'pointer' }}>
+                Создать первый сайт
+              </button>
+            </div>
+          ) : filteredProjects.length === 0 ? (
+            <div className="flex flex-col items-center justify-center text-center" style={{ padding: '3rem 1rem', borderRadius: 24, background: 'rgba(255,255,255,0.35)' }}>
+              <p style={{ margin: 0, fontWeight: 700, color: '#1a1d24' }}>Нет сайтов в этой категории</p>
+              <button type="button" onClick={() => setProjectFilter('all')} style={{ marginTop: 12, background: 'transparent', border: 'none', color: '#2563eb', fontWeight: 600, cursor: 'pointer' }}>Показать все</button>
+            </div>
+          ) : (
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5">
+              {filteredProjects.map((project) => {
+                const status = projectStatusMeta(project);
+                const urlLabel = projectUrlLabel(project);
+                const menuOpen = openProjectMenu === project.id;
+                return (
+                  <div
+                    key={project.id}
+                    onClick={() => setLocation((project as any).type === "seo" ? `/seo/${project.id}` : `/editor/${project.id}`)}
+                    className="group cursor-pointer transition-all duration-300 hover:-translate-y-1"
+                    style={{
+                      borderRadius: 24,
+                      overflow: 'hidden',
+                      background: 'rgba(255,255,255,0.72)',
+                      border: '1px solid rgba(255,255,255,0.85)',
+                      boxShadow: '0 10px 36px rgba(30,50,80,0.08)',
+                      backdropFilter: 'blur(16px)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                    }}
+                  >
+                    <div style={{ height: 168, position: 'relative', overflow: 'hidden', background: '#eef2f6' }}>
+                      {(project as any).hasPreview || project.publishStatus === "published" ? (
+                        <div style={{
+                          width: '100%', height: '100%',
+                          background: project.type === "seo"
+                            ? 'linear-gradient(145deg, #EEF2FF 0%, #F8FAFC 55%, #ECFDF5 100%)'
+                            : 'linear-gradient(145deg, #E8F1FF 0%, #F5F7FA 50%, #F3EEE8 100%)',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        }}>
+                          <div style={{
+                            width: 64, height: 64, borderRadius: 18,
+                            background: 'rgba(255,255,255,0.88)', border: '1px solid rgba(255,255,255,0.95)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: '1.45rem', fontWeight: 800, color: '#1a1d24', letterSpacing: '-0.04em',
+                            boxShadow: '0 8px 24px rgba(30,50,80,0.08)',
+                          }}>
+                            {(project.title || 'C').trim().charAt(0).toUpperCase()}
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          <div style={{ width: 56, height: 56, borderRadius: 16, background: 'rgba(255,255,255,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                            <Code2 style={{ width: 26, height: 26, color: 'rgba(26,29,36,0.2)' }} />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ padding: '1rem 1.1rem 1.1rem', display: 'flex', flexDirection: 'column', gap: 10, flex: 1 }}>
+                      <div>
+                        <h3 className="truncate" style={{ margin: 0, fontSize: '1.02rem', fontWeight: 700, letterSpacing: '-0.025em', color: '#1a1d24' }}>
                           {project.title}
                         </h3>
-                        {project.publishStatus === 'published' && (
-                          <span style={{ flexShrink: 0, fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#16a34a', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 100, padding: '0.15rem 0.5rem' }}>
-                            Live
-                          </span>
-                        )}
-                        {project.publishStatus === 'suspended' && (
-                          <span style={{ flexShrink: 0, fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#dc2626', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 100, padding: '0.15rem 0.5rem' }}>
-                            Приостановлен
-                          </span>
-                        )}
-                        {project.publishStatus === 'banned' && (
-                          <span style={{ flexShrink: 0, fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#991b1b', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 100, padding: '0.15rem 0.5rem' }}>
-                            Заблокирован
-                          </span>
-                        )}
+                        <p className="truncate" style={{ margin: '0.2rem 0 0', fontSize: '0.78rem', fontWeight: 500, color: 'rgba(26,29,36,0.45)' }}>
+                          {urlLabel}
+                        </p>
                       </div>
-                      <div className="flex items-center gap-1.5" style={{ fontSize: '0.72rem', fontWeight: 600, color: '#86868B', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                        <Calendar style={{ width: 11, height: 11 }} />
-                        {new Date(project.createdAt).toLocaleDateString('ru-RU')}
+
+                      <div className="flex items-center justify-between gap-2 mt-auto">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span style={{ width: 7, height: 7, borderRadius: '50%', background: status.color, flexShrink: 0 }} />
+                          <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'rgba(26,29,36,0.62)' }}>{status.label}</span>
+                        </div>
+                        <div style={{ position: 'relative' }} onClick={(e) => e.stopPropagation()}>
+                          <button
+                            type="button"
+                            aria-label="Меню проекта"
+                            onClick={() => setOpenProjectMenu(menuOpen ? null : project.id)}
+                            style={{ background: 'transparent', border: 'none', borderRadius: 10, padding: 6, cursor: 'pointer', color: 'rgba(26,29,36,0.45)', display: 'flex' }}
+                          >
+                            <MoreHorizontal className="w-4 h-4" />
+                          </button>
+                          <AnimatePresence>
+                            {menuOpen && (
+                              <motion.div
+                                initial={{ opacity: 0, y: 4, scale: 0.98 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: 4, scale: 0.98 }}
+                                transition={{ duration: 0.12 }}
+                                style={{
+                                  position: 'absolute', right: 0, bottom: 'calc(100% + 6px)', zIndex: 20,
+                                  minWidth: 150, background: 'rgba(255,255,255,0.96)', backdropFilter: 'blur(16px)',
+                                  border: '1px solid rgba(0,0,0,0.06)', borderRadius: 14,
+                                  boxShadow: '0 14px 40px rgba(30,50,80,0.14)', overflow: 'hidden',
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setOpenProjectMenu(null);
+                                    setLocation((project as any).type === "seo" ? `/seo/${project.id}` : `/editor/${project.id}`);
+                                  }}
+                                  style={{ width: '100%', textAlign: 'left', padding: '0.65rem 0.85rem', border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '0.84rem', fontWeight: 600, color: '#1a1d24', fontFamily: appleFont }}
+                                >
+                                  Открыть
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={deleteMutation.isPending && deleteMutation.variables === project.id}
+                                  onClick={() => { setOpenProjectMenu(null); deleteMutation.mutate(project.id); }}
+                                  style={{ width: '100%', textAlign: 'left', padding: '0.65rem 0.85rem', border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '0.84rem', fontWeight: 600, color: '#FF3B30', fontFamily: appleFont, display: 'flex', alignItems: 'center', gap: 8 }}
+                                >
+                                  {deleteMutation.isPending && deleteMutation.variables === project.id
+                                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    : <Trash2 className="w-3.5 h-3.5" />}
+                                  Удалить
+                                </button>
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
+                        </div>
                       </div>
                     </div>
-                    <button
-                      className="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all duration-300"
-                      disabled={deleteMutation.isPending && deleteMutation.variables === project.id}
-                      onClick={(e) => { e.stopPropagation(); deleteMutation.mutate(project.id); }}
-                      style={{ background: 'rgba(255,59,48,0.08)', border: 'none', borderRadius: 10, padding: '0.4rem', cursor: 'pointer', color: '#FF3B30', flexShrink: 0 }}
-                    >
-                      {deleteMutation.isPending && deleteMutation.variables === project.id
-                        ? <Loader2 className="animate-spin" style={{ width: 16, height: 16 }} />
-                        : <Trash2 style={{ width: 16, height: 16 }} />}
-                    </button>
                   </div>
+                );
+              })}
+
+              {/* Create card — reference empty slot */}
+              <button
+                type="button"
+                onClick={openCreateModal}
+                className="transition-all hover:-translate-y-1"
+                style={{
+                  borderRadius: 24,
+                  minHeight: 280,
+                  border: '1.5px dashed rgba(26,29,36,0.14)',
+                  background: 'rgba(255,255,255,0.28)',
+                  backdropFilter: 'blur(10px)',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 10,
+                  padding: '1.5rem',
+                  fontFamily: appleFont,
+                }}
+              >
+                <div style={{ width: 48, height: 48, borderRadius: 16, background: 'rgba(255,255,255,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 8px 20px rgba(30,50,80,0.06)' }}>
+                  <Plus className="w-5 h-5" style={{ color: '#1a1d24' }} />
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
+                <div style={{ fontSize: '0.98rem', fontWeight: 700, color: '#1a1d24', letterSpacing: '-0.02em' }}>Создать новый сайт</div>
+                <div style={{ fontSize: '0.78rem', fontWeight: 500, color: 'rgba(26,29,36,0.48)', textAlign: 'center', maxWidth: 200, lineHeight: 1.4 }}>
+                  Начните с шаблона или с чистого листа
+                </div>
+              </button>
+            </div>
+          )}
+        </div>
       </main>
 
       <Dialog open={showCreateModal} onOpenChange={(open) => {
