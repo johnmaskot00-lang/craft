@@ -43,7 +43,9 @@ export interface IStorage {
   updateProject(id: number, data: Partial<Project>): Promise<Project | undefined>;
   deleteProject(id: number): Promise<void>;
 
-  getProjectMessages(projectId: number): Promise<ProjectMessage[]>;
+  getProjectMessages(projectId: number, limit?: number): Promise<ProjectMessage[]>;
+  /** Ownership check without loading generatedCode. */
+  getProjectOwnerId(id: number): Promise<number | undefined>;
   createProjectMessage(message: InsertProjectMessage): Promise<ProjectMessage>;
 
   getProjectImages(projectId: number): Promise<ProjectImage[]>;
@@ -483,8 +485,33 @@ export class DatabaseStorage implements IStorage {
     await db.delete(projects).where(eq(projects.id, id));
   }
 
-  async getProjectMessages(projectId: number): Promise<ProjectMessage[]> {
-    return db.select().from(projectMessages).where(eq(projectMessages.projectId, projectId)).orderBy(projectMessages.createdAt);
+  async getProjectOwnerId(id: number): Promise<number | undefined> {
+    const [row] = await db
+      .select({ userId: projects.userId })
+      .from(projects)
+      .where(eq(projects.id, id));
+    return row?.userId;
+  }
+
+  async getProjectMessages(projectId: number, limit?: number): Promise<ProjectMessage[]> {
+    const cap = limit != null && Number.isFinite(limit) && limit > 0
+      ? Math.min(500, Math.floor(limit))
+      : undefined;
+    if (!cap) {
+      return db
+        .select()
+        .from(projectMessages)
+        .where(eq(projectMessages.projectId, projectId))
+        .orderBy(projectMessages.createdAt);
+    }
+    // Latest N in chronological order for chat / agent context.
+    const rows = await db
+      .select()
+      .from(projectMessages)
+      .where(eq(projectMessages.projectId, projectId))
+      .orderBy(desc(projectMessages.createdAt))
+      .limit(cap);
+    return rows.reverse();
   }
 
   async createProjectMessage(message: InsertProjectMessage): Promise<ProjectMessage> {

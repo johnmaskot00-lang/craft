@@ -4506,61 +4506,60 @@ export async function registerRoutes(
     console.warn("[boot] project_files unique index:", e?.message?.slice?.(0, 200) || e);
   }
 
-  try {
-    // DB retention only — NEVER deletes /objects media (interactive hero frames/mp4/photos).
-    // project_versions store full HTML snapshots and can fill the Postgres volume + Node heap;
-    // keep the newest N per project (see VERSION_RETENTION_PER_PROJECT).
-    // Use relation size instead of SUM(octet_length(code)+files::text) — the latter
-    // forces Postgres to materialize hundreds of MB of version snapshots on every boot.
-    const before = await db.execute(sql`
-      SELECT
-        (SELECT COUNT(*)::int FROM project_versions) AS count,
-        pg_total_relation_size('project_versions')::bigint AS relation_bytes
-    `);
-    await db.execute(sql`
-      DELETE FROM project_versions
-      WHERE id IN (
-        SELECT id FROM (
-          SELECT id,
-                 row_number() OVER (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS rn
-          FROM project_versions
-        ) ranked
-        WHERE rn > ${VERSION_RETENTION_PER_PROJECT}
-      )
-    `);
-    // connect-pg-simple normally prunes hourly; clean any backlog left while DB was unhealthy.
-    await db.execute(sql`DELETE FROM session WHERE expire < NOW()`).catch(() => undefined);
+  // Indexes first (usually no-ops after first boot) — listen must not wait on retention DELETE.
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS project_versions_project_created_idx
+    ON project_versions (project_id, created_at DESC, id DESC)
+  `).catch((e: any) => console.warn("[boot] versions index:", e?.message?.slice?.(0, 120) || e));
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS project_messages_project_created_idx
+    ON project_messages (project_id, created_at DESC)
+  `).catch((e: any) => console.warn("[boot] messages index:", e?.message?.slice?.(0, 120) || e));
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS projects_user_created_idx
+    ON projects (user_id, created_at DESC)
+  `).catch((e: any) => console.warn("[boot] projects index:", e?.message?.slice?.(0, 120) || e));
+  await db.execute(sql`
+    CREATE INDEX IF NOT EXISTS credit_transactions_user_created_idx
+    ON credit_transactions (user_id, created_at DESC)
+  `).catch((e: any) => console.warn("[boot] credits index:", e?.message?.slice?.(0, 120) || e));
 
-    // Hot-path indexes — without these, version retention + message lists scan full tables.
-    await db.execute(sql`
-      CREATE INDEX IF NOT EXISTS project_versions_project_created_idx
-      ON project_versions (project_id, created_at DESC, id DESC)
-    `).catch((e: any) => console.warn("[boot] versions index:", e?.message?.slice?.(0, 120) || e));
-    await db.execute(sql`
-      CREATE INDEX IF NOT EXISTS project_messages_project_created_idx
-      ON project_messages (project_id, created_at DESC)
-    `).catch((e: any) => console.warn("[boot] messages index:", e?.message?.slice?.(0, 120) || e));
-    await db.execute(sql`
-      CREATE INDEX IF NOT EXISTS projects_user_created_idx
-      ON projects (user_id, created_at DESC)
-    `).catch((e: any) => console.warn("[boot] projects index:", e?.message?.slice?.(0, 120) || e));
-    await db.execute(sql`
-      CREATE INDEX IF NOT EXISTS credit_transactions_user_created_idx
-      ON credit_transactions (user_id, created_at DESC)
-    `).catch((e: any) => console.warn("[boot] credits index:", e?.message?.slice?.(0, 120) || e));
-    const after = await db.execute(sql`
-      SELECT
-        (SELECT COUNT(*)::int FROM project_versions) AS count,
-        pg_total_relation_size('project_versions')::bigint AS relation_bytes,
-        pg_database_size(current_database())::bigint AS database_bytes
-    `);
-    console.log("[boot] DB retention cleanup:", {
-      before: before.rows?.[0],
-      after: after.rows?.[0],
-    });
-  } catch (e: any) {
-    console.warn("[boot] DB retention cleanup:", e?.message?.slice?.(0, 200) || e);
-  }
+  // Heavy prune after boot — window DELETE over ~1GB of versions blocked listen under redeploy.
+  setTimeout(() => {
+    void (async () => {
+      try {
+        const before = await db.execute(sql`
+          SELECT
+            (SELECT COUNT(*)::int FROM project_versions) AS count,
+            pg_total_relation_size('project_versions')::bigint AS relation_bytes
+        `);
+        await db.execute(sql`
+          DELETE FROM project_versions
+          WHERE id IN (
+            SELECT id FROM (
+              SELECT id,
+                     row_number() OVER (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS rn
+              FROM project_versions
+            ) ranked
+            WHERE rn > ${VERSION_RETENTION_PER_PROJECT}
+          )
+        `);
+        await db.execute(sql`DELETE FROM session WHERE expire < NOW()`).catch(() => undefined);
+        const after = await db.execute(sql`
+          SELECT
+            (SELECT COUNT(*)::int FROM project_versions) AS count,
+            pg_total_relation_size('project_versions')::bigint AS relation_bytes,
+            pg_database_size(current_database())::bigint AS database_bytes
+        `);
+        console.log("[boot] DB retention cleanup (async):", {
+          before: before.rows?.[0],
+          after: after.rows?.[0],
+        });
+      } catch (e: any) {
+        console.warn("[boot] DB retention cleanup:", e?.message?.slice?.(0, 200) || e);
+      }
+    })();
+  }, 5_000).unref?.();
 
   try {
     await db.execute(sql`
@@ -4803,7 +4802,6 @@ export async function registerRoutes(
         generatedCode = await healHollowCraftScrollAnimFromVersions(project.id, generatedCode);
       }
       const isNoKlingHero = hasCraftVolumeStack(generatedCode);
-      const mediaBroken = isNoKlingHero ? false : await interactiveMediaMissing(generatedCode);
       const hollow = isNoKlingHero ? false : isHollowCraftScrollAnim(generatedCode);
       const fallback = isNoKlingHero
         ? false
@@ -4812,6 +4810,12 @@ export async function registerRoutes(
         ? false
         : /data-scroll-anim-pending\s*=\s*["']1["']/i.test(generatedCode);
       const present = isNoKlingHero ? false : hasCraftScrollAnimSection(generatedCode);
+      // Skip object-storage probes on every editor poll — only check when the
+      // client asks (?checkMedia=1) or when showing a finished non-pending hero once.
+      const wantMediaCheck = String(req.query.checkMedia || "") === "1";
+      const mediaBroken = isNoKlingHero || !wantMediaCheck || pending || fallback || hollow
+        ? false
+        : await interactiveMediaMissing(generatedCode);
       res.json({
         ...project,
         generatedCode,
@@ -5038,15 +5042,19 @@ export async function registerRoutes(
 
   app.get("/api/projects/:id/messages", requireAuth, async (req, res) => {
     try {
-      const project = await storage.getProject(parseInt(req.params.id));
-      if (!project) {
+      const projectId = parseInt(req.params.id);
+      const ownerId = await storage.getProjectOwnerId(projectId);
+      if (!ownerId) {
         return res.status(404).json({ message: "Проект не найден" });
       }
       const user = req.user as any;
-      if (project.userId !== user.id) {
+      if (ownerId !== user.id) {
         return res.status(403).json({ message: "Доступ запрещён" });
       }
-      const messages = await storage.getProjectMessages(project.id);
+      // Cap chat payload — project 319 had 177+ messages reloaded on every invalidate.
+      const limitRaw = parseInt(String(req.query.limit || "80"), 10);
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(200, limitRaw) : 80;
+      const messages = await storage.getProjectMessages(projectId, limit);
       res.json(messages);
     } catch (err) {
       res.status(500).json({ message: "Ошибка загрузки сообщений" });
@@ -5235,7 +5243,7 @@ export async function registerRoutes(
 
       // Capture history BEFORE saving the current prompt so we don't duplicate it
       // in conversationHistory + the active user message.
-      const priorMessages = await storage.getProjectMessages(project.id);
+      const priorMessages = await storage.getProjectMessages(project.id, 12);
 
       await storage.createProjectMessage({
         projectId: project.id,

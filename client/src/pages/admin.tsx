@@ -80,7 +80,7 @@ function PromoCodesPanel() {
   const { data: promos = [], isLoading } = useQuery<any[]>({
     queryKey: ["/api/admin/promos"],
     queryFn: () => apiRequest("GET", "/api/admin/promos").then(r => r.json()),
-    refetchInterval: 15000,
+    refetchInterval: 60000,
   });
 
   const createMutation = useMutation({
@@ -247,7 +247,7 @@ function ReferralExchangesPanel() {
   const { data: exchanges = [], isLoading } = useQuery<any[]>({
     queryKey: ["/api/admin/referral-exchanges"],
     queryFn: () => apiRequest("GET", "/api/admin/referral-exchanges?status=pending").then((r) => r.json()),
-    refetchInterval: 10000,
+    refetchInterval: 60000,
   });
 
   const approveMutation = useMutation({
@@ -363,7 +363,7 @@ function UserDetail({ userId, onBack }: { userId: number; onBack: () => void }) 
   const { data: user, isLoading: userLoading, isError: userMissing } = useQuery<any>({
     queryKey: ["/api/admin/users", userId],
     queryFn: () => apiRequest("GET", `/api/admin/users/${userId}`).then(r => r.json()),
-    refetchInterval: 5000,
+    refetchInterval: 30000,
     retry: false,
   });
 
@@ -371,7 +371,7 @@ function UserDetail({ userId, onBack }: { userId: number; onBack: () => void }) 
     queryKey: ["/api/admin/users", userId, "transactions"],
     queryFn: () => apiRequest("GET", `/api/admin/users/${userId}/transactions`).then(r => r.json()),
     enabled: tab === "transactions" && !!user,
-    refetchInterval: 5000,
+    refetchInterval: 30000,
   });
 
   const { data: projects = [], isLoading: projLoading } = useQuery<any[]>({
@@ -691,7 +691,7 @@ function RecentTransactions({ userId }: { userId: number }) {
   const { data: transactions = [] } = useQuery<any[]>({
     queryKey: ["/api/admin/users", userId, "transactions"],
     queryFn: () => apiRequest("GET", `/api/admin/users/${userId}/transactions`).then(r => r.json()),
-    refetchInterval: 5000,
+    refetchInterval: 30000,
   });
   const recent = transactions.slice(0, 8);
   if (recent.length === 0) return <div style={{ padding: 32, textAlign: "center", color: "#86868B", fontSize: "0.88rem" }}>Нет транзакций</div>;
@@ -743,13 +743,13 @@ export default function AdminPage() {
   const { data: stats } = useQuery<any>({
     queryKey: ["/api/admin/stats"],
     queryFn: () => apiRequest("GET", "/api/admin/stats").then(r => r.json()),
-    refetchInterval: 10000,
+    refetchInterval: 60000,
   });
 
   const { data: users = [], isLoading: usersLoading } = useQuery<any[]>({
     queryKey: ["/api/admin/users"],
     queryFn: () => apiRequest("GET", "/api/admin/users").then(r => r.json()),
-    refetchInterval: 15000,
+    refetchInterval: 60000,
   });
 
   if (isLoading) return (
