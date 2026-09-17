@@ -928,18 +928,26 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getLeadsByUser(userId: number): Promise<(Lead & { projectTitle: string })[]> {
-    const userProjects = await db.select().from(projects).where(eq(projects.userId, userId));
-    const projectIds = userProjects.map(p => p.id);
-    if (projectIds.length === 0) return [];
-    const allLeads: (Lead & { projectTitle: string })[] = [];
-    for (const proj of userProjects) {
-      const projLeads = await db.select().from(leads).where(eq(leads.projectId, proj.id)).orderBy(desc(leads.createdAt));
-      for (const l of projLeads) {
-        allLeads.push({ ...l, projectTitle: proj.title });
-      }
-    }
-    allLeads.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    return allLeads;
+    // One join instead of a query per project — and never selecting generated_code,
+    // which the previous full-row project fetch pulled into the heap.
+    return db
+      .select({
+        id: leads.id,
+        projectId: leads.projectId,
+        name: leads.name,
+        email: leads.email,
+        phone: leads.phone,
+        message: leads.message,
+        source: leads.source,
+        isRead: leads.isRead,
+        createdAt: leads.createdAt,
+        projectTitle: projects.title,
+      })
+      .from(leads)
+      .innerJoin(projects, eq(leads.projectId, projects.id))
+      .where(eq(projects.userId, userId))
+      .orderBy(desc(leads.createdAt))
+      .limit(1000);
   }
 
   async findRecentDuplicateLead(
@@ -979,13 +987,14 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getUnreadLeadCount(userId: number): Promise<number> {
-    const userProjects = await db.select().from(projects).where(eq(projects.userId, userId));
-    let count = 0;
-    for (const proj of userProjects) {
-      const projLeads = await db.select().from(leads).where(eq(leads.projectId, proj.id));
-      count += projLeads.filter(l => l.isRead === 0).length;
-    }
-    return count;
+    // Polled by every open dashboard once a minute, so it must stay a single
+    // indexed COUNT — the old version loaded all projects with their HTML.
+    const [row] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(leads)
+      .innerJoin(projects, eq(leads.projectId, projects.id))
+      .where(and(eq(projects.userId, userId), eq(leads.isRead, 0)));
+    return Number(row?.count ?? 0);
   }
 
   async getProjectByCustomDomain(domain: string): Promise<Project | undefined> {
@@ -994,8 +1003,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getPublishedProjectsCount(userId: number): Promise<number> {
-    const result = await db.select().from(projects).where(and(eq(projects.userId, userId), eq(projects.publishStatus, "published")));
-    return result.length;
+    const [row] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(projects)
+      .where(and(eq(projects.userId, userId), eq(projects.publishStatus, "published")));
+    return Number(row?.count ?? 0);
   }
 
   async getAllPublishedProjects(): Promise<Project[]> {
@@ -1003,12 +1015,17 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAllUsersWithPublishedSites(): Promise<{ userId: number; publishedCount: number }[]> {
-    const published = await db.select().from(projects).where(eq(projects.publishStatus, "published"));
-    const map = new Map<number, number>();
-    for (const p of published) {
-      map.set(p.userId, (map.get(p.userId) || 0) + 1);
-    }
-    return Array.from(map.entries()).map(([userId, publishedCount]) => ({ userId, publishedCount }));
+    // Daily billing runs this — aggregate in Postgres instead of loading every
+    // published site (with its HTML) into memory.
+    const rows = await db
+      .select({
+        userId: projects.userId,
+        publishedCount: sql<number>`count(*)::int`,
+      })
+      .from(projects)
+      .where(eq(projects.publishStatus, "published"))
+      .groupBy(projects.userId);
+    return rows.map((r) => ({ userId: Number(r.userId), publishedCount: Number(r.publishedCount) }));
   }
 
   async getAllProjectsWithPendingAnim(): Promise<Project[]> {

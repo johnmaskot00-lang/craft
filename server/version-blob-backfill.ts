@@ -44,6 +44,48 @@ async function nextBatch(): Promise<Row[]> {
   return res.rows as Row[];
 }
 
+/** Keep finished jobs and long chat histories from growing without bound. */
+const JOB_RETENTION_DAYS = Math.max(1, Number(process.env.CRAFT_JOB_RETENTION_DAYS) || 7);
+const MESSAGES_PER_PROJECT = Math.max(50, Number(process.env.CRAFT_MESSAGE_RETENTION) || 300);
+
+/**
+ * Rows nobody reads again: finished jobs with their payload/result JSON, expired
+ * sessions, and chat history beyond what the editor ever shows.
+ */
+export async function pruneOperationalTables(): Promise<void> {
+  try {
+    const jobs = await db.execute(sql`
+      DELETE FROM generation_jobs
+      WHERE state IN ('completed', 'failed', 'cancelled')
+        AND coalesce(finished_at, updated_at, created_at) < NOW() - (${JOB_RETENTION_DAYS} || ' days')::interval
+      RETURNING id
+    `);
+    const sessions = await db.execute(sql`DELETE FROM session WHERE expire < NOW() RETURNING sid`);
+    const messages = await db.execute(sql`
+      DELETE FROM project_messages
+      WHERE id IN (
+        SELECT id FROM (
+          SELECT id,
+                 row_number() OVER (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS rn
+          FROM project_messages
+        ) ranked
+        WHERE rn > ${MESSAGES_PER_PROJECT}
+      )
+      RETURNING id
+    `);
+    const counts = {
+      jobs: jobs.rows?.length ?? 0,
+      sessions: sessions.rows?.length ?? 0,
+      messages: messages.rows?.length ?? 0,
+    };
+    if (counts.jobs || counts.sessions || counts.messages) {
+      console.log("[prune] operational tables:", counts);
+    }
+  } catch (e: any) {
+    console.warn("[prune] operational tables failed:", e?.message || e);
+  }
+}
+
 /**
  * Fill `projects.preview_image` for sites saved before the column existed.
  * Reads a bounded slice of the HTML so a few hundred projects cannot spike the heap.

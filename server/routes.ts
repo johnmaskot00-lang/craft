@@ -92,7 +92,11 @@ import {
   jobQueueOverloaded,
 } from "./jobs";
 import { registerJobHandler, startInProcessWorker } from "./job-worker";
-import { backfillProjectPreviewImages, backfillVersionBlobs } from "./version-blob-backfill";
+import {
+  backfillProjectPreviewImages,
+  backfillVersionBlobs,
+  pruneOperationalTables,
+} from "./version-blob-backfill";
 import { redisEnabled } from "./redis";
 import { assertPublicHttpUrl, safeFetch } from "./url-guard";
 import { isPublishableProjectFile } from "@shared/project-files";
@@ -4591,6 +4595,21 @@ export async function registerRoutes(
     CREATE INDEX IF NOT EXISTS credit_transactions_user_created_idx
     ON credit_transactions (user_id, created_at DESC)
   `).catch((e: any) => console.warn("[boot] credits index:", e?.message?.slice?.(0, 120) || e));
+  // Leads are counted per user every minute by the dashboard badge, and images /
+  // payments are listed per user — all of these were sequential scans.
+  for (const [label, stmt] of [
+    ["leads project", sql`CREATE INDEX IF NOT EXISTS leads_project_created_idx ON leads (project_id, created_at DESC)`],
+    ["leads unread", sql`CREATE INDEX IF NOT EXISTS leads_project_unread_idx ON leads (project_id) WHERE is_read = 0`],
+    ["images project", sql`CREATE INDEX IF NOT EXISTS project_images_project_created_idx ON project_images (project_id, created_at DESC)`],
+    ["images user", sql`CREATE INDEX IF NOT EXISTS project_images_user_idx ON project_images (user_id)`],
+    ["orders user", sql`CREATE INDEX IF NOT EXISTS payment_orders_user_created_idx ON payment_orders (user_id, created_at DESC)`],
+    ["published projects", sql`CREATE INDEX IF NOT EXISTS projects_published_idx ON projects (publish_status, user_id)`],
+    ["session expire", sql`CREATE INDEX IF NOT EXISTS session_expire_idx ON session (expire)`],
+  ] as const) {
+    await db.execute(stmt).catch((e: any) =>
+      console.warn(`[boot] ${label} index:`, e?.message?.slice?.(0, 120) || e),
+    );
+  }
 
   // Heavy prune after boot — window DELETE over ~1GB of versions blocked listen under redeploy.
   setTimeout(() => {
@@ -4612,7 +4631,7 @@ export async function registerRoutes(
             WHERE rn > ${VERSION_RETENTION_PER_PROJECT}
           )
         `);
-        await db.execute(sql`DELETE FROM session WHERE expire < NOW()`).catch(() => undefined);
+        await pruneOperationalTables();
         const after = await db.execute(sql`
           SELECT
             (SELECT COUNT(*)::int FROM project_versions) AS count,
@@ -4631,6 +4650,9 @@ export async function registerRoutes(
       await backfillVersionBlobs();
     })();
   }, 5_000).unref?.();
+
+  // Restarts became rare, so growth control cannot rely on boot alone.
+  setInterval(() => { void pruneOperationalTables(); }, 6 * 60 * 60 * 1000).unref?.();
 
   try {
     await db.execute(sql`
