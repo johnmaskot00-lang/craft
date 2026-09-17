@@ -3,6 +3,7 @@ import { users, projects, projectMessages, projectImages, projectVersions, proje
 import { eq, desc, and, sql, gte, isNull } from "drizzle-orm";
 import crypto from "crypto";
 import { referralBonusTokens, normalizeReferralCode } from "./referral";
+import { extractPreviewImage } from "./site-preview-image";
 import {
   deleteVersionBlobs,
   getVersionBlob,
@@ -458,6 +459,7 @@ export class DatabaseStorage implements IStorage {
         vercelProjectId: projects.vercelProjectId,
         ycStoragePoolId: projects.ycStoragePoolId,
         customDomain: projects.customDomain,
+        previewImage: projects.previewImage,
         type: projects.type,
         seoConfig: projects.seoConfig,
         createdAt: projects.createdAt,
@@ -468,49 +470,22 @@ export class DatabaseStorage implements IStorage {
       .from(projects)
       .where(eq(projects.userId, userId))
       .orderBy(desc(projects.createdAt));
-    const previews = await this.getProjectPreviewImages(userId);
     return rows.map((r) => ({
       ...r,
       generatedCode: "",
       hasPreview: Boolean(r.hasPreview),
       codeBytes: Number(r.codeBytes || 0),
-      previewImage: previews.get(r.id) ?? null,
     })) as Project[];
   }
 
-  /**
-   * First image URL of each site, extracted in Postgres so list views never load
-   * full HTML into the heap. Thumbnails are cosmetic — failures must not break
-   * the dashboard, so any error yields an empty map.
-   */
-  private async getProjectPreviewImages(userId: number): Promise<Map<number, string>> {
-    const map = new Map<number, string>();
-    try {
-      const rows = await db.execute(sql`
-        SELECT id,
-               coalesce(
-                 substring(head from 'src="(https?://[^"]+\\.(?:png|jpe?g|webp|avif)[^"]*)"'),
-                 substring(head from 'src="(/objects/[^"]+)"'),
-                 substring(head from 'url\\((?:"|'')?(https?://[^)"'' ]+)')
-               ) AS preview_image
-        FROM (
-          SELECT id, left(coalesce(generated_code, ''), 400000) AS head
-          FROM projects
-          WHERE user_id = ${userId}
-        ) src
-      `);
-      for (const row of (rows.rows as Array<{ id: number; preview_image: string | null }>) ?? []) {
-        if (row.preview_image) map.set(Number(row.id), row.preview_image);
-      }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.warn(`[projects] preview image extraction skipped: ${msg}`);
-    }
-    return map;
-  }
-
   async createProject(insertProject: InsertProject): Promise<Project> {
-    const [project] = await db.insert(projects).values(insertProject).returning();
+    const [project] = await db
+      .insert(projects)
+      .values({
+        ...insertProject,
+        previewImage: extractPreviewImage(insertProject.generatedCode),
+      })
+      .returning();
     return project;
   }
 
@@ -527,6 +502,7 @@ export class DatabaseStorage implements IStorage {
         title: `${source.title} (копия)`.slice(0, 200),
         description: source.description,
         generatedCode: source.generatedCode,
+        previewImage: source.previewImage,
         type: source.type,
         seoConfig: source.seoConfig,
         publishStatus: "draft",
@@ -559,7 +535,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateProject(id: number, data: Partial<Project>): Promise<Project | undefined> {
-    const [project] = await db.update(projects).set({ ...data, updatedAt: new Date() }).where(eq(projects.id, id)).returning();
+    const patch: Partial<Project> = { ...data, updatedAt: new Date() };
+    // Refresh the cached thumbnail whenever the site HTML changes.
+    if (data.generatedCode !== undefined && data.previewImage === undefined) {
+      patch.previewImage = extractPreviewImage(data.generatedCode);
+    }
+    const [project] = await db.update(projects).set(patch).where(eq(projects.id, id)).returning();
     return project;
   }
 
@@ -1120,6 +1101,7 @@ export class DatabaseStorage implements IStorage {
         vercelProjectId: projects.vercelProjectId,
         ycStoragePoolId: projects.ycStoragePoolId,
         customDomain: projects.customDomain,
+        previewImage: projects.previewImage,
         type: projects.type,
         seoConfig: projects.seoConfig,
         createdAt: projects.createdAt,

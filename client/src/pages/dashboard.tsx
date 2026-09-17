@@ -482,6 +482,7 @@ export default function DashboardPage() {
 
   /** First image found inside the generated site — used as the card thumbnail. */
   const projectPreviewSrc = (project: Project): string | null => {
+    // Empty string means the server scanned the site and found no usable image.
     const raw = ((project as any).previewImage as string | undefined)?.trim();
     if (!raw) return null;
     const src = raw.replace(/^['"]|['"]$/g, "");

@@ -92,7 +92,7 @@ import {
   jobQueueOverloaded,
 } from "./jobs";
 import { registerJobHandler, startInProcessWorker } from "./job-worker";
-import { backfillVersionBlobs } from "./version-blob-backfill";
+import { backfillProjectPreviewImages, backfillVersionBlobs } from "./version-blob-backfill";
 import { redisEnabled } from "./redis";
 import { assertPublicHttpUrl, safeFetch } from "./url-guard";
 import { isPublishableProjectFile } from "@shared/project-files";
@@ -2250,7 +2250,9 @@ async function healHollowCraftScrollAnimFromVersions(
 ): Promise<string> {
   if (!isHollowCraftScrollAnim(html)) return html;
   try {
-    const summaries = await storage.getProjectVersionSummaries(projectId);
+    // Each snapshot is multi-MB and may need an Object Storage fetch, so only the
+    // few newest ones are inspected — scanning the whole history froze the API.
+    const summaries = (await storage.getProjectVersionSummaries(projectId)).slice(0, 5);
     for (const summary of summaries) {
       const v = await storage.getProjectVersion(summary.id);
       const code = v?.code || "";
@@ -4555,6 +4557,9 @@ export async function registerRoutes(
     console.warn("[boot] project_files unique index:", e?.message?.slice?.(0, 200) || e);
   }
 
+  await db.execute(sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS preview_image text`)
+    .catch((e: any) => console.warn("[boot] projects.preview_image:", e?.message?.slice?.(0, 160) || e));
+
   // Version payloads move to Object Storage; these columns keep list views and
   // restore checks working without reading the payload back.
   for (const stmt of [
@@ -4621,6 +4626,7 @@ export async function registerRoutes(
       } catch (e: any) {
         console.warn("[boot] DB retention cleanup:", e?.message?.slice?.(0, 200) || e);
       }
+      await backfillProjectPreviewImages();
       // Move the remaining snapshots out of Postgres once retention has trimmed them.
       await backfillVersionBlobs();
     })();

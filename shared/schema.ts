@@ -222,6 +222,8 @@ export const projects = pgTable("projects", {
   /** Yandex Object Storage pool (cloud) where the project bucket lives. */
   ycStoragePoolId: integer("yc_storage_pool_id"),
   customDomain: text("custom_domain"),
+  /** First image of the site, cached on save so dashboard lists never scan HTML. */
+  previewImage: text("preview_image"),
   type: varchar("type", { length: 20 }).notNull().default("website"),
   seoConfig: json("seo_config").$type<SeoConfig>(),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),

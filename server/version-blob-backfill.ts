@@ -7,6 +7,7 @@
  */
 import { sql } from "drizzle-orm";
 import { db } from "./db";
+import { extractPreviewImage } from "./site-preview-image";
 import {
   putVersionBlob,
   versionBlobKey,
@@ -41,6 +42,43 @@ async function nextBatch(): Promise<Row[]> {
     LIMIT ${BATCH_SIZE}
   `);
   return res.rows as Row[];
+}
+
+/**
+ * Fill `projects.preview_image` for sites saved before the column existed.
+ * Reads a bounded slice of the HTML so a few hundred projects cannot spike the heap.
+ */
+export async function backfillProjectPreviewImages(): Promise<void> {
+  let scanned = 0;
+  let filled = 0;
+  try {
+    for (;;) {
+      const res = await db.execute(sql`
+        SELECT id, left(coalesce(generated_code, ''), 200000) AS head
+        FROM projects
+        WHERE preview_image IS NULL
+          AND octet_length(coalesce(generated_code, '')) > 80
+        ORDER BY id DESC
+        LIMIT 25
+      `);
+      const rows = res.rows as Array<{ id: number; head: string | null }>;
+      if (!rows.length) break;
+
+      for (const row of rows) {
+        const src = extractPreviewImage(row.head);
+        // Empty string marks "already scanned, nothing found" so the loop terminates.
+        await db.execute(sql`
+          UPDATE projects SET preview_image = ${src ?? ""} WHERE id = ${row.id}
+        `);
+        scanned += 1;
+        if (src) filled += 1;
+      }
+      await sleep(500);
+    }
+    if (scanned) console.log(`[projects] preview backfill: ${filled}/${scanned} sites got a thumbnail`);
+  } catch (e: any) {
+    console.warn("[projects] preview backfill failed:", e?.message || e);
+  }
 }
 
 export async function backfillVersionBlobs(): Promise<void> {
