@@ -97,6 +97,7 @@ import {
   backfillVersionBlobs,
   pruneOperationalTables,
 } from "./version-blob-backfill";
+import { withSingletonLease } from "./singleton-lease";
 import { redisEnabled } from "./redis";
 import { assertPublicHttpUrl, safeFetch } from "./url-guard";
 import { isPublishableProjectFile } from "@shared/project-files";
@@ -4613,7 +4614,7 @@ export async function registerRoutes(
 
   // Heavy prune after boot — window DELETE over ~1GB of versions blocked listen under redeploy.
   setTimeout(() => {
-    void (async () => {
+    void withSingletonLease("boot-maintenance", 30 * 60_000, async () => {
       try {
         const before = await db.execute(sql`
           SELECT
@@ -4648,11 +4649,14 @@ export async function registerRoutes(
       await backfillProjectPreviewImages();
       // Move the remaining snapshots out of Postgres once retention has trimmed them.
       await backfillVersionBlobs();
-    })();
+    }).catch((e) => console.warn("[boot] maintenance lease:", e?.message || e));
   }, 5_000).unref?.();
 
   // Restarts became rare, so growth control cannot rely on boot alone.
-  setInterval(() => { void pruneOperationalTables(); }, 6 * 60 * 60 * 1000).unref?.();
+  setInterval(() => {
+    void withSingletonLease("prune-operational", 5 * 60 * 60_000, pruneOperationalTables)
+      .catch((e) => console.warn("[prune] lease:", e?.message || e));
+  }, 6 * 60 * 60 * 1000).unref?.();
 
   try {
     await db.execute(sql`
@@ -10723,9 +10727,13 @@ ${fullHtml}`;
   nextMidnight.setHours(3, 0, 0, 0);
   if (nextMidnight <= now) nextMidnight.setDate(nextMidnight.getDate() + 1);
   const msUntilFirstRun = nextMidnight.getTime() - now.getTime();
+  // Charges are idempotent per project/day, but only one replica should do the run.
+  const billOnce = () =>
+    void withSingletonLease("daily-publish-billing", 6 * 60 * 60_000, runDailyPublishBilling)
+      .catch((e) => console.warn("[Billing] lease:", e?.message || e));
   setTimeout(() => {
-    runDailyPublishBilling();
-    setInterval(runDailyPublishBilling, 24 * 60 * 60 * 1000);
+    billOnce();
+    setInterval(billOnce, 24 * 60 * 60 * 1000);
   }, msUntilFirstRun);
   console.log(`[Billing] Next daily billing scheduled in ${Math.round(msUntilFirstRun / 1000 / 60)} minutes (at 03:00)`);
 
@@ -11149,18 +11157,25 @@ ${fullHtml}`;
     }
   }
 
+  // Maintenance scans rewrite project HTML, so with several replicas only the
+  // lease holder may run them — two instances patching the same site would race.
+  const solo = (name: string, ttlMs: number, fn: () => Promise<unknown> | unknown) =>
+    void withSingletonLease(name, ttlMs, async () => { await fn(); }).catch((e) =>
+      console.warn(`[lease] ${name}:`, e?.message || e),
+    );
+
   // Run once on startup (15s delay so DB connections stabilise)
-  setTimeout(() => cleanupStuckPendingAnims("Startup"), 15000);
+  setTimeout(() => solo("anims-startup", 10 * 60_000, () => cleanupStuckPendingAnims("Startup")), 15000);
   // After redeploy every craft-generating marker is orphan — clear immediately.
-  setTimeout(() => cleanupStuckGeneratingPlaceholders("Startup", { forceOrphans: true }), 8000);
+  setTimeout(() => solo("placeholders-startup", 10 * 60_000, () => cleanupStuckGeneratingPlaceholders("Startup", { forceOrphans: true })), 8000);
   // Patch old scroll-jacking JS to passive scroll (one-time migration, 25s delay)
-  setTimeout(() => migrateScrollJackingToPassive(), 25000);
+  setTimeout(() => solo("scrolljack-migration", 60 * 60_000, () => migrateScrollJackingToPassive()), 25000);
   // Fast task-ID scanner: runs every 5 min; guarantees video→animation pipeline completion
-  setTimeout(() => resumeCompletedKlingTasks(), 30000); // first run 30s after boot
-  setInterval(() => resumeCompletedKlingTasks(), 5 * 60 * 1000);
+  setTimeout(() => solo("kling-resume", 4 * 60_000, () => resumeCompletedKlingTasks()), 30000);
+  setInterval(() => solo("kling-resume", 4 * 60_000, () => resumeCompletedKlingTasks()), 5 * 60 * 1000);
   // Fallback: heavy stuck-placeholder cleanup still runs every 10 min (handles edge cases)
-  setInterval(() => cleanupStuckPendingAnims("Periodic"), 30 * 60 * 1000);
-  setInterval(() => cleanupStuckGeneratingPlaceholders("Periodic"), 10 * 60 * 1000);
+  setInterval(() => solo("anims-periodic", 25 * 60_000, () => cleanupStuckPendingAnims("Periodic")), 30 * 60 * 1000);
+  setInterval(() => solo("placeholders-periodic", 9 * 60_000, () => cleanupStuckGeneratingPlaceholders("Periodic")), 10 * 60 * 1000);
 
   registerSeoRoutes(app, storage);
 
