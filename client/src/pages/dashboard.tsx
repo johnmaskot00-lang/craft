@@ -31,7 +31,6 @@ import {
   Inbox,
   Wand2,
   Globe,
-  Search,
   Upload,
   ImageIcon,
   Maximize2,
@@ -439,7 +438,6 @@ export default function DashboardPage() {
   const [mockupGenerating, setMockupGenerating] = useState(false);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [projectFilter, setProjectFilter] = useState<"all" | "published" | "draft" | "trash">("all");
-  const [projectSearch, setProjectSearch] = useState("");
   const [projectSort, setProjectSort] = useState<"updated" | "created">("updated");
   const [openProjectMenu, setOpenProjectMenu] = useState<number | null>(null);
 
@@ -464,21 +462,13 @@ export default function DashboardPage() {
     } else if (projectFilter === "trash") {
       list = [];
     }
-    const q = projectSearch.trim().toLowerCase();
-    if (q) {
-      list = list.filter((p) =>
-        (p.title || "").toLowerCase().includes(q) ||
-        (p.publishedUrl || "").toLowerCase().includes(q) ||
-        ((p as any).customDomain || "").toLowerCase().includes(q)
-      );
-    }
     list.sort((a, b) => {
       const aTime = new Date((projectSort === "created" ? a.createdAt : a.updatedAt || a.createdAt) as string | Date).getTime();
       const bTime = new Date((projectSort === "created" ? b.createdAt : b.updatedAt || b.createdAt) as string | Date).getTime();
       return bTime - aTime;
     });
     return list;
-  }, [userProjects, projectFilter, projectSort, projectSearch]);
+  }, [userProjects, projectFilter, projectSort]);
 
   const projectUrlLabel = (project: Project) => {
     const custom = (project as any).customDomain as string | undefined;
@@ -1212,29 +1202,6 @@ export default function DashboardPage() {
             padding: isMobile ? '1.15rem 1rem 1.35rem' : '1.6rem 1.85rem 2rem',
           }}
         >
-          {/* Search — reference top row */}
-          <div className="relative mb-5 sm:mb-6" style={{ maxWidth: 420 }}>
-            <Search className="w-4 h-4 absolute" style={{ left: 14, top: '50%', transform: 'translateY(-50%)', color: 'rgba(26,29,36,0.38)' }} />
-            <input
-              value={projectSearch}
-              onChange={(e) => setProjectSearch(e.target.value)}
-              placeholder="Поиск сайтов..."
-              style={{
-                width: '100%',
-                borderRadius: 100,
-                border: '1px solid rgba(255,255,255,0.85)',
-                background: 'rgba(255,255,255,0.72)',
-                padding: '0.66rem 1rem 0.66rem 2.35rem',
-                fontSize: '0.88rem',
-                fontWeight: 500,
-                color: '#1a1d24',
-                outline: 'none',
-                fontFamily: appleFont,
-                boxShadow: '0 8px 22px rgba(30,50,80,0.06)',
-              }}
-            />
-          </div>
-
           {/* Greeting + create */}
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6 sm:mb-8">
             <div className="min-w-0">
