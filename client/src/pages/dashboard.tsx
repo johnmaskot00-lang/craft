@@ -36,7 +36,6 @@ import {
   Maximize2,
   X,
   Rocket,
-  MoreHorizontal,
   ChevronDown,
 } from "lucide-react";
 import { useRef, useCallback } from "react";
@@ -439,7 +438,7 @@ export default function DashboardPage() {
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [projectFilter, setProjectFilter] = useState<"all" | "published" | "draft" | "trash">("all");
   const [projectSort, setProjectSort] = useState<"updated" | "created">("updated");
-  const [openProjectMenu, setOpenProjectMenu] = useState<number | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: number; title: string } | null>(null);
 
   const cachedProjects = useMemo<Project[] | undefined>(() => {
     try {
@@ -798,13 +797,6 @@ export default function DashboardPage() {
       document.removeEventListener("touchstart", onPointerDown);
     };
   }, [isMobile, showProfile]);
-
-  useEffect(() => {
-    if (openProjectMenu == null) return;
-    const close = () => setOpenProjectMenu(null);
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [openProjectMenu]);
 
   return (
     <div className="min-h-screen relative overflow-x-hidden" style={{
@@ -1358,8 +1350,8 @@ export default function DashboardPage() {
               {filteredProjects.map((project) => {
                 const status = projectStatusMeta(project);
                 const urlLabel = projectUrlLabel(project);
-                const menuOpen = openProjectMenu === project.id;
                 const previewSrc = projectPreviewSrc(project);
+                const deleting = deleteMutation.isPending && deleteMutation.variables === project.id;
                 return (
                   <div
                     key={project.id}
@@ -1435,54 +1427,29 @@ export default function DashboardPage() {
                           <span style={{ width: 7, height: 7, borderRadius: '50%', background: status.color, flexShrink: 0 }} />
                           <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'rgba(26,29,36,0.62)' }}>{status.label}</span>
                         </div>
-                        <div style={{ position: 'relative' }} onClick={(e) => e.stopPropagation()}>
-                          <button
-                            type="button"
-                            aria-label="Меню проекта"
-                            onClick={() => setOpenProjectMenu(menuOpen ? null : project.id)}
-                            style={{ background: 'transparent', border: 'none', borderRadius: 10, padding: 6, cursor: 'pointer', color: 'rgba(26,29,36,0.45)', display: 'flex' }}
-                          >
-                            <MoreHorizontal className="w-4 h-4" />
-                          </button>
-                          <AnimatePresence>
-                            {menuOpen && (
-                              <motion.div
-                                initial={{ opacity: 0, y: 4, scale: 0.98 }}
-                                animate={{ opacity: 1, y: 0, scale: 1 }}
-                                exit={{ opacity: 0, y: 4, scale: 0.98 }}
-                                transition={{ duration: 0.12 }}
-                                style={{
-                                  position: 'absolute', right: 0, bottom: 'calc(100% + 6px)', zIndex: 20,
-                                  minWidth: 150, background: 'rgba(255,255,255,0.96)', backdropFilter: 'blur(16px)',
-                                  border: '1px solid rgba(0,0,0,0.06)', borderRadius: 14,
-                                  boxShadow: '0 14px 40px rgba(30,50,80,0.14)', overflow: 'hidden',
-                                }}
-                              >
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setOpenProjectMenu(null);
-                                    setLocation((project as any).type === "seo" ? `/seo/${project.id}` : `/editor/${project.id}`);
-                                  }}
-                                  style={{ width: '100%', textAlign: 'left', padding: '0.65rem 0.85rem', border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '0.84rem', fontWeight: 600, color: '#1a1d24', fontFamily: appleFont }}
-                                >
-                                  Открыть
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={deleteMutation.isPending && deleteMutation.variables === project.id}
-                                  onClick={() => { setOpenProjectMenu(null); deleteMutation.mutate(project.id); }}
-                                  style={{ width: '100%', textAlign: 'left', padding: '0.65rem 0.85rem', border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '0.84rem', fontWeight: 600, color: '#FF3B30', fontFamily: appleFont, display: 'flex', alignItems: 'center', gap: 8 }}
-                                >
-                                  {deleteMutation.isPending && deleteMutation.variables === project.id
-                                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                    : <Trash2 className="w-3.5 h-3.5" />}
-                                  Удалить
-                                </button>
-                              </motion.div>
-                            )}
-                          </AnimatePresence>
-                        </div>
+                        <button
+                          type="button"
+                          disabled={deleting}
+                          onClick={(e) => { e.stopPropagation(); setConfirmDelete({ id: project.id, title: project.title }); }}
+                          className="transition-all"
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
+                            background: 'rgba(255,59,48,0.08)',
+                            border: '1px solid rgba(255,59,48,0.16)',
+                            borderRadius: 100,
+                            padding: '0.38rem 0.75rem',
+                            fontSize: '0.76rem', fontWeight: 600,
+                            color: '#FF3B30',
+                            cursor: deleting ? 'wait' : 'pointer',
+                            fontFamily: appleFont,
+                            opacity: deleting ? 0.6 : 1,
+                          }}
+                        >
+                          {deleting
+                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            : <Trash2 className="w-3.5 h-3.5" />}
+                          Удалить сайт
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -1522,6 +1489,52 @@ export default function DashboardPage() {
           )}
         </div>
       </main>
+
+      <Dialog open={!!confirmDelete} onOpenChange={(open) => { if (!open) setConfirmDelete(null); }}>
+        <DialogContent
+          className="p-0"
+          style={{ width: '92vw', maxWidth: 400, borderRadius: 24, border: '1px solid rgba(255,255,255,0.7)', background: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(30px) saturate(1.4)', boxShadow: '0 30px 80px rgba(30,50,80,0.18)', fontFamily: appleFont }}
+        >
+          <div style={{ padding: '1.75rem 1.6rem 1.5rem', textAlign: 'center' }}>
+            <div style={{ width: 52, height: 52, borderRadius: 18, margin: '0 auto 1rem', background: 'rgba(255,59,48,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Trash2 className="w-6 h-6" style={{ color: '#FF3B30' }} />
+            </div>
+            <DialogHeader>
+              <DialogTitle style={{ fontSize: '1.2rem', fontWeight: 700, letterSpacing: '-0.03em', color: '#1a1d24', textAlign: 'center' }}>
+                Точно удалить сайт?
+              </DialogTitle>
+              <DialogDescription style={{ marginTop: '0.5rem', fontSize: '0.88rem', color: 'rgba(26,29,36,0.55)', textAlign: 'center' }}>
+                «{confirmDelete?.title || 'Без названия'}» будет удалён безвозвратно.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="flex gap-2.5" style={{ marginTop: '1.5rem' }}>
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(null)}
+                className="flex-1 transition-all"
+                style={{ borderRadius: 100, border: '1px solid rgba(26,29,36,0.12)', background: 'rgba(255,255,255,0.8)', padding: '0.72rem 1rem', fontSize: '0.9rem', fontWeight: 600, color: '#1a1d24', cursor: 'pointer', fontFamily: appleFont }}
+              >
+                Нет
+              </button>
+              <button
+                type="button"
+                disabled={deleteMutation.isPending}
+                onClick={() => {
+                  if (!confirmDelete) return;
+                  deleteMutation.mutate(confirmDelete.id);
+                  setConfirmDelete(null);
+                }}
+                className="flex-1 flex items-center justify-center gap-2 transition-all"
+                style={{ borderRadius: 100, border: 'none', background: '#FF3B30', padding: '0.72rem 1rem', fontSize: '0.9rem', fontWeight: 600, color: '#fff', cursor: deleteMutation.isPending ? 'wait' : 'pointer', fontFamily: appleFont, boxShadow: '0 10px 24px rgba(255,59,48,0.28)' }}
+              >
+                {deleteMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+                Да
+              </button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={showCreateModal} onOpenChange={(open) => {
         if (!open && isResearching) return;
