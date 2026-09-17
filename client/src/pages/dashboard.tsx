@@ -1429,26 +1429,25 @@ export default function DashboardPage() {
                         </div>
                         <button
                           type="button"
+                          aria-label="Удалить сайт"
+                          title="Удалить сайт"
                           disabled={deleting}
                           onClick={(e) => { e.stopPropagation(); setConfirmDelete({ id: project.id, title: project.title }); }}
-                          className="transition-all"
+                          className="transition-all hover:opacity-70"
                           style={{
-                            display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
-                            background: 'rgba(255,59,48,0.08)',
-                            border: '1px solid rgba(255,59,48,0.16)',
-                            borderRadius: 100,
-                            padding: '0.38rem 0.75rem',
-                            fontSize: '0.76rem', fontWeight: 600,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                            background: 'transparent',
+                            border: 'none',
+                            borderRadius: 8,
+                            padding: 4,
                             color: '#FF3B30',
                             cursor: deleting ? 'wait' : 'pointer',
-                            fontFamily: appleFont,
                             opacity: deleting ? 0.6 : 1,
                           }}
                         >
                           {deleting
-                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            : <Trash2 className="w-3.5 h-3.5" />}
-                          Удалить сайт
+                            ? <Loader2 className="w-4 h-4 animate-spin" />
+                            : <Trash2 className="w-4 h-4" />}
                         </button>
                       </div>
                     </div>
