@@ -40,6 +40,8 @@ export interface IStorage {
     lastModelAt: Date | null;
   } | undefined>;
   createProject(project: InsertProject): Promise<Project>;
+  /** Clone code, files and image library into a fresh unpublished project. */
+  duplicateProject(sourceId: number, userId: number): Promise<Project | undefined>;
   updateProject(id: number, data: Partial<Project>): Promise<Project | undefined>;
   deleteProject(id: number): Promise<void>;
 
@@ -500,6 +502,50 @@ export class DatabaseStorage implements IStorage {
   async createProject(insertProject: InsertProject): Promise<Project> {
     const [project] = await db.insert(projects).values(insertProject).returning();
     return project;
+  }
+
+  async duplicateProject(sourceId: number, userId: number): Promise<Project | undefined> {
+    const [source] = await db.select().from(projects).where(eq(projects.id, sourceId));
+    if (!source || source.userId !== userId) return undefined;
+
+    // Hosting fields stay empty: the clone is a fresh draft that publishes to its
+    // own bucket/domain instead of hijacking the original site.
+    const [copy] = await db
+      .insert(projects)
+      .values({
+        userId,
+        title: `${source.title} (копия)`.slice(0, 200),
+        description: source.description,
+        generatedCode: source.generatedCode,
+        type: source.type,
+        seoConfig: source.seoConfig,
+        publishStatus: "draft",
+      })
+      .returning();
+    if (!copy) return undefined;
+
+    const files = await db.select().from(projectFiles).where(eq(projectFiles.projectId, sourceId));
+    if (files.length) {
+      await db.insert(projectFiles).values(
+        files.map((f) => ({ projectId: copy.id, filename: f.filename, code: f.code })),
+      );
+    }
+
+    // Image library is referenced by {{IMG:name}} markers inside the cloned HTML.
+    const images = await db.select().from(projectImages).where(eq(projectImages.projectId, sourceId));
+    if (images.length) {
+      await db.insert(projectImages).values(
+        images.map((img) => ({
+          projectId: copy.id,
+          userId,
+          name: img.name,
+          url: img.url,
+          prompt: img.prompt,
+        })),
+      );
+    }
+
+    return copy;
   }
 
   async updateProject(id: number, data: Partial<Project>): Promise<Project | undefined> {

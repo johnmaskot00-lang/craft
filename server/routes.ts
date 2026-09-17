@@ -5023,6 +5023,26 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/projects/:id/duplicate", requireAuth, async (req, res) => {
+    try {
+      const source = await storage.getProject(parseInt(req.params.id));
+      if (!source) {
+        return res.status(404).json({ message: "Проект не найден" });
+      }
+      const user = req.user as any;
+      if (source.userId !== user.id) {
+        return res.status(403).json({ message: "Доступ запрещён" });
+      }
+      const copy = await storage.duplicateProject(source.id, user.id);
+      if (!copy) {
+        return res.status(500).json({ message: "Не удалось скопировать проект" });
+      }
+      res.status(201).json(copy);
+    } catch (err) {
+      res.status(500).json({ message: "Ошибка копирования проекта" });
+    }
+  });
+
   app.delete("/api/projects/:id", requireAuth, async (req, res) => {
     try {
       const project = await storage.getProject(parseInt(req.params.id));

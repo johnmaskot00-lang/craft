@@ -28,6 +28,7 @@ import {
   Loader2,
   FolderOpen,
   Coins,
+  Copy,
   Inbox,
   Wand2,
   Globe,
@@ -754,6 +755,21 @@ export default function DashboardPage() {
     createMutation.mutate(undefined);
   };
 
+  const duplicateMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await apiRequest("POST", `/api/projects/${id}/duplicate`);
+      return (await res.json()) as Project;
+    },
+    onSuccess: (copy) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/projects"] });
+      toast({ title: "Копия создана", description: "Открываем её для правок" });
+      setLocation((copy as any).type === "seo" ? `/seo/${copy.id}` : `/editor/${copy.id}`);
+    },
+    onError: () => {
+      toast({ title: "Не удалось скопировать сайт", variant: "destructive" });
+    },
+  });
+
   const deleteMutation = useMutation({
     mutationFn: async (id: number) => {
       await apiRequest("DELETE", `/api/projects/${id}`);
@@ -1352,6 +1368,7 @@ export default function DashboardPage() {
                 const urlLabel = projectUrlLabel(project);
                 const previewSrc = projectPreviewSrc(project);
                 const deleting = deleteMutation.isPending && deleteMutation.variables === project.id;
+                const duplicating = duplicateMutation.isPending && duplicateMutation.variables === project.id;
                 return (
                   <div
                     key={project.id}
@@ -1427,28 +1444,52 @@ export default function DashboardPage() {
                           <span style={{ width: 7, height: 7, borderRadius: '50%', background: status.color, flexShrink: 0 }} />
                           <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'rgba(26,29,36,0.62)' }}>{status.label}</span>
                         </div>
-                        <button
-                          type="button"
-                          aria-label="Удалить сайт"
-                          title="Удалить сайт"
-                          disabled={deleting}
-                          onClick={(e) => { e.stopPropagation(); setConfirmDelete({ id: project.id, title: project.title }); }}
-                          className="transition-all hover:opacity-70"
-                          style={{
-                            display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-                            background: 'transparent',
-                            border: 'none',
-                            borderRadius: 8,
-                            padding: 4,
-                            color: '#FF3B30',
-                            cursor: deleting ? 'wait' : 'pointer',
-                            opacity: deleting ? 0.6 : 1,
-                          }}
-                        >
-                          {deleting
-                            ? <Loader2 className="w-4 h-4 animate-spin" />
-                            : <Trash2 className="w-4 h-4" />}
-                        </button>
+                        <div className="flex items-center gap-1" style={{ flexShrink: 0 }}>
+                          <button
+                            type="button"
+                            aria-label="Дублировать сайт"
+                            title="Дублировать сайт"
+                            disabled={duplicating}
+                            onClick={(e) => { e.stopPropagation(); duplicateMutation.mutate(project.id); }}
+                            className="transition-all hover:opacity-70"
+                            style={{
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              background: 'transparent',
+                              border: 'none',
+                              borderRadius: 8,
+                              padding: 4,
+                              color: 'rgba(26,29,36,0.5)',
+                              cursor: duplicating ? 'wait' : 'pointer',
+                              opacity: duplicating ? 0.6 : 1,
+                            }}
+                          >
+                            {duplicating
+                              ? <Loader2 className="w-4 h-4 animate-spin" />
+                              : <Copy className="w-4 h-4" />}
+                          </button>
+                          <button
+                            type="button"
+                            aria-label="Удалить сайт"
+                            title="Удалить сайт"
+                            disabled={deleting}
+                            onClick={(e) => { e.stopPropagation(); setConfirmDelete({ id: project.id, title: project.title }); }}
+                            className="transition-all hover:opacity-70"
+                            style={{
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              background: 'transparent',
+                              border: 'none',
+                              borderRadius: 8,
+                              padding: 4,
+                              color: '#FF3B30',
+                              cursor: deleting ? 'wait' : 'pointer',
+                              opacity: deleting ? 0.6 : 1,
+                            }}
+                          >
+                            {deleting
+                              ? <Loader2 className="w-4 h-4 animate-spin" />
+                              : <Trash2 className="w-4 h-4" />}
+                          </button>
+                        </div>
                       </div>
                     </div>
                   </div>
