@@ -1387,7 +1387,7 @@ async function generateScrollFrames(
   layout: ScrollAnimLayout = "parallax",
   onTaskCreated?: (taskId: string) => void,
   existingTaskId?: string,
-): Promise<{ frames: string[]; videoUrl?: string; confirmedKieFailure: boolean }> {
+): Promise<{ frames: string[]; videoUrl?: string; posterUrl?: string; confirmedKieFailure: boolean }> {
   if (!KIE_API_KEY) { console.warn("[SCROLLANIM] missing KIE_API_KEY"); return { frames: [], confirmedKieFailure: false }; }
 
   let confirmedKieFailure = false;
@@ -1747,7 +1747,7 @@ async function generateScrollFrames(
       const stableVideo = relUrl;
       console.log(`[SCROLLANIM] ${layout} video scrub ready: ${stableVideo} (${mp4Buf.length} bytes)`);
       try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-      return { frames: [], videoUrl: stableVideo, confirmedKieFailure: false };
+      return { frames: [], videoUrl: stableVideo, posterUrl: currentStillUrl, confirmedKieFailure: false };
     } catch (upErr: any) {
       console.warn(`[SCROLLANIM] ${layout} mp4 upload failed, falling back to frame extract:`, upErr?.message);
       // fall through to ffmpeg path
@@ -2367,8 +2367,11 @@ function buildScrollAnimHtml(
   texts: Array<{ title: string; sub: string }>,
   layout: ScrollAnimLayout = "parallax",
   videoUrl?: string,
+  /** Still used as the first frame — shown instantly while the MP4 downloads. */
+  posterUrl?: string,
 ): string {
   const cid = "csa" + Math.random().toString(36).slice(2, 8);
+  const posterEsc = posterUrl ? csaEsc(posterUrl) : "";
   const framesJson = JSON.stringify(frames).replace(/'/g, "&#39;");
   const isSplit = layout === "split";
   const n = Math.max(1, texts.length);
@@ -2421,12 +2424,18 @@ function buildScrollAnimHtml(
   // «Тригер» scrubs JPEG frames on canvas. Immersion loads MP4 as Blob.
   // Classic heroes must use the Blob path too — raw <video src> seek looks static.
   if (vidEsc) {
-    const mediaTag = `<video class="${cid}-video" muted playsinline preload="auto" aria-hidden="true"></video>`;
+    // The MP4 is fetched as a Blob before it can be scrubbed, so without a poster the
+    // hero stays blank for the whole download. The still is the video's own first
+    // frame, which makes the swap invisible.
+    const mediaTag = `<video class="${cid}-video" muted playsinline preload="auto" aria-hidden="true"${posterEsc ? ` poster="${posterEsc}"` : ""}></video>`;
+    const posterCss = posterEsc
+      ? `background-image:url('${posterEsc}');background-size:cover;background-position:center center;`
+      : "";
     const scrubJs = buildMp4ScrubClientJs(cid, { splitText: isSplit });
 
     if (!isSplit) {
       return `
-<section class="${cid}-scroll" data-frames='[]' data-video="${vidEsc}" data-layout="${layoutAttr}" data-craft-scrollanim="1">
+<section class="${cid}-scroll" data-frames='[]' data-video="${vidEsc}"${posterEsc ? ` data-poster="${posterEsc}"` : ""} data-layout="${layoutAttr}" data-craft-scrollanim="1">
   <div class="${cid}-sticky">
     ${mediaTag}
     <div class="${cid}-veil"></div>
@@ -2438,8 +2447,8 @@ ${layers}
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@700;800&family=Manrope:wght@400;500;600&display=swap');
   .${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;}
-  .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#0a0a0a;}
-  .${cid}-video{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;min-width:100%;min-height:100%;display:block;object-fit:cover;object-position:center center;background:#0a0a0a;transform:none;max-width:none;}
+  .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#0a0a0a;${posterCss}}
+  .${cid}-video{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;min-width:100%;min-height:100%;display:block;object-fit:cover;object-position:center center;background:transparent;transform:none;max-width:none;}
   .${cid}-veil{position:absolute;inset:0;pointer-events:none;background:linear-gradient(to top,rgba(0,0,0,0.62) 0%,rgba(0,0,0,0.18) 38%,rgba(0,0,0,0) 65%);}
   .${cid}-overlays{position:absolute;inset:0;pointer-events:none;}
   .${cid}-text{position:absolute;left:clamp(36px,5.5vw,96px);bottom:clamp(56px,8vh,108px);top:auto;transform:none;width:min(680px,86vw);text-align:left;opacity:0;will-change:opacity,transform;}
@@ -2453,7 +2462,7 @@ ${layers}
     }
 
     return `
-<section class="${cid}-scroll" data-frames='[]' data-video="${vidEsc}" data-layout="split" data-craft-scrollanim="1">
+<section class="${cid}-scroll" data-frames='[]' data-video="${vidEsc}"${posterEsc ? ` data-poster="${posterEsc}"` : ""} data-layout="split" data-craft-scrollanim="1">
   <div class="${cid}-sticky">
     ${mediaTag}
     <div class="${cid}-panel">
@@ -2464,8 +2473,8 @@ ${layers}
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@700;800&family=Manrope:wght@400;500;600&display=swap');
   .${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;}
-  .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#f8f7f4;}
-  .${cid}-video{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;min-width:100%;min-height:100%;display:block;object-fit:cover;object-position:center center;background:#111;transform:none;max-width:none;}
+  .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#f8f7f4;${posterCss}}
+  .${cid}-video{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;min-width:100%;min-height:100%;display:block;object-fit:cover;object-position:center center;background:transparent;transform:none;max-width:none;}
   .${cid}-panel{position:absolute;top:0;left:0;width:52%;height:100%;pointer-events:none;display:flex;align-items:center;padding:0 clamp(32px,5.5vw,96px);background:linear-gradient(to right,rgba(248,247,244,0.9) 0%,rgba(248,247,244,0.74) 42%,rgba(248,247,244,0) 100%);}
   .${cid}-text{position:absolute;left:clamp(32px,5.5vw,96px);top:50%;transform:translateY(-50%);width:min(50vw,640px);text-align:left;opacity:0;will-change:opacity,transform;}
   .${cid}-text:first-child{opacity:1;}
@@ -2973,6 +2982,7 @@ async function resolveScrollAnimMarkers(
       : parsed.videoPrompt;
     let frames: string[] = [];
     let videoUrl: string | undefined;
+    let posterUrl: string | undefined;
     let scrollKieFailed = false;
     try {
       const scrollOutcome = await generateScrollFrames(
@@ -2998,6 +3008,7 @@ async function resolveScrollAnimMarkers(
       );
       frames = scrollOutcome.frames;
       videoUrl = scrollOutcome.videoUrl;
+      posterUrl = scrollOutcome.posterUrl;
       scrollKieFailed = scrollOutcome.confirmedKieFailure;
     } finally {
       clearInterval(keepAliveInterval);
@@ -3005,7 +3016,7 @@ async function resolveScrollAnimMarkers(
 
     if (isScrollAnimReady(layout, frames, videoUrl)) {
       const bakedFrames = await prepareScrollAnimFrames(frames, layout);
-      replaceMap.set(raw, buildScrollAnimHtml(bakedFrames, parsed.texts, layout, videoUrl));
+      replaceMap.set(raw, buildScrollAnimHtml(bakedFrames, parsed.texts, layout, videoUrl, posterUrl));
       generated++;
       if (billed) creditsUsed += blockCost;
       try {
