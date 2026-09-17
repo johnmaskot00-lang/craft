@@ -98,6 +98,7 @@ import {
   pruneOperationalTables,
 } from "./version-blob-backfill";
 import { withSingletonLease } from "./singleton-lease";
+import { buildOmniVideoRequest, kieVideoResolution } from "./kie-video-model";
 import { redisEnabled } from "./redis";
 import { assertPublicHttpUrl, safeFetch } from "./url-guard";
 import { isPublishableProjectFile } from "@shared/project-files";
@@ -621,31 +622,22 @@ async function saveChatResultVersion(
   }
 }
 
-const KLING_IMG2VID_MODEL = "kling/v3-turbo-image-to-video";
 /** Fallback when Kling create/render fails — same unified KIE jobs API, 1080P. */
 const WAN_FALLBACK_MODEL = "wan/3-0-video";
 
-/** Build createTask `input` for the primary Kling model or Wan 3.0 fallback. */
+/** Build createTask `input` for the Wan 3.0 fallback (Omni handled separately). */
 function buildKieVideoCreateInput(
   model: string,
   opts: { prompt: string; stillUrl: string; durationSec: number },
 ): Record<string, unknown> {
   const prompt = opts.prompt.slice(0, 2500);
-  if (model === WAN_FALLBACK_MODEL) {
-    return {
-      prompt,
-      first_frame_url: opts.stillUrl,
-      resolution: "1080P",
-      aspect_ratio: "adaptive",
-      duration: Math.max(2, Math.min(30, Math.round(opts.durationSec) || 5)),
-      audio: false,
-    };
-  }
   return {
     prompt,
-    image_urls: [opts.stillUrl],
-    duration: String(opts.durationSec),
-    resolution: "1080p",
+    first_frame_url: opts.stillUrl,
+    resolution: "1080P",
+    aspect_ratio: "adaptive",
+    duration: Math.max(2, Math.min(30, Math.round(opts.durationSec) || 5)),
+    audio: false,
   };
 }
 
@@ -1567,21 +1559,20 @@ async function generateScrollFrames(
       await new Promise(r => setTimeout(r, 5000));
     }
 
-    // Step 1 — create the image-to-video task (kieRequestJson retries 5xx/429/network)
+    // Step 1 — Kling 3.0 Omni: reference-to-video with our still, text-to-video without.
     let taskId: string | null = null;
+    const omni = buildOmniVideoRequest({
+      prompt: animPrompt,
+      imageUrls: [currentStillUrl],
+      durationSec: videoDuration,
+    });
+    console.log(`[SCROLLANIM] ${omni.model} @ ${kieVideoResolution()} (${videoDuration}s)`);
     const createBody: any = await kieRequestJson(
       NANO_BANANA_CREATE_URL,
       {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${KIE_API_KEY}` },
-        body: JSON.stringify({
-          model: KLING_IMG2VID_MODEL,
-          input: buildKieVideoCreateInput(KLING_IMG2VID_MODEL, {
-            prompt: animPrompt,
-            stillUrl: currentStillUrl,
-            durationSec: videoDuration,
-          }),
-        }),
+        body: JSON.stringify({ model: omni.model, input: omni.input }),
       },
       { label: "SCROLLANIM video-create", retries: 4, shouldStop: () => shouldStop() || Date.now() >= deadline },
     );

@@ -11,6 +11,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { spawn } from "child_process";
+import { buildOmniVideoRequest } from "./kie-video-model";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -19,7 +20,6 @@ export const SW_SCENE_COUNT = 5;
 export const SW_DIVE_DURATION = 10;
 export const SW_CONN_DURATION = 5;
 
-const KLING_MODEL = "kling-3.0/video";
 /** Fallback when Kling create/render fails — unified KIE jobs API, 1080P. */
 const WAN_FALLBACK_MODEL = "wan/3-0-video";
 const STILL_MODEL = "nano-banana-2";
@@ -494,18 +494,13 @@ async function createAndPollKling(opts: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${kieApiKey}`,
       },
-      body: JSON.stringify({
-        model: KLING_MODEL,
-        input: {
-          prompt: prompt.slice(0, PROMPT_MAX),
-          image_urls: imageUrls,
-          sound: false,
-          duration,
-          aspect_ratio: "16:9",
-          mode: "std",
-          multi_shots: false,
-        },
-      }),
+      body: JSON.stringify(
+        buildOmniVideoRequest({
+          prompt,
+          imageUrls,
+          durationSec: Number(duration) || SW_DIVE_DURATION,
+        }),
+      ),
     },
     {
       label: `SCROLLWORLD ${label}-create`,
