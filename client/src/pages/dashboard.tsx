@@ -841,10 +841,6 @@ export default function DashboardPage() {
           background: linear-gradient(#fff, #fff) padding-box, var(--rainbow-grad) border-box;
           background-size: 200% auto; animation: db-rainbow 3s linear infinite;
         }
-        @media (max-width: 1023px) {
-          .db-shell-row { flex-direction: column !important; }
-          .db-side { display: none !important; }
-        }
         @media (max-width: 639px) {
           .db-magic-btn { height: 2.25rem; padding: 0 0.75rem; font-size: 0.8rem; }
           .db-tpl-layout { flex-direction: column !important; height: min(85dvh, 720px) !important; min-height: 0 !important; }
@@ -1203,89 +1199,10 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      <main className="relative z-10 max-w-7xl mx-auto px-3 sm:px-6 db-shell-row" style={{ paddingTop: '5.25rem', flex: 1, paddingBottom: '2.5rem', width: '100%', display: 'flex', gap: isMobile ? 0 : 18, alignItems: 'stretch' }}>
-        {/* Liquid-glass sidebar — reference layout */}
-        <aside className="db-side" style={{
-          width: 214,
-          flexShrink: 0,
-          borderRadius: 28,
-          background: 'rgba(255,255,255,0.34)',
-          backdropFilter: 'blur(40px) saturate(1.5)',
-          WebkitBackdropFilter: 'blur(40px) saturate(1.5)',
-          border: '1px solid rgba(255,255,255,0.6)',
-          boxShadow: '0 24px 70px rgba(30,50,80,0.10), inset 0 1px 0 rgba(255,255,255,0.75)',
-          padding: '1.1rem 0.85rem',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 6,
-        }}>
-          {([
-            { id: 'sites', label: 'Мои сайты', icon: <FolderOpen className="w-4 h-4" />, onClick: () => setProjectFilter('all') },
-            { id: 'templates', label: 'Шаблоны', icon: <Wand2 className="w-4 h-4" />, onClick: () => { openCreateModal(); setCreateStep('templates'); } },
-            { id: 'domains', label: 'Домены', icon: <Globe className="w-4 h-4" />, onClick: () => setProjectFilter('published') },
-            { id: 'plans', label: 'Тарифы', icon: <Coins className="w-4 h-4" />, onClick: () => { setTopUpFromCreate(false); setShowTopUpModal(true); } },
-            { id: 'settings', label: 'Настройки', icon: <Rocket className="w-4 h-4" />, onClick: () => setLocation('/profile') },
-          ]).map((item) => {
-            const active = item.id === 'sites';
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={item.onClick}
-                className="transition-all"
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 10,
-                  width: '100%', textAlign: 'left',
-                  padding: '0.62rem 0.75rem',
-                  borderRadius: 14,
-                  border: active ? '1px solid rgba(255,255,255,0.9)' : '1px solid transparent',
-                  background: active ? 'rgba(255,255,255,0.78)' : 'transparent',
-                  boxShadow: active ? '0 8px 22px rgba(30,50,80,0.08)' : 'none',
-                  color: active ? '#1a1d24' : 'rgba(26,29,36,0.6)',
-                  fontSize: '0.88rem', fontWeight: 600, cursor: 'pointer',
-                  fontFamily: appleFont,
-                }}
-              >
-                <span style={{ color: active ? '#4f7ed8' : 'rgba(26,29,36,0.45)', display: 'flex' }}>{item.icon}</span>
-                {item.label}
-              </button>
-            );
-          })}
-
-          {/* Pro upsell card */}
-          <div style={{ marginTop: 'auto' }}>
-            <button
-              type="button"
-              onClick={() => { setTopUpFromCreate(false); setShowTopUpModal(true); }}
-              className="transition-all hover:-translate-y-0.5"
-              style={{
-                width: '100%', textAlign: 'left', cursor: 'pointer',
-                borderRadius: 20,
-                border: '1px solid rgba(255,255,255,0.75)',
-                background: 'linear-gradient(160deg, rgba(255,255,255,0.72), rgba(226,236,247,0.5))',
-                padding: '0.95rem 0.95rem 0.85rem',
-                fontFamily: appleFont,
-                boxShadow: '0 12px 30px rgba(30,50,80,0.08)',
-              }}
-            >
-              <div style={{ fontSize: '0.88rem', fontWeight: 700, color: '#1a1d24', lineHeight: 1.3, letterSpacing: '-0.02em' }}>
-                Создавайте<br />больше с Pro
-              </div>
-              <div style={{ fontSize: '0.72rem', color: 'rgba(26,29,36,0.5)', marginTop: 6, lineHeight: 1.35 }}>
-                Больше возможностей для роста
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
-                <span style={{ width: 28, height: 28, borderRadius: '50%', background: 'rgba(255,255,255,0.9)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#1a1d24', fontSize: '0.85rem', boxShadow: '0 6px 16px rgba(30,50,80,0.1)' }}>→</span>
-              </div>
-            </button>
-          </div>
-        </aside>
-
+      <main className="relative z-10 max-w-7xl mx-auto px-3 sm:px-6" style={{ paddingTop: '5.25rem', flex: 1, paddingBottom: '2.5rem', width: '100%' }}>
         <div
           className="db-glass-shell"
           style={{
-            flex: 1,
-            minWidth: 0,
             background: 'rgba(255,255,255,0.38)',
             backdropFilter: 'blur(40px) saturate(1.5)',
             WebkitBackdropFilter: 'blur(40px) saturate(1.5)',
