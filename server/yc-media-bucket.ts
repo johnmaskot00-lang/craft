@@ -7,6 +7,7 @@
  */
 import {
   CreateBucketCommand,
+  DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
@@ -122,7 +123,13 @@ export async function ycMediaHead(key: string): Promise<{ size: number; contentT
   }
 }
 
-export async function ycMediaPut(key: string, body: Buffer, contentType?: string): Promise<void> {
+export async function ycMediaPut(
+  key: string,
+  body: Buffer,
+  contentType?: string,
+  /** Draft/version payloads must stay private; site media is served publicly. */
+  acl: "public-read" | "private" = "public-read",
+): Promise<void> {
   await ensureYandexMediaBucket();
   const client = getMediaS3Client();
   const normalized = key.replace(/^\/+/, "");
@@ -132,10 +139,18 @@ export async function ycMediaPut(key: string, body: Buffer, contentType?: string
       Key: normalized,
       Body: body,
       ContentType: contentType || contentTypeForKey(normalized),
-      ACL: "public-read",
+      ACL: acl,
     }),
   );
   console.log(`[YC-MEDIA] Stored ${normalized} (${body.length} bytes)`);
+}
+
+export async function ycMediaDelete(key: string): Promise<void> {
+  await ensureYandexMediaBucket();
+  const client = getMediaS3Client();
+  await client.send(
+    new DeleteObjectCommand({ Bucket: CRAFT_MEDIA_BUCKET(), Key: key.replace(/^\/+/, "") }),
+  );
 }
 
 export async function ycMediaGetBuffer(key: string): Promise<Buffer> {

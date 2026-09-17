@@ -3,6 +3,16 @@ import { users, projects, projectMessages, projectImages, projectVersions, proje
 import { eq, desc, and, sql, gte, isNull } from "drizzle-orm";
 import crypto from "crypto";
 import { referralBonusTokens, normalizeReferralCode } from "./referral";
+import {
+  deleteVersionBlobs,
+  getVersionBlob,
+  isHealthySnapshot,
+  payloadBytes,
+  shouldOffloadVersion,
+  versionBlobKey,
+  putVersionBlob,
+  type VersionPayload,
+} from "./version-blobs";
 
 /** Never serialize password hashes to API clients (admin or otherwise). */
 export function publicUser<T extends { password?: string | null }>(user: T): Omit<T, "password"> {
@@ -554,6 +564,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteProject(id: number): Promise<void> {
+    const blobRows = await db
+      .select({ blobKey: projectVersions.blobKey })
+      .from(projectVersions)
+      .where(eq(projectVersions.projectId, id));
+    const blobKeys = blobRows.map((r) => r.blobKey);
     await Promise.all([
       db.delete(projectMessages).where(eq(projectMessages.projectId, id)),
       db.delete(projectFiles).where(eq(projectFiles.projectId, id)),
@@ -562,6 +577,7 @@ export class DatabaseStorage implements IStorage {
       db.delete(leads).where(eq(leads.projectId, id)),
     ]);
     await db.delete(projects).where(eq(projects.id, id));
+    if (blobKeys.length) void deleteVersionBlobs(blobKeys);
   }
 
   async getProjectOwnerId(id: number): Promise<number | undefined> {
@@ -669,12 +685,21 @@ export class DatabaseStorage implements IStorage {
   async getProjectVersions(projectId: number): Promise<ProjectVersion[]> {
     // Prefer getProjectVersionSummaries / getProjectVersion for new code paths.
     // Kept for rare heal/admin callers that need full rows — always LIMIT.
-    return db
+    const rows = await db
       .select()
       .from(projectVersions)
       .where(eq(projectVersions.projectId, projectId))
       .orderBy(desc(projectVersions.createdAt))
       .limit(VERSION_RETENTION_PER_PROJECT);
+    return Promise.all(rows.map((row) => this.hydrateVersion(row)));
+  }
+
+  /** Pull the payload back from Object Storage for offloaded rows. */
+  private async hydrateVersion(row: ProjectVersion): Promise<ProjectVersion> {
+    if (!row.blobKey) return row;
+    const payload = await getVersionBlob(row.blobKey);
+    if (!payload) return row;
+    return { ...row, code: payload.code, files: payload.files };
   }
 
   async getProjectVersionSummaries(projectId: number): Promise<Array<{
@@ -685,14 +710,17 @@ export class DatabaseStorage implements IStorage {
     codeBytes: number;
     hasFiles: boolean;
   }>> {
+    // Offloaded rows carry metadata in columns; legacy inline rows are measured directly.
     const rows = await db.execute(sql`
       SELECT
         id,
         project_id AS "projectId",
         label,
         created_at AS "createdAt",
-        coalesce(octet_length(code), 0)::int AS "codeBytes",
-        (files IS NOT NULL)::boolean AS "hasFiles"
+        CASE WHEN blob_key IS NOT NULL THEN code_bytes
+             ELSE coalesce(octet_length(code), 0) END::int AS "codeBytes",
+        CASE WHEN blob_key IS NOT NULL THEN has_files
+             ELSE (files IS NOT NULL) END::boolean AS "hasFiles"
       FROM project_versions
       WHERE project_id = ${projectId}
       ORDER BY created_at DESC, id DESC
@@ -717,29 +745,77 @@ export class DatabaseStorage implements IStorage {
 
   async getProjectVersion(id: number): Promise<ProjectVersion | undefined> {
     const [v] = await db.select().from(projectVersions).where(eq(projectVersions.id, id)).limit(1);
-    return v;
+    return v ? this.hydrateVersion(v) : undefined;
   }
 
   async getLatestHealthyVersionCode(projectId: number): Promise<string | null> {
     const res = await db.execute(sql`
-      SELECT code
+      SELECT code, blob_key AS "blobKey"
       FROM project_versions
       WHERE project_id = ${projectId}
-        AND octet_length(code) > 80
-        AND code NOT ILIKE '%data-craft-generating="1"%'
+        AND CASE
+              WHEN blob_key IS NOT NULL THEN code_bytes > 80 AND healthy
+              ELSE octet_length(code) > 80 AND code NOT ILIKE '%data-craft-generating="1"%'
+            END
       ORDER BY created_at DESC, id DESC
       LIMIT 1
     `);
-    const code = (res.rows as Array<{ code: string }>)[0]?.code;
-    return code && code.trim() ? code : null;
+    const row = (res.rows as Array<{ code: string; blobKey: string | null }>)[0];
+    if (!row) return null;
+    if (row.blobKey) {
+      const payload = await getVersionBlob(row.blobKey);
+      const code = payload?.code || "";
+      return code.trim() ? code : null;
+    }
+    return row.code && row.code.trim() ? row.code : null;
   }
 
   async createProjectVersion(version: InsertProjectVersion): Promise<ProjectVersion> {
-    const [v] = await db.insert(projectVersions).values(version).returning();
+    const payload: VersionPayload = { code: version.code || "", files: version.files ?? null };
+    const bytes = payloadBytes(payload);
+    const meta = {
+      codeBytes: bytes,
+      hasFiles: !!payload.files?.length,
+      healthy: isHealthySnapshot(payload.code),
+    };
+    const offload = shouldOffloadVersion(bytes);
+
+    const [v] = await db
+      .insert(projectVersions)
+      .values(
+        offload
+          ? { ...version, code: "", files: null, ...meta }
+          : { ...version, ...meta },
+      )
+      .returning();
+
+    let saved = v;
+    if (offload && v) {
+      // Key needs the row id, so the payload is uploaded right after the insert.
+      const key = versionBlobKey(v.projectId, v.id);
+      try {
+        await putVersionBlob(key, payload);
+        const [withKey] = await db
+          .update(projectVersions)
+          .set({ blobKey: key })
+          .where(eq(projectVersions.id, v.id))
+          .returning();
+        saved = withKey || v;
+      } catch (err: any) {
+        console.warn("[versions] blob upload failed, keeping snapshot inline:", err?.message || err);
+        const [inline] = await db
+          .update(projectVersions)
+          .set({ code: payload.code, files: payload.files })
+          .where(eq(projectVersions.id, v.id))
+          .returning();
+        saved = inline || v;
+      }
+    }
+
     // Version snapshots contain full HTML + multipage files and can be hundreds
     // of KB–MB each. Keep a tight history per project to protect Postgres + Node RAM.
     try {
-      await db.execute(sql`
+      const pruned = await db.execute(sql`
         DELETE FROM project_versions
         WHERE id IN (
           SELECT id
@@ -748,27 +824,67 @@ export class DatabaseStorage implements IStorage {
           ORDER BY created_at DESC, id DESC
           OFFSET ${VERSION_RETENTION_PER_PROJECT}
         )
+        RETURNING blob_key AS "blobKey"
       `);
+      const keys = (pruned.rows as Array<{ blobKey: string | null }>).map((r) => r.blobKey);
+      if (keys.length) void deleteVersionBlobs(keys);
     } catch (err: any) {
       console.warn("[versions] retention cleanup failed:", err?.message || err);
     }
-    return v;
+    return saved ? { ...saved, code: payload.code, files: payload.files } : saved;
   }
 
   async updateProjectVersion(
     id: number,
     data: { code?: string; files?: { filename: string; code: string }[] | null; label?: string },
   ): Promise<ProjectVersion | undefined> {
-    const patch: Partial<typeof projectVersions.$inferInsert> = {};
-    if (data.code !== undefined) patch.code = data.code;
-    if (data.files !== undefined) patch.files = data.files;
-    if (data.label !== undefined) patch.label = data.label;
-    if (!Object.keys(patch).length) {
-      const [cur] = await db.select().from(projectVersions).where(eq(projectVersions.id, id));
-      return cur;
+    const [current] = await db.select().from(projectVersions).where(eq(projectVersions.id, id));
+    if (!current) return undefined;
+    if (data.code === undefined && data.files === undefined && data.label === undefined) {
+      return this.hydrateVersion(current);
     }
+
+    const patch: Partial<typeof projectVersions.$inferInsert> = {};
+    if (data.label !== undefined) patch.label = data.label;
+
+    if (data.code === undefined && data.files === undefined) {
+      const [v] = await db.update(projectVersions).set(patch).where(eq(projectVersions.id, id)).returning();
+      return v ? this.hydrateVersion(v) : undefined;
+    }
+
+    // Payload edits rewrite the whole snapshot, so merge with what is stored today.
+    const existing = current.blobKey
+      ? (await getVersionBlob(current.blobKey)) ?? { code: current.code, files: current.files }
+      : { code: current.code, files: current.files };
+    const payload: VersionPayload = {
+      code: data.code !== undefined ? data.code : existing.code,
+      files: data.files !== undefined ? data.files : existing.files,
+    };
+    const bytes = payloadBytes(payload);
+    patch.codeBytes = bytes;
+    patch.hasFiles = !!payload.files?.length;
+    patch.healthy = isHealthySnapshot(payload.code);
+
+    const key = current.blobKey || versionBlobKey(current.projectId, current.id);
+    if (shouldOffloadVersion(bytes) || current.blobKey) {
+      try {
+        await putVersionBlob(key, payload);
+        patch.blobKey = key;
+        patch.code = "";
+        patch.files = null;
+      } catch (err: any) {
+        console.warn("[versions] blob update failed, keeping snapshot inline:", err?.message || err);
+        patch.blobKey = null;
+        patch.code = payload.code;
+        patch.files = payload.files;
+      }
+    } else {
+      patch.code = payload.code;
+      patch.files = payload.files;
+    }
+
     const [v] = await db.update(projectVersions).set(patch).where(eq(projectVersions.id, id)).returning();
-    return v;
+    return v ? { ...v, code: payload.code, files: payload.files } : undefined;
   }
 
   async getProjectFiles(projectId: number): Promise<ProjectFile[]> {

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, serial, integer, timestamp, json, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, serial, integer, boolean, timestamp, json, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -270,9 +270,17 @@ export const projectImages = pgTable("project_images", {
 export const projectVersions = pgTable("project_versions", {
   id: serial("id").primaryKey(),
   projectId: integer("project_id").notNull(),
-  code: text("code").notNull(),
+  /** Empty when the snapshot lives in Object Storage under `blobKey`. */
+  code: text("code").notNull().default(""),
   label: text("label").notNull().default(""),
   files: json("files").$type<{filename: string, code: string}[]>(),
+  /** Object Storage key with gzipped {code, files}; null = payload is inline. */
+  blobKey: text("blob_key"),
+  /** Metadata kept in Postgres so list views never touch the payload. */
+  codeBytes: integer("code_bytes").notNull().default(0),
+  hasFiles: boolean("has_files").notNull().default(false),
+  /** False for generating placeholders — restore skips those snapshots. */
+  healthy: boolean("healthy").notNull().default(true),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 

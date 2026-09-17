@@ -92,6 +92,7 @@ import {
   jobQueueOverloaded,
 } from "./jobs";
 import { registerJobHandler, startInProcessWorker } from "./job-worker";
+import { backfillVersionBlobs } from "./version-blob-backfill";
 import { redisEnabled } from "./redis";
 import { assertPublicHttpUrl, safeFetch } from "./url-guard";
 import { isPublishableProjectFile } from "@shared/project-files";
@@ -4554,6 +4555,20 @@ export async function registerRoutes(
     console.warn("[boot] project_files unique index:", e?.message?.slice?.(0, 200) || e);
   }
 
+  // Version payloads move to Object Storage; these columns keep list views and
+  // restore checks working without reading the payload back.
+  for (const stmt of [
+    sql`ALTER TABLE project_versions ADD COLUMN IF NOT EXISTS blob_key text`,
+    sql`ALTER TABLE project_versions ADD COLUMN IF NOT EXISTS code_bytes integer NOT NULL DEFAULT 0`,
+    sql`ALTER TABLE project_versions ADD COLUMN IF NOT EXISTS has_files boolean NOT NULL DEFAULT false`,
+    sql`ALTER TABLE project_versions ADD COLUMN IF NOT EXISTS healthy boolean NOT NULL DEFAULT true`,
+    sql`ALTER TABLE project_versions ALTER COLUMN code SET DEFAULT ''`,
+  ]) {
+    await db.execute(stmt).catch((e: any) =>
+      console.warn("[boot] project_versions blob columns:", e?.message?.slice?.(0, 160) || e),
+    );
+  }
+
   // Indexes first (usually no-ops after first boot) — listen must not wait on retention DELETE.
   await db.execute(sql`
     CREATE INDEX IF NOT EXISTS project_versions_project_created_idx
@@ -4606,6 +4621,8 @@ export async function registerRoutes(
       } catch (e: any) {
         console.warn("[boot] DB retention cleanup:", e?.message?.slice?.(0, 200) || e);
       }
+      // Move the remaining snapshots out of Postgres once retention has trimmed them.
+      await backfillVersionBlobs();
     })();
   }, 5_000).unref?.();
 
