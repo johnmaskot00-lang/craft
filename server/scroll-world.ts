@@ -363,7 +363,8 @@ async function downloadToFile(url: string, dest: string, label: string): Promise
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const buf = Buffer.from(await resp.arrayBuffer());
       if (buf.length < 1000) throw new Error(`file too small: ${buf.length}`);
-      fs.writeFileSync(dest, buf);
+      // Video files are tens of MB — sync disk writes would stall every request.
+      await fs.promises.writeFile(dest, buf);
       log(`${label} downloaded ${buf.length} bytes → ${dest}`);
       return buf;
     } catch (e: unknown) {
@@ -750,7 +751,7 @@ async function downloadEncodeUploadMp4(
   }
 
   try {
-    const buf = fs.readFileSync(uploadPath);
+    const buf = await fs.promises.readFile(uploadPath);
     const url = await uploadBuffer(deps, buf, "video/mp4", "mp4");
     log(`${basename} uploaded → ${url}`);
     return url;
@@ -983,10 +984,10 @@ export async function generateScrollWorld(opts: {
         try {
           await encodeForScrub(ffmpegBin, rawPath, localEnc);
         } catch {
-          fs.copyFileSync(rawPath, localEnc);
+          await fs.promises.copyFile(rawPath, localEnc);
         }
         diveLocalPaths.push(localEnc);
-        const buf = fs.readFileSync(localEnc);
+        const buf = await fs.promises.readFile(localEnc);
         const url = await uploadBuffer(deps, buf, "video/mp4", "mp4");
         diveUrls.push(url);
         log(`dive${i + 1} ready ${url}`);
@@ -1009,13 +1010,13 @@ export async function generateScrollWorld(opts: {
         await extractBoundaryFrames(ffmpegBin, diveLocalPaths[i], firstPath, lastPath);
         const firstUrl = await uploadBuffer(
           deps,
-          fs.readFileSync(firstPath),
+          await fs.promises.readFile(firstPath),
           "image/jpeg",
           "jpg",
         );
         const lastUrl = await uploadBuffer(
           deps,
-          fs.readFileSync(lastPath),
+          await fs.promises.readFile(lastPath),
           "image/jpeg",
           "jpg",
         );

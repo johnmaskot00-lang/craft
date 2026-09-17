@@ -798,12 +798,13 @@ async function readScrubMp4Buffer(videoPath: string, tmpDir: string): Promise<Bu
   const fastPath = path.join(tmpDir, `scrub-faststart-${crypto.randomBytes(4).toString("hex")}.mp4`);
   try {
     await remuxMp4Faststart(videoPath, fastPath);
-    const buf = fs.readFileSync(fastPath);
+    // Async reads: an MP4 is tens of MB and a sync read blocks every other request.
+    const buf = await fs.promises.readFile(fastPath);
     console.log(`[SCROLLANIM] scrub mp4 ready (${buf.length} bytes)`);
     return buf;
   } catch (e: any) {
     console.warn(`[SCROLLANIM] faststart remux failed, uploading raw mp4:`, e?.message || e);
-    return fs.readFileSync(videoPath);
+    return fs.promises.readFile(videoPath);
   } finally {
     try { fs.rmSync(fastPath, { force: true }); } catch {}
   }
@@ -1782,7 +1783,7 @@ async function generateScrollFrames(
       if (shouldStop()) break;
       const slice = files.slice(i, i + BATCH);
       const batchUrls = await Promise.all(slice.map(async (f) => {
-        const raw = fs.readFileSync(path.join(framesDir, f));
+        const raw = await fs.promises.readFile(path.join(framesDir, f));
         return uploadToObjectStorage(raw, "image/jpeg", "jpg");
       }));
       urls.push(...batchUrls);
@@ -8540,10 +8541,10 @@ ${designAnalysis}
     try {
       // diskStorage — copy/move from multer temp path (no full file.buffer in heap)
       if (file.path) {
-        fs.copyFileSync(file.path, videoPath);
+        await fs.promises.copyFile(file.path, videoPath);
         try { fs.rmSync(file.path, { force: true }); } catch {}
       } else if (file.buffer) {
-        fs.writeFileSync(videoPath, file.buffer);
+        await fs.promises.writeFile(videoPath, file.buffer);
         try { (file as any).buffer = Buffer.alloc(0); } catch { /* ignore */ }
       } else {
         return res.status(400).json({ message: "Видео не загружено" });
@@ -8574,7 +8575,7 @@ ${designAnalysis}
       for (let i = 0; i < frameFiles.length; i += BATCH) {
         const slice = frameFiles.slice(i, i + BATCH);
         const batch = await Promise.all(slice.map(async (f) => {
-          const raw = fs.readFileSync(path.join(framesDir, f));
+          const raw = await fs.promises.readFile(path.join(framesDir, f));
           return uploadToObjectStorage(raw, "image/jpeg", "jpg");
         }));
         urls.push(...batch);
@@ -10985,7 +10986,7 @@ ${fullHtml}`;
               const rawPath = path.join(tmpDir, "src.mp4");
               let scrubBuf = mp4Buf;
               try {
-                fs.writeFileSync(rawPath, mp4Buf);
+                await fs.promises.writeFile(rawPath, mp4Buf);
                 scrubBuf = await readScrubMp4Buffer(rawPath, tmpDir);
               } catch (e: any) {
                 console.warn(`[KLINGTASK] project ${proj.id}: faststart skipped:`, e?.message || e);

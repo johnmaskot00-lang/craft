@@ -1,6 +1,7 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
+import { startWatchdog } from "./watchdog";
 import { createServer } from "http";
 
 const app = express();
@@ -134,6 +135,8 @@ app.use((req, res, next) => {
     // Exit so Amvera can restart a clean process instead of a wedged one.
     setTimeout(() => process.exit(1), 500).unref?.();
   });
+
+  startWatchdog();
 
   httpServer.listen(
     {
