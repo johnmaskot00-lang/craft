@@ -7821,7 +7821,7 @@ ${designAnalysis}
           genBilled &&
           billedUserId &&
           generationCost > 0 &&
-          (shouldRefundGenerationAttempt(err) || localStorageFailure)
+          (isEditMode || shouldRefundGenerationAttempt(err) || localStorageFailure)
         ) {
           await storage.refundCredits(billedUserId, generationCost, genIkeyForRefund);
           refunded = true;
@@ -7859,6 +7859,13 @@ ${designAnalysis}
         refunded,
         refundAmount: refunded ? generationCost : 0,
       };
+      if (billedUserId && generateProjectId) {
+        try {
+          await storage.createProjectMessage({ projectId: generateProjectId, role: "model", content: errPayload.error });
+        } catch (messageErr: any) {
+          console.warn("[GENERATE] failed to persist error message:", messageErr?.message || messageErr);
+        }
+      }
       if (res.headersSent) {
         res.write(`data: ${JSON.stringify(errPayload)}\n\n`);
         res.end();
