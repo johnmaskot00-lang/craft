@@ -34,6 +34,12 @@ export const ROUTER_CHEAP_TIMEOUT_MS = Math.max(
   Number(process.env.ROUTER_CHEAP_TIMEOUT_MS || 30 * 60 * 1000) || 30 * 60 * 1000,
 );
 
+export const KIMI_K3_MODEL = process.env.KIMI_K3_MODEL?.trim() || "kimi-k3";
+export const KIMI_K3_TIMEOUT_MS = Math.max(
+  30_000,
+  Number(process.env.KIMI_K3_TIMEOUT_MS || 10 * 60 * 1000) || 10 * 60 * 1000,
+);
+
 const apiKey = process.env.ROUTER_CHEAP_API_KEY?.trim();
 if (!apiKey) {
   console.warn(
@@ -122,6 +128,54 @@ export async function* routerCheapGenerateStream(opts: {
     ) {
       yield event.delta.text;
     }
+  }
+}
+
+
+/** OpenAI-compatible Kimi K3 fallback on the same router. */
+export async function kimiK3GenerateSync(opts: {
+  messages: MessageParam[];
+  systemPrompt: string;
+  maxTokens?: number;
+}): Promise<string> {
+  const key = process.env.ROUTER_CHEAP_API_KEY?.trim();
+  if (!key) throw new Error("ROUTER_CHEAP_API_KEY missing — Kimi fallback unavailable");
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), KIMI_K3_TIMEOUT_MS);
+  timer.unref?.();
+  try {
+    const messages = [
+      ...(opts.systemPrompt ? [{ role: "system", content: opts.systemPrompt }] : []),
+      ...opts.messages.map((m: any) => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: typeof m.content === "string"
+          ? m.content
+          : (m.content || []).map((c: any) => {
+              if (c.type === "text" || c.type === "input_text") return { type: "text", text: c.text || "" };
+              if (c.type === "image" && c.source?.type === "url") return { type: "image_url", image_url: { url: c.source.url } };
+              if (c.type === "input_image" && c.image_url) return { type: "image_url", image_url: { url: c.image_url } };
+              if (c.type === "image" && c.source?.type === "base64") return { type: "image_url", image_url: { url: `data:${c.source.media_type};base64,${c.source.data}` } };
+              if (c.type === "input_image_inline") return { type: "image_url", image_url: { url: `data:${c.mime_type};base64,${c.base64}` } };
+              return { type: "text", text: "" };
+            }),
+      })),
+    ];
+    const resp = await fetch(`${ROUTER_CHEAP_BASE_URL.replace(/\/$/, "")}/v1/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: KIMI_K3_MODEL, messages, temperature: 0.2, max_tokens: opts.maxTokens ?? ROUTER_CHEAP_MAX_TOKENS }),
+      signal: controller.signal,
+    });
+    const raw = await resp.text();
+    let data: any = null;
+    try { data = JSON.parse(raw); } catch { /* handled below */ }
+    if (!resp.ok) throw new Error(`Kimi K3 HTTP ${resp.status}: ${raw.slice(0, 500)}`);
+    const text = data?.choices?.[0]?.message?.content;
+    if (typeof text !== "string" || !text.trim()) throw new Error("Kimi K3 returned an empty response");
+    return text;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

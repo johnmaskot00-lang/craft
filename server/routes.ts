@@ -138,6 +138,7 @@ import {
   isRouterCheapConfigured,
   routerCheapGenerateStream,
   routerCheapGenerateSync,
+  kimiK3GenerateSync,
 } from "./anthropic";
 import {
   KieApiError,
@@ -3716,6 +3717,11 @@ async function kieGenerateSync(
   }
 }
 
+async function* kimiGenerateStream(messages: KieMessage[], systemPrompt: string): AsyncGenerator<string> {
+  const text = await kimiK3GenerateSync({ messages: toClaudeMessages(messages), systemPrompt });
+  if (text) yield text;
+}
+
 async function* kieGenerateStream(
   messages: KieMessage[],
   systemPrompt: string,
@@ -6617,8 +6623,24 @@ ${designAnalysis}
           // A failed tool HTTP request has already received a cross-model
           // fallback above. A transport failure is ambiguous and MUST NOT start
           // another KIE task while the first may still be running.
-          console.warn("[AGENT] Tool-calling stopped without stream replay:", agentErr?.message || agentErr);
-          throw agentErr;
+          console.warn("[AGENT] Tool-calling failed; trying Kimi K3 text fallback:", agentErr?.message || agentErr);
+          try {
+            systemContent = buildMultipageEditSystemPrompt({
+              baseSystem: editPromptBase || SYSTEM_PROMPT,
+              activeFile: activeFile || "index.html",
+              craftMd: craftMdForEdit,
+              pages: sitePages,
+              useToolsHint: false,
+            });
+            fullResponse = await kimiK3GenerateSync({
+              messages: toClaudeMessages(conversationHistory),
+              systemPrompt: systemContent,
+              maxTokens: 32000,
+            });
+          } catch (kimiErr: any) {
+            console.warn("[AGENT] Kimi K3 fallback failed:", kimiErr?.message || kimiErr);
+            throw agentErr;
+          }
         }
       }
 
@@ -6631,9 +6653,9 @@ ${designAnalysis}
         // Trigger gets one safe replay per provider. We replay only after a
         // completed empty/thin response or a confirmed KIE HTTP/provider error;
         // ambiguous transport errors still abort to avoid duplicate paid jobs.
-        const providers: Array<"gemini" | "claude"> = retryCompleteTriggerSite
-          ? [primaryProvider, primaryProvider, alternateProvider, alternateProvider]
-          : [primaryProvider, alternateProvider];
+        const providers: Array<"gemini" | "claude" | "kimi"> = retryCompleteTriggerSite
+          ? [primaryProvider, primaryProvider, alternateProvider, "kimi"]
+          : [primaryProvider, alternateProvider, "kimi"];
         let completed = false;
         for (let providerIndex = 0; providerIndex < providers.length; providerIndex++) {
           const provider = providers[providerIndex];
@@ -6641,7 +6663,9 @@ ${designAnalysis}
           try {
             const streamGen = provider === "gemini"
               ? geminiGenerateStream(conversationHistory, systemContent)
-              : kieGenerateStream(conversationHistory, systemContent, "high");
+              : provider === "kimi"
+                ? kimiGenerateStream(conversationHistory, systemContent)
+                : kieGenerateStream(conversationHistory, systemContent, "high");
             // Keepalive so proxies don't drop the SSE while the LLM is silent;
             // generation continues server-side even if the client already left.
             const keepAlive = setInterval(() => {
@@ -6665,8 +6689,8 @@ ${designAnalysis}
                 console.warn(`[KIE] ${provider} completed with empty response; retry → ${nextProvider}`);
                 res.write(`data: ${JSON.stringify({
                   status: nextProvider === provider
-                    ? `${provider === "gemini" ? "Gemini" : "Claude"} вернул пустой ответ — повторяю запрос…`
-                    : `${provider === "gemini" ? "Gemini" : "Claude"} вернул пустой ответ — переключаюсь на ${nextProvider === "gemini" ? "Gemini" : "Claude"}…`,
+                    ? `${provider === "gemini" ? "Gemini" : provider === "kimi" ? "Kimi K3" : "Claude"} вернул пустой ответ — повторяю запрос…`
+                    : `${provider === "gemini" ? "Gemini" : provider === "kimi" ? "Kimi K3" : "Claude"} вернул пустой ответ — переключаюсь на ${nextProvider === "gemini" ? "Gemini" : nextProvider === "kimi" ? "Kimi K3" : "Claude"}…`,
                 })}\n\n`);
                 continue;
               }
@@ -6686,7 +6710,7 @@ ${designAnalysis}
                 res.write(`data: ${JSON.stringify({
                   status: nextProvider === provider
                     ? "KIE вернул только Hero без полного сайта — повторяю запрос…"
-                    : `KIE снова вернул неполный сайт — переключаюсь на ${nextProvider === "gemini" ? "Gemini" : "Claude"}…`,
+                    : `KIE снова вернул неполный сайт — переключаюсь на ${nextProvider === "gemini" ? "Gemini" : nextProvider === "kimi" ? "Kimi K3" : "Claude"}…`,
                 })}\n\n`);
                 continue;
               }
@@ -6723,8 +6747,8 @@ ${designAnalysis}
             console.warn(`[KIE] ${provider} completed with error; retry → ${nextProvider}:`, providerErr?.message || providerErr);
             res.write(`data: ${JSON.stringify({
               status: nextProvider === provider
-                ? `${provider === "gemini" ? "Gemini" : "Claude"} вернул ошибку — повторяю запрос…`
-                : `${provider === "gemini" ? "Gemini" : "Claude"} вернул ошибку — переключаюсь на ${nextProvider === "gemini" ? "Gemini" : "Claude"}…`,
+                ? `${provider === "gemini" ? "Gemini" : provider === "kimi" ? "Kimi K3" : "Claude"} вернул ошибку — повторяю запрос…`
+                : `${provider === "gemini" ? "Gemini" : provider === "kimi" ? "Kimi K3" : "Claude"} вернул ошибку — переключаюсь на ${nextProvider === "gemini" ? "Gemini" : nextProvider === "kimi" ? "Kimi K3" : "Claude"}…`,
             })}\n\n`);
             if (isDefinitelyUnsentTransportError(providerErr)) {
               await new Promise((resolve) => setTimeout(resolve, 2000));
