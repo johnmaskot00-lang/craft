@@ -40,10 +40,10 @@ export const KIMI_K3_TIMEOUT_MS = Math.max(
   Number(process.env.KIMI_K3_TIMEOUT_MS || 10 * 60 * 1000) || 10 * 60 * 1000,
 );
 
-const apiKey = process.env.ROUTER_CHEAP_API_KEY?.trim();
+const apiKey = (process.env.NEW_API_KEY || process.env.ROUTER_CHEAP_API_KEY)?.trim();
 if (!apiKey) {
   console.warn(
-    "ROUTER_CHEAP_API_KEY not set — Anthropic/router.cheap agent V1 will not work. Set it in Amvera env.",
+    "NEW_API_KEY/ROUTER_CHEAP_API_KEY not set — Anthropic/router.cheap agent V1 will not work. Set NEW_API_KEY in Amvera env.",
   );
 }
 
@@ -53,19 +53,21 @@ export const anthropic = new Anthropic({
   baseURL: ROUTER_CHEAP_BASE_URL,
   timeout: ROUTER_CHEAP_TIMEOUT_MS,
   defaultHeaders: {
-    // Enable 1M context for agent V1 when the routed model supports it.
+    // Match Router Cheap's documented curl exactly.
+    "x-api-key": apiKey || "placeholder",
+    "anthropic-version": "2023-06-01",
     "anthropic-beta": "context-1m-2025-08-07",
   },
 });
 
 export function assertRouterCheapConfigured(): void {
-  if (!process.env.ROUTER_CHEAP_API_KEY?.trim()) {
+  if (!(process.env.NEW_API_KEY || process.env.ROUTER_CHEAP_API_KEY)?.trim()) {
     throw new Error("ROUTER_CHEAP_API_KEY missing");
   }
 }
 
 export function isRouterCheapConfigured(): boolean {
-  return Boolean(process.env.ROUTER_CHEAP_API_KEY?.trim());
+  return Boolean((process.env.NEW_API_KEY || process.env.ROUTER_CHEAP_API_KEY)?.trim());
 }
 
 export type AgentClaudeContent =
@@ -138,7 +140,7 @@ export async function kimiK3GenerateSync(opts: {
   systemPrompt: string;
   maxTokens?: number;
 }): Promise<string> {
-  const key = process.env.ROUTER_CHEAP_API_KEY?.trim();
+  const key = (process.env.NEW_API_KEY || process.env.ROUTER_CHEAP_API_KEY)?.trim();
   if (!key) throw new Error("ROUTER_CHEAP_API_KEY missing — Kimi fallback unavailable");
 
   const controller = new AbortController();
