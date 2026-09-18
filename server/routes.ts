@@ -496,7 +496,7 @@ function buildMp4ScrubClientJs(cid: string, opts: { splitText: boolean }): strin
     if(!video)return;
     var srcUrl=(root.getAttribute('data-video')||video.getAttribute('src')||'').trim();
     if(!srcUrl)return;
-    try{video.removeAttribute('src');}catch(e){}
+    // Keep src attached so native preload and HTTP Range start immediately.
     video.muted=true;video.playsInline=true;video.preload='auto';
     try{video.setAttribute('playsinline','');video.setAttribute('webkit-playsinline','');video.setAttribute('muted','');}catch(e){}
     var ready=false,seeking=false,want=0,blobUrl='',reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -534,18 +534,19 @@ function buildMp4ScrubClientJs(cid: string, opts: { splitText: boolean }): strin
       try{video.load();}catch(e){}
       if(video.readyState>=1)markReady();
     }
-    // Blob path (immersion/scroll-world): always seekable, no Range/moov dependency.
-    fetch(srcUrl,{credentials:'same-origin',mode:'cors'})
-      .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.blob();})
-      .then(function(blob){
-        if(!blob||!blob.size)throw new Error('empty blob');
-        blobUrl=URL.createObjectURL(blob);
-        attachSrc(blobUrl);
-      })
-      .catch(function(err){
-        console.warn('[craft-scrub] blob load failed, direct src fallback:',err&&err.message?err.message:err);
-        attachSrc(srcUrl);
-      });
+    // Native path first: preload/decode starts during HTML load. Blob is only a fallback.
+    attachSrc(srcUrl);
+    video.addEventListener('error',function(){
+      if(blobUrl)return;
+      fetch(srcUrl,{credentials:'same-origin',mode:'cors'})
+        .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.blob();})
+        .then(function(blob){
+          if(!blob||!blob.size)throw new Error('empty blob');
+          blobUrl=URL.createObjectURL(blob);
+          attachSrc(blobUrl);
+        })
+        .catch(function(err){console.warn('[craft-scrub] video fallback failed:',err&&err.message?err.message:err);});
+    },{once:true});
     function setP(p){
       p=Math.max(0,Math.min(1,p));
       want=reduce?0:p;
