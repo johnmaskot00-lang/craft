@@ -61,6 +61,16 @@ const PENDING_CREATE_KEY = "craft_pending_create_after_pay";
 /** Autosaved create-modal draft (prompt/title/mode) so closing the dialog doesn't lose typing. */
 const CREATE_DRAFT_KEY = "craft_create_modal_draft";
 
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 120_000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 type PendingCreateDraft = {
   title: string;
   description: string;
@@ -324,6 +334,7 @@ export default function DashboardPage() {
   const [selectedMode, setSelectedMode] = useState<"prompt" | "interactive" | "photo">("prompt");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const descriptionInputRef = useRef<HTMLTextAreaElement>(null);
   const [selectedTemplate, setSelectedTemplate] = useState("");
   const [selectedStyleTemplate, setSelectedStyleTemplate] = useState<UITemplate | null>(null);
   const [styleCategory, setStyleCategory] = useState("buttons");
@@ -592,7 +603,7 @@ export default function DashboardPage() {
       let mockupUrls: string[] = [];
       if (mode === "photo" && photos.length > 0) {
         for (const img of photos) {
-          const uploadResp = await fetch("/api/upload-image", {
+          const uploadResp = await fetchWithTimeout("/api/upload-image", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ base64: img.base64, mimeType: img.mimeType, name: "mockup" }),
@@ -605,7 +616,7 @@ export default function DashboardPage() {
       }
       let productUrl = "";
       if (mode === "interactive" && productImg) {
-        const uploadResp = await fetch("/api/upload-image", {
+        const uploadResp = await fetchWithTimeout("/api/upload-image", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ base64: productImg.base64, mimeType: productImg.mimeType, name: "product-ref" }),
@@ -753,7 +764,11 @@ export default function DashboardPage() {
       });
       return;
     }
-    createMutation.mutate(undefined);
+    const liveDescription = descriptionInputRef.current?.value ?? description;
+    if (liveDescription !== description) setDescription(liveDescription);
+    // React state updates are async; pass the live textarea value directly so
+    // the first create cannot accidentally submit the previous keystroke.
+    createMutation.mutate({ ...stashCreateDraft(), description: liveDescription });
   };
 
   const duplicateMutation = useMutation({
@@ -1789,8 +1804,9 @@ export default function DashboardPage() {
                             </div>
                             <Textarea
                               placeholder="Сайт SPA студии, в бежевых тонах, с картинкой в Hero секции, и плавной анимацией"
-                              value={description}
-                              onChange={e => { setDescription(e.target.value); if (isEnhanced) setIsEnhanced(false); }}
+                              ref={descriptionInputRef}
+                              defaultValue={description}
+                              onInput={() => { if (isEnhanced) setIsEnhanced(false); }}
                               className="rounded-xl font-medium text-gray-900 placeholder:text-gray-400 text-sm"
                               style={{ background: isEnhanced ? 'rgba(52,199,89,0.04)' : 'rgba(0,0,0,0.03)', border: isEnhanced ? '1px solid rgba(52,199,89,0.3)' : '1px solid rgba(0,0,0,0.08)', resize: 'none' }}
                             />
@@ -1902,8 +1918,9 @@ export default function DashboardPage() {
                               ? "Сделай сайт как у референса, но с моим товаром"
                               : "Сайт SPA студии, в бежевых тонах, с картинкой в Hero секции, и плавной анимацией"
                           }
-                          value={description}
-                          onChange={e => { setDescription(e.target.value); if (isEnhanced) setIsEnhanced(false); }}
+                          ref={descriptionInputRef}
+                          defaultValue={description}
+                          onInput={() => { if (isEnhanced) setIsEnhanced(false); }}
                           className="rounded-xl font-medium text-gray-900 placeholder:text-gray-400 text-sm flex-1"
                           style={{ background: isEnhanced ? 'rgba(52,199,89,0.04)' : 'rgba(0,0,0,0.03)', border: isEnhanced ? '1px solid rgba(52,199,89,0.3)' : '1px solid rgba(0,0,0,0.08)', resize: 'none', minHeight: selectedMode === "photo" ? 80 : 120 }}
                         />
@@ -2206,14 +2223,15 @@ export default function DashboardPage() {
                       type="button"
                       onClick={async () => {
                         if (isEnhancing || isResearching) return;
-                        if (!description.trim() || description.trim().length < 3) {
+                        const liveDescription = descriptionInputRef.current?.value ?? description;
+                        if (!liveDescription.trim() || liveDescription.trim().length < 3) {
                           toast({ title: "Введите описание", description: "Напишите хотя бы несколько слов для улучшения", variant: "destructive" });
                           return;
                         }
                         setIsEnhancing(true);
                         queryClient.setQueryData(["/api/auth/user"], (old: any) => old ? { ...old, credits: Math.max(0, old.credits - 5) } : old);
                         try {
-                          const res = await apiRequest("POST", "/api/enhance-prompt", { prompt: description });
+                          const res = await apiRequest("POST", "/api/enhance-prompt", { prompt: liveDescription });
                           const data = await res.json();
                           if (data.newBalance !== undefined) {
                             queryClient.setQueryData(["/api/auth/user"], (old: any) => old ? { ...old, credits: data.newBalance } : old);
@@ -2222,6 +2240,7 @@ export default function DashboardPage() {
                             toast({ title: "Внимание", description: data.warning });
                           } else if (data.enhancedPrompt) {
                             setDescription(data.enhancedPrompt);
+                            if (descriptionInputRef.current) descriptionInputRef.current.value = data.enhancedPrompt;
                             setIsEnhanced(true);
                             toast({ title: "Промпт улучшен!", description: "Проверьте описание и нажмите «Создать проект»" });
                           }
