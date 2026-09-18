@@ -4426,8 +4426,27 @@ async function enhancePromptOnly(query: string): Promise<{ enhancedPrompt: strin
     console.log("Enhanced prompt length:", enhancedPrompt.length);
     return { enhancedPrompt: enhancedPrompt.trim().length > 100 ? enhancedPrompt.trim() : query, success: true };
   } catch (err: any) {
-    console.error("Enhancement error:", err.message);
-    return { enhancedPrompt: query, success: false, confirmedKieFailure: isConfirmedKieApiFailure(err) };
+    console.error("Enhancement KIE error — trying Kimi K3 fallback:", err?.message || err);
+    try {
+      const kimiPrompt = `Тема сайта пользователя: "${query}"
+
+Создай детальный вдохновляющий промпт на русском языке для AI-генератора кода сайта.
+Опиши уникальную визуальную концепцию, структуру секций, конкретные цвета HEX,
+типографику, анимации и контент под эту тему. Объём 300–500 слов. Не пиши
+служебные пояснения и не повторяй эту инструкцию.`;
+      const kimiText = await kimiK3GenerateSync({
+        messages: [{ role: "user", content: kimiPrompt } as any],
+        systemPrompt: "Ты — творческий директор и UI/UX эксперт. Отвечай только на русском языке.",
+        maxTokens: 4096,
+      });
+      if (kimiText.trim().length > 100) {
+        console.log("Prompt enhancement completed through Kimi K3 fallback:", kimiText.length);
+        return { enhancedPrompt: kimiText.trim(), success: true };
+      }
+    } catch (kimiErr: any) {
+      console.error("Prompt enhancement Kimi fallback failed:", kimiErr?.message || kimiErr);
+    }
+    return { enhancedPrompt: query, success: false, confirmedKieFailure: true };
   }
 }
 
