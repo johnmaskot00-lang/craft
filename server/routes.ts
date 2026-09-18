@@ -5549,9 +5549,9 @@ export async function registerRoutes(
         // SSE already opened before the generate queue.
         res.write(`data: ${JSON.stringify({ status: "Анализирую сайт и готовлю ответ…" })}\n\n`);
 
-        const providers: Array<"gemini" | "claude"> = useGemini
-          ? ["gemini", "claude"]
-          : ["claude", "gemini"];
+        const providers: Array<"gemini" | "claude" | "kimi"> = useGemini
+          ? ["gemini", "claude", "kimi"]
+          : ["claude", "gemini", "kimi"];
         let chatReply = "";
         let lastChatError: any = null;
         for (let i = 0; i < providers.length; i++) {
@@ -5559,7 +5559,9 @@ export async function registerRoutes(
           try {
             const stream = provider === "gemini"
               ? geminiGenerateStream(chatHistory, chatSystemContent)
-              : kieGenerateStream(chatHistory, chatSystemContent, "high");
+              : provider === "kimi"
+                ? kimiGenerateStream(chatHistory, chatSystemContent)
+                : kieGenerateStream(chatHistory, chatSystemContent, "high");
             let candidate = "";
             for await (const chunk of stream) candidate += chunk;
             if (!candidate.trim()) {
@@ -5569,7 +5571,10 @@ export async function registerRoutes(
             break;
           } catch (chatErr: any) {
             lastChatError = chatErr;
-            if (i >= providers.length - 1 || !canSafelyFallbackKieModel(chatErr)) throw chatErr;
+            if (i >= providers.length - 1) throw chatErr;
+            // Kimi is the explicit last-resort provider. It is a new request and
+            // is safe to try even when the previous provider timed out.
+            if (!canSafelyFallbackKieModel(chatErr) && providers[i + 1] !== "kimi") throw chatErr;
             console.warn(`[AGENT CHAT] ${provider} failed, trying ${providers[i + 1]}:`, chatErr?.message || chatErr);
           }
         }
@@ -6738,9 +6743,12 @@ ${designAnalysis}
           } catch (providerErr: any) {
             lastError = providerErr;
             const hasNext = providerIndex < providers.length - 1;
-            if (!hasNext || !canSafelyFallbackKieModel(providerErr)) {
-              // No replay after timeout/socket disconnect: KIE may still be
-              // processing candidateResponse in the original task.
+            if (!hasNext) throw providerErr;
+            // The next provider is a separate fallback request. In particular,
+            // Kimi must still be tried when KIE/Router Cheap timed out before
+            // producing a usable answer; never hide that fallback behind the
+            // duplicate-request guard used for same-provider retries.
+            if (!canSafelyFallbackKieModel(providerErr) && providers[providerIndex + 1] !== "kimi") {
               throw providerErr;
             }
             const nextProvider = providers[providerIndex + 1];
