@@ -7821,7 +7821,7 @@ ${designAnalysis}
           genBilled &&
           billedUserId &&
           generationCost > 0 &&
-          (isEditMode || shouldRefundGenerationAttempt(err) || localStorageFailure)
+          (generationCost === 30 || shouldRefundGenerationAttempt(err) || localStorageFailure)
         ) {
           await storage.refundCredits(billedUserId, generationCost, genIkeyForRefund);
           refunded = true;

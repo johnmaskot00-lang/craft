@@ -27,6 +27,13 @@ export const ROUTER_CHEAP_MAX_TOKENS = Math.max(
   Number(process.env.ROUTER_CHEAP_MAX_TOKENS || 32000) || 32000,
 );
 
+// Opus can legitimately spend several minutes producing a large patch/tool round.
+// The SDK default timeout otherwise surfaces as the unhelpful "Request timed out".
+export const ROUTER_CHEAP_TIMEOUT_MS = Math.max(
+  120_000,
+  Number(process.env.ROUTER_CHEAP_TIMEOUT_MS || 30 * 60 * 1000) || 30 * 60 * 1000,
+);
+
 const apiKey = process.env.ROUTER_CHEAP_API_KEY?.trim();
 if (!apiKey) {
   console.warn(
@@ -38,6 +45,7 @@ if (!apiKey) {
 export const anthropic = new Anthropic({
   apiKey: apiKey || "placeholder",
   baseURL: ROUTER_CHEAP_BASE_URL,
+  timeout: ROUTER_CHEAP_TIMEOUT_MS,
   defaultHeaders: {
     // Enable 1M context for agent V1 when the routed model supports it.
     "anthropic-beta": "context-1m-2025-08-07",
