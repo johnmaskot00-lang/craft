@@ -513,7 +513,21 @@ export default function EditorPage() {
     const code = project.generatedCode || "";
     const waitingSite = isCraftGeneratingHtml(code);
     const waitingAnim = code.includes('data-scroll-anim-pending="1"');
-    if (!waitingSite && !waitingAnim) return;
+    // A durable job can outlive the SSE and may already have written the final
+    // HTML, so refresh the status once even when no placeholder is visible.
+    // This is what makes a browser reload safe during V1/V2 generation.
+    if (!waitingSite && !waitingAnim) {
+      void fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" })
+        .then((r) => r.ok ? r.json() : null)
+        .then((status) => {
+          if (status?.active && !animPollRef.current) {
+            setIsGenerating(true);
+            setGenerationStatus("Генерация продолжается на сервере…");
+          }
+        })
+        .catch(() => undefined);
+      return;
+    }
     if (animPollRef.current) return; // poll already running (from live generation)
 
     if (waitingSite) {

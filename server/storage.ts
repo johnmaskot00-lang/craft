@@ -1,4 +1,4 @@
-﻿import { db } from "./db";
+import { db } from "./db";
 import { users, projects, projectMessages, projectImages, projectVersions, projectFiles, leads, creditTransactions, paymentOrders, promoCodes, promoRedemptions, referralRewards, referralExchanges, type User, type InsertUser, type Project, type InsertProject, type ProjectMessage, type InsertProjectMessage, type ProjectImage, type InsertProjectImage, type ProjectVersion, type InsertProjectVersion, type ProjectFile, type InsertProjectFile, type Lead, type InsertLead, type CreditTransaction, type PaymentOrder, type PromoCode, type ReferralExchange } from "@shared/schema";
 import { eq, desc, and, sql, gte, isNull } from "drizzle-orm";
 import crypto from "crypto";
@@ -310,8 +310,10 @@ export class DatabaseStorage implements IStorage {
   }
 
   async refundCredits(userId: number, amount: number, idempotencyKey?: string): Promise<number> {
-    // When an idempotency key is provided: credit at most once per key, and rename the
-    // original debit row so a retry with the same key charges again (no free replay).
+    // Every refund must be tied to the original debit. An unkeyed refund can be
+    // replayed by duplicate callbacks and mint credits, so fail closed.
+    if (!idempotencyKey) throw new Error("REFUND_IDEMPOTENCY_KEY_REQUIRED");
+    // Credit at most once per original debit key.
     if (idempotencyKey) {
       return await db.transaction(async (tx) => {
         const refundKey = `refund:${idempotencyKey}`;
@@ -347,12 +349,6 @@ export class DatabaseStorage implements IStorage {
         return rows?.[0]?.credits ?? 0;
       });
     }
-
-    const result = await db.execute(
-      sql`UPDATE users SET credits = credits + ${amount} WHERE id = ${userId} RETURNING credits`
-    );
-    const rows = result.rows as Array<{ credits: number }>;
-    return rows?.[0]?.credits ?? 0;
   }
 
   async addCredits(userId: number, amount: number): Promise<number> {

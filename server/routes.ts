@@ -99,7 +99,7 @@ import {
 } from "./version-blob-backfill";
 import { withSingletonLease } from "./singleton-lease";
 import { buildOmniVideoRequest, kieVideoResolution } from "./kie-video-model";
-import { redisEnabled } from "./redis";
+import { redisEnabled, redisAcquireLease, redisReleaseLease } from "./redis";
 import { assertPublicHttpUrl, safeFetch } from "./url-guard";
 import { isPublishableProjectFile } from "@shared/project-files";
 import { applyClientGeoToPublishFiles, sitePublicOrigin } from "./site-geo";
@@ -2740,14 +2740,14 @@ async function resolveAnimationalMarkers(
         } catch {}
       } else if (billed && userId) {
         try {
-          await storage.refundCredits(userId, SCROLL_ANIMATIONAL_COST);
+          await storage.refundCredits(userId, SCROLL_ANIMATIONAL_COST, ikey);
         } catch {}
       }
     } catch (e: any) {
       console.error("[ANI] resolve failed:", e?.message || e);
       if (billed && userId) {
         try {
-          await storage.refundCredits(userId, SCROLL_ANIMATIONAL_COST);
+          await storage.refundCredits(userId, SCROLL_ANIMATIONAL_COST, ikey);
         } catch {}
       }
     }
@@ -2881,7 +2881,7 @@ async function resolveScrollAnimMarkers(
         if (billed) creditsUsed += blockCost;
         try { res.write(`data: ${JSON.stringify({ status: `Мир готов (${world.mp4Urls.length} роликов, ${world.stillUrls.length} сцен)` })}\n\n`); } catch {}
       } else if (billed && userId) {
-        try { await storage.refundCredits(userId, blockCost); } catch {}
+        try { await storage.refundCredits(userId, blockCost, ikey); } catch {}
       }
       continue;
     }
@@ -2929,7 +2929,7 @@ async function resolveScrollAnimMarkers(
           );
         } catch {}
       } else if (billed && userId) {
-        try { await storage.refundCredits(userId, blockCost); } catch {}
+        try { await storage.refundCredits(userId, blockCost, ikey); } catch {}
       }
       continue;
     }
@@ -4969,11 +4969,15 @@ export async function registerRoutes(
         return res.status(403).json({ message: "Доступ запрещён" });
       }
       const active = activeProjectGenerations.get(projectId);
-      // Orphan placeholder: DB says "generating" but this process has no in-flight job
-      // (typical after Amvera SIGTERM / redeploy mid-LLM). Clear so the client can retry.
+      // The in-memory map belongs to one API replica only. Always consult the
+      // shared durable jobs before clearing a placeholder: after a refresh the
+      // request may be running on the other replica.
+      const activeJobs = await listProjectJobs(projectId, { activeOnly: true, limit: 3 }).catch(() => []);
+      // Orphan placeholder: DB says "generating", no local work, and no durable
+      // work on either replica. Only then is it safe to clear the placeholder.
       let orphanPlaceholder = false;
       let generatingPlaceholder = meta.generatingPlaceholder;
-      if (generatingPlaceholder && !active && !meta.animPending) {
+      if (generatingPlaceholder && !active && activeJobs.length === 0 && !meta.animPending) {
         orphanPlaceholder = true;
         generatingPlaceholder = false;
         try {
@@ -4983,7 +4987,6 @@ export async function registerRoutes(
           console.warn(`[GEN-STATUS] orphan clear failed for ${projectId}:`, e?.message || e);
         }
       }
-      const activeJobs = await listProjectJobs(projectId, { activeOnly: true, limit: 3 }).catch(() => []);
       res.json({
         // Real in-memory work only — never lie "active" for a dead placeholder after restart.
         active: !!active || meta.animPending || activeJobs.length > 0,
@@ -5291,6 +5294,8 @@ export async function registerRoutes(
     let dropGenerateSlot: (() => void) | null = null;
     let projectGenerationToken: symbol | null = null;
     let projectGenerationContinuesInBackground = false;
+    let distributedGenerationToken: string | null = null;
+    let distributedGenerationLeaseHeld = false;
     let durableJobId: number | null = null;
     try {
       const project = await storage.getProject(parseInt(req.params.id));
@@ -5316,6 +5321,13 @@ export async function registerRoutes(
         });
       }
       projectGenerationToken = Symbol(`project-generation-${project.id}`);
+      distributedGenerationToken = `${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`;
+      if (redisEnabled()) {
+        distributedGenerationLeaseHeld = await redisAcquireLease(`project:${project.id}`, distributedGenerationToken, ACTIVE_GENERATION_MAX_MS + 60_000);
+        if (!distributedGenerationLeaseHeld) {
+          return res.status(409).json({ message: "Генерация этого сайта уже выполняется на другом сервере.", generating: true, editInProgress: true });
+        }
+      }
       const bodyAgentVersion = req.body?.agentVersion;
       const bodyMockupMode = !!req.body?.mockupMode;
       const bodyInteractive = !!req.body?.interactiveMode;
@@ -7935,6 +7947,10 @@ ${designAnalysis}
         activeProjectGenerations.get(generateProjectId)?.token === projectGenerationToken
       ) {
         activeProjectGenerations.delete(generateProjectId);
+      }
+      if (distributedGenerationLeaseHeld && distributedGenerationToken && generateProjectId && !projectGenerationContinuesInBackground) {
+        void redisReleaseLease(`project:${generateProjectId}`, distributedGenerationToken);
+        distributedGenerationLeaseHeld = false;
       }
       if (durableJobId && !projectGenerationContinuesInBackground) {
         const st = await getGenerationJob(durableJobId).catch(() => null);
