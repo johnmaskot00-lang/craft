@@ -32,9 +32,10 @@ export interface IStorage {
   updateUserCredits(id: number, credits: number): Promise<User | undefined>;
   deductCredits(userId: number, amount: number, operation: string, idempotencyKey: string): Promise<{ success: boolean; newBalance: number; alreadyProcessed?: boolean; conflict?: boolean }>;
   /** Refund credits and invalidate the debit idempotency key so the same key cannot free-replay. */
-  refundCredits(userId: number, amount: number, idempotencyKey?: string): Promise<number>;
+  refundCredits(userId: number, amount: number, idempotencyKey: string): Promise<number>;
   addCredits(userId: number, amount: number): Promise<number>;
   creditPayment(userId: number, amount: number, idempotencyKey: string, note: string): Promise<{ credited: boolean; newBalance: number }>;
+  settlePaymentOrder(orderId: number, userId: number, amount: number, tokens: number, paymentProviderId: string, note: string): Promise<{ already: boolean; credited: boolean; newBalance: number }>;
 
   getProject(id: number): Promise<Project | undefined>;
   getProjectsByUser(userId: number): Promise<Project[]>;
@@ -309,12 +310,11 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-  async refundCredits(userId: number, amount: number, idempotencyKey?: string): Promise<number> {
+  async refundCredits(userId: number, amount: number, idempotencyKey: string): Promise<number> {
     // Every refund must be tied to the original debit. An unkeyed refund can be
     // replayed by duplicate callbacks and mint credits, so fail closed.
     if (!idempotencyKey) throw new Error("REFUND_IDEMPOTENCY_KEY_REQUIRED");
     // Credit at most once per original debit key.
-    if (idempotencyKey) {
       return await db.transaction(async (tx) => {
         const refundKey = `refund:${idempotencyKey}`;
         const inserted = await tx.insert(creditTransactions).values({
@@ -348,7 +348,6 @@ export class DatabaseStorage implements IStorage {
         const rows = result.rows as Array<{ credits: number }>;
         return rows?.[0]?.credits ?? 0;
       });
-    }
   }
 
   async addCredits(userId: number, amount: number): Promise<number> {
@@ -384,6 +383,27 @@ export class DatabaseStorage implements IStorage {
       );
       const rows = result.rows as Array<{ credits: number }>;
       return { credited: true, newBalance: rows?.[0]?.credits ?? 0 };
+    });
+  }
+
+  async settlePaymentOrder(orderId: number, userId: number, amount: number, tokens: number, paymentProviderId: string, note: string): Promise<{ already: boolean; credited: boolean; newBalance: number }> {
+    return db.transaction(async (tx) => {
+      const locked = await tx.execute(sql`SELECT * FROM payment_orders WHERE id = ${orderId} FOR UPDATE`);
+      const order = (locked.rows as any[])[0];
+      if (!order || Number(order.user_id) != userId) throw new Error("PAYMENT_ORDER_MISMATCH");
+      if (Number(order.amount) != amount) throw new Error("PAYMENT_AMOUNT_MISMATCH");
+      if (order.status === "paid") {
+        const [user] = await tx.select().from(users).where(eq(users.id, userId));
+        return { already: true, credited: false, newBalance: user?.credits ?? 0 };
+      }
+      const key = `payment_${orderId}`;
+      const inserted = await tx.insert(creditTransactions).values({ userId, amount: tokens, type: "credit", operation: "payment", note, idempotencyKey: key }).onConflictDoNothing().returning();
+      const balanceRows = inserted.length
+        ? await tx.execute(sql`UPDATE users SET credits = credits + ${tokens} WHERE id = ${userId} RETURNING credits`)
+        : await tx.execute(sql`SELECT credits FROM users WHERE id = ${userId}`);
+      const balance = Number((balanceRows.rows as any[])?.[0]?.credits ?? 0);
+      await tx.execute(sql`UPDATE payment_orders SET status = 'paid', order_id = ${paymentProviderId}, paid_at = CURRENT_TIMESTAMP WHERE id = ${orderId}`);
+      return { already: false, credited: inserted.length > 0, newBalance: balance };
     });
   }
 

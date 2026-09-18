@@ -175,7 +175,7 @@ async function refundIfConfirmedKie(
   errOrFlag: unknown,
   label: string,
 ): Promise<boolean> {
-  if (!billed || !userId || amount <= 0) return false;
+  if (!billed || !userId || amount <= 0 || !ikey) return false;
   const ok =
     errOrFlag === true ||
     (typeof errOrFlag === "boolean" ? errOrFlag : isConfirmedKieApiFailure(errOrFlag));
@@ -10097,27 +10097,23 @@ ${fullHtml}`;
   ];
 
   async function creditPaidOrder(order: { id: number; userId: number; amount: number; tokens: number; status: string }, yooPaymentId: string) {
-    if (order.status === "paid") return { already: true as const };
-    await storage.updatePaymentOrderStatus(order.id, "paid", yooPaymentId, new Date());
-    const payResult = await storage.creditPayment(
+    const result = await storage.settlePaymentOrder(
+      order.id,
       order.userId,
+      order.amount,
       order.tokens,
-      `payment_${order.id}`,
+      yooPaymentId,
       `Оплата ${order.amount}₽ — ${order.tokens} токенов`,
     );
-    console.log(`[Payment] User ${order.userId} credited ${order.tokens} tokens (order ${order.id}, yoo=${yooPaymentId})`);
-    if (payResult.credited) {
+    console.log(`[Payment] settlement order=${order.id} credited=${result.credited} already=${result.already}`);
+    if (result.credited) {
       try {
-        await storage.awardReferralForPayment({
-          id: order.id,
-          userId: order.userId,
-          tokens: order.tokens,
-        });
+        await storage.awardReferralForPayment({ id: order.id, userId: order.userId, tokens: order.tokens });
       } catch (refErr: any) {
         console.error("[Referral] award failed:", refErr?.message || refErr);
       }
     }
-    return { already: false as const };
+    return result;
   }
 
   async function settleYooPayment(payment: YooPayment): Promise<"paid" | "pending" | "canceled" | "ignored"> {

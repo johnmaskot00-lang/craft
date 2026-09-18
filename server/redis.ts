@@ -90,3 +90,18 @@ export async function redisRateLimit(
     return null;
   }
 }
+
+/** Distributed per-project generation lease for multi-instance API. */
+export async function redisAcquireLease(key: string, token: string, ttlMs: number): Promise<boolean> {
+  const r = getRedis();
+  if (!r) return false;
+  try { return (await r.set(`craft:lease:${key}`, token, "PX", Math.max(5000, ttlMs), "NX")) === "OK"; } catch { return false; }
+}
+
+export async function redisReleaseLease(key: string, token: string): Promise<void> {
+  const r = getRedis();
+  if (!r) return;
+  try {
+    await r.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", 1, `craft:lease:${key}`, token);
+  } catch { /* best effort */ }
+}

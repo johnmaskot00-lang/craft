@@ -33,12 +33,16 @@ let ticking = false;
 const DEFAULT_KINDS: JobKind[] = ["publish"];
 
 export async function processOneJob(kinds: JobKind[] = DEFAULT_KINDS): Promise<boolean> {
-  const job = await claimNextQueuedJob(kinds);
+  // claimNextQueuedJob is restricted to the kinds passed by this worker;
+  // unsupported jobs remain queued for a capable worker instead of being failed.
+  const supported = kinds.filter((kind) => handlers.has(kind));
+  if (!supported.length) return false;
+  const job = await claimNextQueuedJob(supported);
   if (!job) return false;
   const handler = handlers.get(job.kind);
   if (!handler) {
-    await failGenerationJob(job.id, `No handler for kind=${job.kind}`);
-    return true;
+    console.warn(`[worker] claimed unsupported kind=${job.kind}; leaving it queued`);
+    return false;
   }
   try {
     const result = await handler({

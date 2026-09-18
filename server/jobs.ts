@@ -24,6 +24,9 @@ export function priorityForKind(kind: JobKind): number {
   }
 }
 
+const WORKER_ID = `${process.env.HOSTNAME || "api"}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+const JOB_LEASE_MS = Math.max(60_000, Number(process.env.CRAFT_JOB_LEASE_MS) || 15 * 60_000);
+
 let tableReady: Promise<void> | null = null;
 
 export async function ensureGenerationJobsTable(): Promise<void> {
@@ -45,9 +48,27 @@ export async function ensureGenerationJobsTable(): Promise<void> {
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           started_at TIMESTAMP,
-          finished_at TIMESTAMP
+          finished_at TIMESTAMP,
+          lease_until TIMESTAMP,
+          worker_id TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0
         )
       `);
+      for (const stmt of [
+        sql`ALTER TABLE generation_jobs ADD COLUMN IF NOT EXISTS lease_until timestamp`,
+        sql`ALTER TABLE generation_jobs ADD COLUMN IF NOT EXISTS worker_id text`,
+        sql`ALTER TABLE generation_jobs ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0`,
+      ]) await db.execute(stmt).catch(() => undefined);
+      await db.execute(sql`
+        UPDATE generation_jobs
+        SET state = 'queued', lease_until = NULL, worker_id = NULL,
+            error = COALESCE(error, 'worker lease expired')
+        WHERE state = 'running' AND lease_until IS NOT NULL AND lease_until < CURRENT_TIMESTAMP
+      `).catch(() => undefined);
+      await db.execute(sql`
+        CREATE INDEX IF NOT EXISTS generation_jobs_lease_idx
+        ON generation_jobs (state, lease_until)
+      `).catch(() => undefined);
       await db.execute(sql`
         CREATE INDEX IF NOT EXISTS generation_jobs_claim_idx
         ON generation_jobs (state, priority ASC, id ASC)
@@ -194,10 +215,13 @@ export async function claimNextQueuedJob(
     UPDATE generation_jobs
     SET state = 'running',
         started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
-        updated_at = CURRENT_TIMESTAMP
+        updated_at = CURRENT_TIMESTAMP,
+        lease_until = CURRENT_TIMESTAMP + (${Math.ceil(JOB_LEASE_MS / 1000)} || ' seconds')::interval,
+        worker_id = ${WORKER_ID},
+        attempts = attempts + 1
     WHERE id = (
       SELECT id FROM generation_jobs
-      WHERE state = 'queued'
+      WHERE (state = 'queued' OR (state = 'running' AND lease_until < CURRENT_TIMESTAMP))
       ${kindFilter}
       ORDER BY priority ASC, id ASC
       FOR UPDATE SKIP LOCKED
@@ -224,6 +248,9 @@ export async function claimNextQueuedJob(
     updatedAt: r.updated_at,
     startedAt: r.started_at,
     finishedAt: r.finished_at,
+    leaseUntil: r.lease_until,
+    workerId: r.worker_id,
+    attempts: r.attempts || 0,
   } as GenerationJob;
 }
 
