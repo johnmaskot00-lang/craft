@@ -222,6 +222,7 @@ export async function claimNextQueuedJob(
     WHERE id = (
       SELECT id FROM generation_jobs
       WHERE (state = 'queued' OR (state = 'running' AND lease_until < CURRENT_TIMESTAMP))
+        AND attempts < 3
       ${kindFilter}
       ORDER BY priority ASC, id ASC
       FOR UPDATE SKIP LOCKED
