@@ -334,6 +334,8 @@ export default function DashboardPage() {
   const [selectedMode, setSelectedMode] = useState<"prompt" | "interactive" | "photo">("prompt");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  // Track only the empty/non-empty transition so typing stays native and fast.
+  const [descriptionHasText, setDescriptionHasText] = useState(false);
   const descriptionInputRef = useRef<HTMLTextAreaElement>(null);
   const [selectedTemplate, setSelectedTemplate] = useState("");
   const [selectedStyleTemplate, setSelectedStyleTemplate] = useState<UITemplate | null>(null);
@@ -383,6 +385,7 @@ export default function DashboardPage() {
         } catch { /* ignore */ }
         setTitle(draft.title || "");
         setDescription(draft.description || "");
+    setDescriptionHasText(!!draft.description?.trim());
         setSelectedMode(draft.selectedMode || "prompt");
         setInteractiveStyle(normalizeInteractiveStyle(draft.interactiveStyle));
         setIsEnhanced(!!draft.isEnhanced);
@@ -1806,7 +1809,11 @@ export default function DashboardPage() {
                               placeholder="Сайт SPA студии, в бежевых тонах, с картинкой в Hero секции, и плавной анимацией"
                               ref={descriptionInputRef}
                               defaultValue={description}
-                              onInput={() => { if (isEnhanced) setIsEnhanced(false); }}
+                              onInput={(e) => {
+                            const hasText = e.currentTarget.value.trim().length > 0;
+                            if (hasText !== descriptionHasText) setDescriptionHasText(hasText);
+                            if (isEnhanced) setIsEnhanced(false);
+                          }}
                               className="rounded-xl font-medium text-gray-900 placeholder:text-gray-400 text-sm"
                               style={{ background: isEnhanced ? 'rgba(52,199,89,0.04)' : 'rgba(0,0,0,0.03)', border: isEnhanced ? '1px solid rgba(52,199,89,0.3)' : '1px solid rgba(0,0,0,0.08)', resize: 'none' }}
                             />
@@ -1920,7 +1927,11 @@ export default function DashboardPage() {
                           }
                           ref={descriptionInputRef}
                           defaultValue={description}
-                          onInput={() => { if (isEnhanced) setIsEnhanced(false); }}
+                          onInput={(e) => {
+                            const hasText = e.currentTarget.value.trim().length > 0;
+                            if (hasText !== descriptionHasText) setDescriptionHasText(hasText);
+                            if (isEnhanced) setIsEnhanced(false);
+                          }}
                           className="rounded-xl font-medium text-gray-900 placeholder:text-gray-400 text-sm flex-1"
                           style={{ background: isEnhanced ? 'rgba(52,199,89,0.04)' : 'rgba(0,0,0,0.03)', border: isEnhanced ? '1px solid rgba(52,199,89,0.3)' : '1px solid rgba(0,0,0,0.08)', resize: 'none', minHeight: selectedMode === "photo" ? 80 : 120 }}
                         />
@@ -2240,6 +2251,7 @@ export default function DashboardPage() {
                             toast({ title: "Внимание", description: data.warning });
                           } else if (data.enhancedPrompt) {
                             setDescription(data.enhancedPrompt);
+                            setDescriptionHasText(!!data.enhancedPrompt?.trim());
                             if (descriptionInputRef.current) descriptionInputRef.current.value = data.enhancedPrompt;
                             setIsEnhanced(true);
                             toast({ title: "Промпт улучшен!", description: "Проверьте описание и нажмите «Создать проект»" });
@@ -2250,9 +2262,9 @@ export default function DashboardPage() {
                           toast({ title: "Ошибка", description: msg, variant: "destructive" });
                         } finally { setIsEnhancing(false); }
                       }}
-                      disabled={isEnhancing || isResearching || !description.trim()}
-                      className={`h-10 flex items-center justify-center gap-1.5 font-semibold text-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed${!isEnhanced && !isEnhancing && description.trim() ? ' db-enhance-btn' : ''}`}
-                      style={{ border: isEnhanced ? '1px solid rgba(52,199,89,0.4)' : (!description.trim() ? '1.5px dashed rgba(0,0,0,0.12)' : undefined), background: isEnhanced ? 'rgba(52,199,89,0.06)' : undefined, color: isEnhanced ? '#1D8348' : (description.trim() && !isEnhancing ? undefined : '#86868B'), borderRadius: 12, cursor: 'pointer' }}
+                      disabled={isEnhancing || isResearching || !descriptionHasText}
+                      className={`h-10 flex items-center justify-center gap-1.5 font-semibold text-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed${!isEnhanced && !isEnhancing && descriptionHasText ? ' db-enhance-btn' : ''}`}
+                      style={{ border: isEnhanced ? '1px solid rgba(52,199,89,0.4)' : (!descriptionHasText ? '1.5px dashed rgba(0,0,0,0.12)' : undefined), background: isEnhanced ? 'rgba(52,199,89,0.06)' : undefined, color: isEnhanced ? '#1D8348' : (descriptionHasText && !isEnhancing ? undefined : '#86868B'), borderRadius: 12, cursor: 'pointer' }}
                     >
                       {isEnhancing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : isEnhanced ? <Sparkles className="w-3.5 h-3.5" /> : <Wand2 className="w-3.5 h-3.5" />}
                       {isEnhancing ? 'Улучшаем...' : isEnhanced ? 'Улучшено' : 'AI улучшение'}
