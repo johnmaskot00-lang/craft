@@ -885,11 +885,11 @@ export default function EditorPage() {
         if (response.status === 409 && errData?.editInProgress) {
           toast({
             title: "Предыдущая генерация ещё выполняется",
-            description: errData?.message || "Дождитесь ответа KIE перед новым запросом.",
+            description: "Предыдущая задача ещё выполняется. Мы сохраним результат автоматически — можно продолжить работу через несколько минут.",
           });
           handledWithoutStream = true;
           // Track the in-flight edit until server lock clears, then refresh preview.
-          setGenerationStatus(errData?.message || "Ждём ответ предыдущего запроса…");
+          setGenerationStatus("Предыдущая задача ещё выполняется — результат сохранится автоматически…");
           const pollStart = Date.now();
           await new Promise<void>((resolve) => {
             if (animPollRef.current) clearInterval(animPollRef.current);
@@ -1229,7 +1229,7 @@ export default function EditorPage() {
             queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
             toast({
               title: "Запрос не дошёл до сервера",
-              description: "Соединение прервалось до запуска KIE. Повторите запрос — списания не будет.",
+              description: "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0437\u0430\u043f\u0440\u043e\u0441. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0441\u043e\u0435\u0434\u0438\u043d\u0435\u043d\u0438\u0435 \u0438 \u043f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u043f\u043e\u043f\u044b\u0442\u043a\u0443 \u2014 \u0441\u043f\u0438\u0441\u0430\u043d\u0438\u044f \u043d\u0435 \u0431\u0443\u0434\u0435\u0442.",
               variant: "destructive",
             });
           }
@@ -2109,7 +2109,7 @@ export default function EditorPage() {
               queryClient.invalidateQueries({ queryKey: ["/api/auth/user"] });
             }
             if (statusData.refunded) {
-              toast({ title: "Токены возвращены", description: "Сбой KIE API при генерации изображения" });
+              toast({ title: "\u0422\u043e\u043a\u0435\u043d\u044b \u0432\u043e\u0437\u0432\u0440\u0430\u0449\u0435\u043d\u044b", description: "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u0438\u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u0435. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437." });
             }
           }
         } catch {

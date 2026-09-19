@@ -279,6 +279,22 @@ export function buildPagesContext(
   return { context: parts.join("\n"), base64Maps };
 }
 
+/** Build a compact cross-page comparison of the shared site chrome. */
+export function buildSharedChromeContext(pages: SitePage[], maxPerPage = 7000): string {
+  const htmlPages = pages.filter((p) => isHtmlPage(p.filename));
+  if (htmlPages.length < 2) return "";
+  const blocks = htmlPages.map((page) => {
+    const code = page.code || "";
+    const header = code.match(/<header\b[\s\S]*?<\/header>/i)?.[0] || "";
+    const nav = code.match(/<nav\b[\s\S]*?<\/nav>/i)?.[0] || "";
+    const footer = code.match(/<footer\b[\s\S]*?<\/footer>/i)?.[0] || "";
+    const shell = [header, nav && !header.includes(nav) ? nav : "", footer].filter(Boolean).join("\n");
+    const clipped = shell.length > maxPerPage ? `${shell.slice(0, maxPerPage)}\n...[shared shell clipped]` : shell;
+    return `\n--- SHARED SHELL: ${page.filename} ---\n${clipped || "[header/nav/footer not found]"}`;
+  });
+  return `=== SHARED MENU COMPARISON FOR ALL PAGES ===${blocks.join("\n")}\n=== END SHARED MENU COMPARISON ===`;
+}
+
 /** Extract shared shell (nav + footer) from SEO page HTML for compact agent context. */
 export function extractSeoPageShell(code: string): string {
   const nav = code.match(/<nav[\s\S]*?<\/nav>/i)?.[0] || "";
@@ -384,6 +400,8 @@ ${"═".repeat(43)}
 11. Не удаляй magazine-art-v6 / structural-guard-v9 (или v8). Без горизонтального скролла и микротекста.
 
 ${manifest}
+
+${sharedChrome}
 
 ═══ ИСХОДНЫЙ КОД ═══
 ${context}
@@ -640,6 +658,7 @@ export function buildMultipageEditSystemPrompt(opts: {
 }): string {
   const manifest = buildSiteManifest(opts.pages, opts.craftMd);
   const { context } = buildPagesContext(opts.pages, opts.activeFile);
+  const sharedChrome = buildSharedChromeContext(opts.pages);
 
   let prompt = opts.baseSystem;
   prompt += `\n\n${"═".repeat(43)}
@@ -651,7 +670,9 @@ ${"═".repeat(43)}
 1. Меняй только то, что просит пользователь; сохраняй nav/footer и ссылки между страницами
 2. Если в запросе указан конкретный блок (hero, «Выбранный элемент», section#id, class) — правь ТОЛЬКО его. Не переписывай соседние секции «заодно»
 3. Плейсхолдеры __B64_N__ — изображения. НЕ удаляй и НЕ меняй их
-4. Если правка затрагивает общий стиль/навигацию — обнови все затронутые страницы
+4. If the request changes shared navigation, update EVERY HTML page containing the duplicated header/nav, not only the active tab. Compare the SHARED MENU COMPARISON block first.
+5. For an identical-menu request, use index.html header/nav as the source of truth and patch every differing secondary page while preserving unique content, title, canonical, and links. One patch to index.html is not enough.
+6. Re-check every HTML file before finishing: menu items, order, URLs, logo, and active state must match.
 5. Запрещено вызывать finish без реального apply_patch/write_page, который меняет код
 6. Запрещены no-op патчи (SEARCH == REPLACE) и патчи «ради галочки»
 7. ИНТЕРАКТИВНЫЙ HERO: секции с data-craft-scrollanim / data-frames / data-video / data-base / data-reveal / data-base-m / data-reveal-m / data-craft-motion и следующие за ними <style>/<script> — НЕ удаляй и НЕ переписывай целиком, если пользователь явно не просит убрать анимацию. Меняй только текст оверлеев. Не подменяй /objects/... на внешние стоки (Vimeo и т.п.)
