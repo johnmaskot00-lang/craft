@@ -4627,6 +4627,7 @@ export async function registerRoutes(
   `).catch((e: any) => console.warn("[boot] credits index:", e?.message?.slice?.(0, 120) || e));
   // Leads are counted per user every minute by the dashboard badge, and images /
   // payments are listed per user — all of these were sequential scans.
+  await db.execute(sql`CREATE UNIQUE INDEX IF NOT EXISTS payment_orders_order_id_uniq ON payment_orders (order_id) WHERE order_id IS NOT NULL`).catch(() => undefined);
   for (const [label, stmt] of [
     ["leads project", sql`CREATE INDEX IF NOT EXISTS leads_project_created_idx ON leads (project_id, created_at DESC)`],
     ["leads unread", sql`CREATE INDEX IF NOT EXISTS leads_project_unread_idx ON leads (project_id) WHERE is_read = 0`],
@@ -4775,7 +4776,7 @@ export async function registerRoutes(
     try {
       let upstream: Response | null = null;
       for (const candidate of customDomainStorageCandidates(filePath)) {
-        const resp = await fetch(`https://storage.yandexcloud.net/${bucket}${candidate}`);
+        const resp = await fetch(`https://storage.yandexcloud.net/${bucket}${candidate}`, { signal: AbortSignal.timeout(30000) });
         if (resp.ok) {
           upstream = resp;
           break;

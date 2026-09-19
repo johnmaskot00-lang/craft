@@ -58,11 +58,21 @@ async function yooFetch<T = any>(
   };
   if (idempotenceKey) headers["Idempotence-Key"] = idempotenceKey;
 
-  const resp = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  const controller = new AbortController();
+  const timeoutMs = Math.max(5000, Number(process.env.YOOKASSA_TIMEOUT_MS) || 30000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  timer.unref?.();
+  let resp: Response;
+  try {
+    resp = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   const data = (await resp.json().catch(() => ({}))) as any;
   if (!resp.ok) {
     const desc = data?.description || data?.code || resp.statusText;
