@@ -1,0 +1,21 @@
+﻿meta:
+  environment: nodejs
+  toolchain:
+    name: npm
+    version: "20"
+
+build:
+  additionalCommands: npm config set registry https://registry.npmjs.org/ && npm install --include=dev --registry=https://registry.npmjs.org/ && npm run build
+  artifacts:
+    "dist": /
+    "node_modules": /
+    "server": /
+    "shared": /
+    "scripts": /
+    "package.json": /
+    "package-lock.json": /
+    "amvera-worker.yaml": /
+
+run:
+  command: npm run start:worker
+  persistenceMount: /data

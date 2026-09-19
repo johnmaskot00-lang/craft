@@ -565,7 +565,14 @@ export class DatabaseStorage implements IStorage {
       .select({ blobKey: projectVersions.blobKey })
       .from(projectVersions)
       .where(eq(projectVersions.projectId, id));
-    const blobKeys = blobRows.map((r) => r.blobKey);
+    const blobKeys = blobRows.map((r) => r.blobKey).filter((key): key is string => !!key);
+    if (blobKeys.length) {
+      await db.execute(sql`
+        INSERT INTO object_delete_outbox (object_key)
+        SELECT key FROM unnest(${blobKeys}::text[]) AS key
+        ON CONFLICT (object_key) DO NOTHING
+      `).catch((e: any) => console.warn("[outbox] enqueue project blobs:", e?.message || e));
+    }
     await Promise.all([
       db.delete(projectMessages).where(eq(projectMessages.projectId, id)),
       db.delete(projectFiles).where(eq(projectFiles.projectId, id)),
@@ -574,7 +581,7 @@ export class DatabaseStorage implements IStorage {
       db.delete(leads).where(eq(leads.projectId, id)),
     ]);
     await db.delete(projects).where(eq(projects.id, id));
-    if (blobKeys.length) void deleteVersionBlobs(blobKeys);
+    // The outbox retries deletes after crashes; never fire-and-forget cleanup.
   }
 
   async getProjectOwnerId(id: number): Promise<number | undefined> {
@@ -971,25 +978,18 @@ export class DatabaseStorage implements IStorage {
     withinMs: number,
   ): Promise<Lead | undefined> {
     const cutoff = new Date(Date.now() - Math.max(1000, withinMs));
-    const [existing] = await db
-      .select()
-      .from(leads)
-      .where(and(
-        eq(leads.projectId, lead.projectId),
-        eq(leads.name, lead.name),
-        eq(leads.email, lead.email),
-        eq(leads.phone, lead.phone),
-        eq(leads.message, lead.message),
-        eq(leads.source, lead.source),
-        gte(leads.createdAt, cutoff),
-      ))
-      .orderBy(desc(leads.createdAt))
-      .limit(1);
+    const fingerprint = lead.fingerprint || crypto.createHash("sha256")
+      .update([lead.projectId, lead.name, lead.email, lead.phone, lead.message, lead.source].join("\x1f"))
+      .digest("hex");
+    const [existing] = await db.select().from(leads).where(and(eq(leads.fingerprint, fingerprint), gte(leads.createdAt, cutoff))).orderBy(desc(leads.createdAt)).limit(1);
     return existing;
   }
 
   async createLead(lead: InsertLead): Promise<Lead> {
-    const [l] = await db.insert(leads).values(lead).returning();
+    const fingerprint = lead.fingerprint || crypto.createHash("sha256")
+      .update([lead.projectId, lead.name, lead.email, lead.phone, lead.message, lead.source].join("\x1f"))
+      .digest("hex");
+    const [l] = await db.insert(leads).values({ ...lead, fingerprint }).returning();
     return l;
   }
 

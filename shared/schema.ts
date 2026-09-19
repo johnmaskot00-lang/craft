@@ -336,6 +336,15 @@ export type InsertProjectVersion = z.infer<typeof insertProjectVersionSchema>;
  * state: queued | running | completed | failed | cancelled
  * priority: lower number = higher priority (edit=1, site/publish=5, seo=10)
  */
+export const objectDeleteOutbox = pgTable("object_delete_outbox", {
+  id: serial("id").primaryKey(),
+  objectKey: text("object_key").notNull().unique(),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
+});
+
 export const generationJobs = pgTable("generation_jobs", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull(),
@@ -395,6 +404,7 @@ export const leads = pgTable("leads", {
   message: text("message").notNull().default(""),
   source: text("source").notNull().default("form"),
   isRead: integer("is_read").notNull().default(0),
+  fingerprint: text("fingerprint"),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 });
 

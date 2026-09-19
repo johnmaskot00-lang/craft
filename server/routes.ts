@@ -96,6 +96,7 @@ import {
   backfillProjectPreviewImages,
   backfillVersionBlobs,
   pruneOperationalTables,
+  processObjectDeleteOutbox,
 } from "./version-blob-backfill";
 import { withSingletonLease } from "./singleton-lease";
 import { buildOmniVideoRequest, kieVideoResolution } from "./kie-video-model";
@@ -4594,6 +4595,12 @@ export async function registerRoutes(
   await db.execute(sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS preview_image text`)
     .catch((e: any) => console.warn("[boot] projects.preview_image:", e?.message?.slice?.(0, 160) || e));
 
+  await db.execute(sql`ALTER TABLE leads ADD COLUMN IF NOT EXISTS fingerprint text`).catch(() => undefined);
+  await db.execute(sql`CREATE INDEX IF NOT EXISTS leads_fingerprint_created_idx ON leads (fingerprint, created_at DESC)`).catch(() => undefined);
+
+  await db.execute(sql`CREATE TABLE IF NOT EXISTS object_delete_outbox (id serial PRIMARY KEY, object_key text NOT NULL UNIQUE, attempts integer NOT NULL DEFAULT 0, next_attempt_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP, last_error text, created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP)`).catch(() => undefined);
+  await db.execute(sql`CREATE INDEX IF NOT EXISTS object_delete_outbox_due_idx ON object_delete_outbox (next_attempt_at)`).catch(() => undefined);
+
   // Version payloads move to Object Storage; these columns keep list views and
   // restore checks working without reading the payload back.
   for (const stmt of [
@@ -4687,6 +4694,10 @@ export async function registerRoutes(
     void withSingletonLease("prune-operational", 5 * 60 * 60_000, pruneOperationalTables)
       .catch((e) => console.warn("[prune] lease:", e?.message || e));
   }, 6 * 60 * 60 * 1000).unref?.();
+  setInterval(() => {
+    void withSingletonLease("object-delete-outbox", 5 * 60_000, processObjectDeleteOutbox)
+      .catch((e) => console.warn("[outbox] lease:", e?.message || e));
+  }, 60_000).unref?.();
 
   try {
     await db.execute(sql`
@@ -9937,6 +9948,7 @@ ${fullHtml}`;
       const phone = clean(req.body?.phone, 40);
       const message = clean(req.body?.message, 2000);
       const source = clean(req.body?.source, 100) || "form";
+      const fingerprint = crypto.createHash("sha256").update([projectId, name, email, phone, message, source].join("\x1f")).digest("hex");
 
       if (!name && !email && !phone && !message) {
         return res.status(400).json({ message: "Пустая заявка" });
@@ -9945,14 +9957,14 @@ ${fullHtml}`;
       // Protect against accidental double-submit: published sites may contain
       // both an AI-authored handler and our injected leads script.
       const duplicate = await storage.findRecentDuplicateLead(
-        { projectId, name, email, phone, message, source },
+        { projectId, name, email, phone, message, source, fingerprint },
         15_000,
       );
       if (duplicate) {
         return res.json({ success: true, id: duplicate.id, duplicate: true });
       }
 
-      const lead = await storage.createLead({ projectId, name, email, phone, message, source });
+      const lead = await storage.createLead({ projectId, name, email, phone, message, source, fingerprint });
       res.json({ success: true, id: lead.id });
     } catch (err) {
       res.status(500).json({ message: "Ошибка сохранения заявки" });

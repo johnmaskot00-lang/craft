@@ -44,6 +44,36 @@ async function nextBatch(): Promise<Row[]> {
   return res.rows as Row[];
 }
 
+/** Retry durable Object Storage deletions without blocking user requests. */
+export async function processObjectDeleteOutbox(): Promise<void> {
+  try {
+    const rows = await db.execute(sql`
+      SELECT id, object_key AS "objectKey", attempts
+      FROM object_delete_outbox
+      WHERE next_attempt_at <= CURRENT_TIMESTAMP
+      ORDER BY id
+      LIMIT 20
+    `);
+    for (const row of rows.rows as Array<{ id: number; objectKey: string; attempts: number }>) {
+      try {
+        const { ycMediaDelete } = await import("./yc-media-bucket");
+        await ycMediaDelete(row.objectKey);
+        await db.execute(sql`DELETE FROM object_delete_outbox WHERE id = ${row.id}`);
+      } catch (e: any) {
+        const attempts = Number(row.attempts || 0) + 1;
+        const delay = Math.min(24 * 60 * 60, 30 * Math.pow(2, Math.min(attempts, 10)));
+        await db.execute(sql`
+          UPDATE object_delete_outbox
+          SET attempts = ${attempts}, next_attempt_at = CURRENT_TIMESTAMP + (${delay} || ' seconds')::interval, last_error = ${String(e?.message || e).slice(0, 500)}
+          WHERE id = ${row.id}
+        `);
+      }
+    }
+  } catch (e: any) {
+    console.warn("[outbox] object deletion pass failed:", e?.message || e);
+  }
+}
+
 /** Keep finished jobs and long chat histories from growing without bound. */
 const JOB_RETENTION_DAYS = Math.max(1, Number(process.env.CRAFT_JOB_RETENTION_DAYS) || 7);
 const MESSAGES_PER_PROJECT = Math.max(50, Number(process.env.CRAFT_MESSAGE_RETENTION) || 300);
