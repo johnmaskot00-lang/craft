@@ -4984,7 +4984,24 @@ export async function registerRoutes(
       // The in-memory map belongs to one API replica only. Always consult the
       // shared durable jobs before clearing a placeholder: after a refresh the
       // request may be running on the other replica.
-      const activeJobs = await listProjectJobs(projectId, { activeOnly: true, limit: 3 }).catch(() => []);
+      let activeJobs = await listProjectJobs(projectId, { activeOnly: true, limit: 3 }).catch(() => []);
+      // A site-generate job is executed inline by the API, not by the publish
+      // worker. If both the SSE and the owning process disappear, the row can
+      // otherwise keep the editor in "generation continues" forever after reload.
+      // Recover stale inline jobs at the status boundary so the next page load is
+      // deterministic and the user can retry.
+      const nowMs = Date.now();
+      const staleJobs = activeJobs.filter((job: any) => {
+        const age = nowMs - new Date(job.updatedAt || job.createdAt).getTime();
+        const limit = job.state === "queued" ? 5 * 60_000 : 25 * 60_000;
+        return age > limit && ["site-generate", "seo-generate", "seo-edit"].includes(job.kind);
+      });
+      for (const stale of staleJobs) {
+        await failGenerationJob(stale.id, "Generation lease expired; retry is safe").catch(() => undefined);
+      }
+      if (staleJobs.length) {
+        activeJobs = await listProjectJobs(projectId, { activeOnly: true, limit: 3 }).catch(() => []);
+      }
       // Orphan placeholder: DB says "generating", no local work, and no durable
       // work on either replica. Only then is it safe to clear the placeholder.
       let orphanPlaceholder = false;

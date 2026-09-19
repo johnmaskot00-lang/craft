@@ -1178,6 +1178,13 @@ export default function EditorPage() {
           }
           if (data.error) {
             errorShown = true;
+            if (animPollRef.current) {
+              clearInterval(animPollRef.current);
+              animPollRef.current = null;
+            }
+            setIsGenerating(false);
+            setAnimBaking(false);
+            setGenerationStatus(null);
             if (data.newBalance !== undefined) {
               queryClient.setQueryData(["/api/auth/user"], (old: any) => old ? { ...old, credits: data.newBalance } : old);
             } else if (data.refunded) {
