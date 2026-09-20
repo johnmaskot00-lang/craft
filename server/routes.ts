@@ -5382,7 +5382,19 @@ export async function registerRoutes(
       if (redisEnabled()) {
         distributedGenerationLeaseHeld = await redisAcquireLease(`project:${project.id}`, distributedGenerationToken, ACTIVE_GENERATION_MAX_MS + 60_000);
         if (!distributedGenerationLeaseHeld) {
-          return res.status(409).json({ message: "Генерация этого сайта уже выполняется на другом сервере.", generating: true, editInProgress: true });
+          // A stale Redis key may survive an API restart. Confirm a durable
+          // active job before blocking a ready project; a lock alone is not
+          // proof that another generation is still running.
+          const activeJobs = await listProjectJobs(project.id, { activeOnly: true, limit: 3 }).catch(() => []);
+          const hasFreshJob = activeJobs.some((job: any) => {
+            const age = Date.now() - new Date(job.updatedAt || job.createdAt).getTime();
+            const maxAge = job.kind === "publish" ? 45 * 60_000 : 25 * 60_000;
+            return age >= 0 && age <= maxAge;
+          });
+          if (hasFreshJob) {
+            return res.status(409).json({ message: "?????????? ?????? ??? ???????????. ????????? ?????????? ?????????????.", generating: true, editInProgress: true });
+          }
+          console.warn(`[GENERATE] ignoring stale Redis lease for project ${project.id}`);
         }
       }
       const bodyAgentVersion = req.body?.agentVersion;
