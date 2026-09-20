@@ -4542,19 +4542,20 @@ export async function registerRoutes(
         error: String(err?.code || err?.message || "STORAGE_ERROR"),
       });
     }
-    let gitSha: string | null = process.env.APP_GIT_SHA || process.env.GIT_SHA || null;
-    if (!gitSha) {
-      try {
-        const metaPath = path.join(process.cwd(), "server", "deploy-meta.json");
-        const altPath = path.join(process.cwd(), "deploy-meta.json");
-        const raw = (fs.existsSync(metaPath)
-          ? fs.readFileSync(metaPath, "utf8")
-          : fs.existsSync(altPath)
-          ? fs.readFileSync(altPath, "utf8")
-          : "").replace(/^\uFEFF/, "");
-        if (raw) gitSha = JSON.parse(raw)?.gitSha || null;
-      } catch { /* ignore */ }
-    }
+    // Prefer the version file shipped with this container. Amvera can retain
+    // a stale APP_GIT_SHA environment variable across rollouts.
+    let gitSha: string | null = null;
+    try {
+      const metaPath = path.join(process.cwd(), "server", "deploy-meta.json");
+      const altPath = path.join(process.cwd(), "deploy-meta.json");
+      const raw = (fs.existsSync(metaPath)
+        ? fs.readFileSync(metaPath, "utf8")
+        : fs.existsSync(altPath)
+        ? fs.readFileSync(altPath, "utf8")
+        : "").replace(/^\uFEFF/, "");
+      if (raw) gitSha = JSON.parse(raw)?.gitSha || null;
+    } catch { /* ignore */ }
+    gitSha = gitSha || process.env.APP_GIT_SHA || process.env.GIT_SHA || null;
     const healthLoad = getLoadStats();
     if (Date.now() - healthQueueCache.at >= HEALTH_QUEUE_CACHE_MS) {
       healthQueueCache = {
