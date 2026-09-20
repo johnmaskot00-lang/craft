@@ -5038,6 +5038,11 @@ export async function registerRoutes(
       });
       for (const stale of staleJobs) {
         await failGenerationJob(stale.id, `${stale.kind} lease expired; retry is safe`).catch(() => undefined);
+        const local = activeProjectGenerations.get(projectId);
+        if (local?.jobId === stale.id) {
+          activeProjectGenerations.delete(projectId);
+          console.warn(`[GEN-STATUS] released stale local generation lock for project ${projectId}, job ${stale.id}`);
+        }
       }
       if (staleJobs.length) {
         activeJobs = await listProjectJobs(projectId, { activeOnly: true, limit: 3 }).catch(() => []);
