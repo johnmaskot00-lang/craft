@@ -4549,6 +4549,8 @@ export async function registerRoutes(
         if (raw) gitSha = JSON.parse(raw)?.gitSha || null;
       } catch { /* ignore */ }
     }
+    const healthLoad = getLoadStats();
+    const queue = await queueDepth().catch(() => ({ queued: -1, running: -1 }));
     return res.json({
       ok: true,
       database: "ok",
@@ -4557,6 +4559,16 @@ export async function registerRoutes(
       gitSha,
       redis: redisEnabled(),
       uptime: Math.round(process.uptime()),
+      instance: process.env.HOSTNAME || `pid-${process.pid}`,
+      queue,
+      load: {
+        heapPressure: healthLoad.heapPressure,
+        memoryRssMb: Math.round(Number(healthLoad.memory?.rss || 0) / 1024 / 1024),
+        generate: healthLoad.generate,
+        publish: healthLoad.publish,
+        images: healthLoad.images,
+        uploads: healthLoad.uploads,
+      },
     });
   });
 
