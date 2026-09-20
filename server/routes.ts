@@ -2372,6 +2372,17 @@ async function prepareScrollAnimFrames(
 
 // Build a self-contained scroll-bound Canvas animation block (section + style + script).
 // layout: "parallax" — full-screen text; "split" — text left; "site3d" — stacked 3D cards over video.
+type HeroTypography = { heading: string; body: string; importUrl: string };
+
+function chooseHeroTypography(texts: Array<{ title: string; sub: string }>): HeroTypography {
+  const copy = texts.map((t) => `${t.title} ${t.sub}`).join(" ").toLowerCase();
+  if (/(?:ювелир|бриллиант|часы|мода|ателье|парфюм|luxury|premium)/i.test(copy)) return { heading: "'Cormorant Garamond', Georgia, serif", body: "'Manrope', system-ui, sans-serif", importUrl: "https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=Manrope:wght@400;500;600&display=swap" };
+  if (/(?:ресторан|шеф|кухн|кофе|кафе|еда|вино|restaurant|coffee|food|wine)/i.test(copy)) return { heading: "'Playfair Display', Georgia, serif", body: "'Manrope', system-ui, sans-serif", importUrl: "https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600&family=Playfair+Display:wght@600;700;800&display=swap" };
+  if (/(?:строй|ремонт|авто|механ|спорт|фитнес|ai|tech|digital|startup|code)/i.test(copy)) return { heading: "'Onest', system-ui, sans-serif", body: "'Golos Text', system-ui, sans-serif", importUrl: "https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Onest:wght@600;700;800&display=swap" };
+  if (/(?:клиник|врач|стомат|здоров|космет|уход|clinic|health|beauty)/i.test(copy)) return { heading: "'Golos Text', system-ui, sans-serif", body: "'Onest', system-ui, sans-serif", importUrl: "https://fonts.googleapis.com/css2?family=Golos+Text:wght@500;600;700&family=Onest:wght@400;500;600&display=swap" };
+  return { heading: "'Onest', system-ui, sans-serif", body: "'Manrope', system-ui, sans-serif", importUrl: "https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600&family=Onest:wght@600;700;800&display=swap" };
+}
+
 function buildScrollAnimHtml(
   frames: string[],
   texts: Array<{ title: string; sub: string }>,
@@ -2381,6 +2392,7 @@ function buildScrollAnimHtml(
   posterUrl?: string,
 ): string {
   const cid = "csa" + Math.random().toString(36).slice(2, 8);
+  const typography = chooseHeroTypography(texts);
   const posterEsc = posterUrl ? csaEsc(posterUrl) : "";
   const framesJson = JSON.stringify(frames).replace(/'/g, "&#39;");
   const isSplit = layout === "split";
@@ -2455,7 +2467,7 @@ ${layers}
   </div>
 </section>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@700;800&family=Manrope:wght@400;500;600&display=swap');
+  @import url('${typography.importUrl}');
   .${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;}
   .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#0a0a0a;${posterCss}}
   .${cid}-video{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;min-width:100%;min-height:100%;display:block;object-fit:cover;object-position:center center;background:transparent;transform:none;max-width:none;}
@@ -2464,8 +2476,8 @@ ${layers}
   .${cid}-text{position:absolute;left:clamp(36px,5.5vw,96px);bottom:clamp(56px,8vh,108px);top:auto;transform:none;width:min(680px,86vw);text-align:left;opacity:0;will-change:opacity,transform;}
   .${cid}-text:first-child{opacity:1;}
   .${cid}-text::before{content:"";position:absolute;inset:-60% -30% -30% -20%;z-index:-1;background:radial-gradient(ellipse at 20% 80%,rgba(0,0,0,0.48) 0%,rgba(0,0,0,0.18) 55%,rgba(0,0,0,0) 78%);filter:blur(18px);}
-  .${cid}-text h2{margin:0 0 .25em;font-family:'Unbounded',system-ui,sans-serif;font-size:clamp(1.6rem,3.8vw,3.8rem);font-weight:800;letter-spacing:-0.02em;line-height:1.05;color:#fff;text-shadow:0 2px 24px rgba(0,0,0,0.6);}
-  .${cid}-text p{margin:.18em 0 0;max-width:520px;font-family:'Manrope',system-ui,sans-serif;font-size:clamp(0.9rem,1.7vw,1.25rem);font-weight:500;line-height:1.55;color:rgba(255,255,255,0.88);text-shadow:0 1px 14px rgba(0,0,0,0.5);}
+  .${cid}-text h2{margin:0 0 .25em;font-family:${typography.heading};font-size:clamp(1.6rem,3.8vw,3.8rem);font-weight:800;letter-spacing:-0.02em;line-height:1.05;color:#fff;text-shadow:0 2px 24px rgba(0,0,0,0.6);}
+  .${cid}-text p{margin:.18em 0 0;max-width:520px;font-family:${typography.body};font-size:clamp(0.9rem,1.7vw,1.25rem);font-weight:500;line-height:1.55;color:rgba(255,255,255,0.88);text-shadow:0 1px 14px rgba(0,0,0,0.5);}
 </style>
 <script>${scrubJs}
 </script>${navCtl}`;
@@ -2481,15 +2493,15 @@ ${layers}
   </div>
 </section>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@700;800&family=Manrope:wght@400;500;600&display=swap');
+  @import url('${typography.importUrl}');
   .${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;}
   .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#f8f7f4;${posterCss}}
   .${cid}-video{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;min-width:100%;min-height:100%;display:block;object-fit:cover;object-position:center center;background:transparent;transform:none;max-width:none;}
   .${cid}-panel{position:absolute;top:0;left:0;width:52%;height:100%;pointer-events:none;display:flex;align-items:center;padding:0 clamp(32px,5.5vw,96px);background:linear-gradient(to right,rgba(248,247,244,0.9) 0%,rgba(248,247,244,0.74) 42%,rgba(248,247,244,0) 100%);}
   .${cid}-text{position:absolute;left:clamp(32px,5.5vw,96px);top:50%;transform:translateY(-50%);width:min(50vw,640px);text-align:left;opacity:0;will-change:opacity,transform;}
   .${cid}-text:first-child{opacity:1;}
-  .${cid}-text h2{margin:0 0 .35em;font-family:'Unbounded',system-ui,sans-serif;font-size:clamp(2.2rem,5.5vw,5.4rem);font-weight:800;letter-spacing:-0.03em;line-height:1.0;color:#15151A;}
-  .${cid}-text p{margin:0;max-width:540px;font-family:'Manrope',system-ui,sans-serif;font-size:clamp(1rem,2vw,1.45rem);font-weight:500;line-height:1.6;color:#4a4a4f;}
+  .${cid}-text h2{margin:0 0 .35em;font-family:${typography.heading};font-size:clamp(2.2rem,5.5vw,5.4rem);font-weight:800;letter-spacing:-0.03em;line-height:1.0;color:#15151A;}
+  .${cid}-text p{margin:0;max-width:540px;font-family:${typography.body};font-size:clamp(1rem,2vw,1.45rem);font-weight:500;line-height:1.6;color:#4a4a4f;}
   @media(max-width:700px){.${cid}-panel{width:100%;background:linear-gradient(to top,rgba(248,247,244,0.96) 60%,rgba(248,247,244,0) 100%);bottom:0;top:auto;height:46%;align-items:flex-start;padding:18px 22px;} .${cid}-text{position:relative;top:auto;left:auto;transform:none;width:100%;text-align:center;} .${cid}-text h2{font-size:clamp(1.7rem,7vw,2.4rem);} .${cid}-text p{font-size:0.92rem;}}
 </style>
 <script>${scrubJs}
@@ -2510,7 +2522,7 @@ ${layers}
   </div>
 </section>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@700;800&family=Manrope:wght@400;500;600&display=swap');
+  @import url('${typography.importUrl}');
   .${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;}
   .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#000;}
   .${cid}-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
@@ -2518,8 +2530,8 @@ ${layers}
   .${cid}-overlays{position:absolute;inset:0;pointer-events:none;}
   .${cid}-text{position:absolute;left:clamp(36px,5.5vw,96px);bottom:clamp(56px,8vh,108px);top:auto;transform:none;width:min(680px,86vw);text-align:left;opacity:0;will-change:opacity,transform;}
   .${cid}-text::before{content:"";position:absolute;inset:-60% -30% -30% -20%;z-index:-1;background:radial-gradient(ellipse at 20% 80%,rgba(0,0,0,0.48) 0%,rgba(0,0,0,0.18) 55%,rgba(0,0,0,0) 78%);filter:blur(18px);}
-  .${cid}-text h2{margin:0 0 .25em;font-family:'Unbounded',system-ui,sans-serif;font-size:clamp(1.6rem,3.8vw,3.8rem);font-weight:800;letter-spacing:-0.02em;line-height:1.05;color:#fff;text-shadow:0 2px 24px rgba(0,0,0,0.6);}
-  .${cid}-text p{margin:.18em 0 0;max-width:520px;font-family:'Manrope',system-ui,sans-serif;font-size:clamp(0.9rem,1.7vw,1.25rem);font-weight:500;line-height:1.55;color:rgba(255,255,255,0.88);text-shadow:0 1px 14px rgba(0,0,0,0.5);}
+  .${cid}-text h2{margin:0 0 .25em;font-family:${typography.heading};font-size:clamp(1.6rem,3.8vw,3.8rem);font-weight:800;letter-spacing:-0.02em;line-height:1.05;color:#fff;text-shadow:0 2px 24px rgba(0,0,0,0.6);}
+  .${cid}-text p{margin:.18em 0 0;max-width:520px;font-family:${typography.body};font-size:clamp(0.9rem,1.7vw,1.25rem);font-weight:500;line-height:1.55;color:rgba(255,255,255,0.88);text-shadow:0 1px 14px rgba(0,0,0,0.5);}
 </style>
 <script>
 (function(){
@@ -2571,14 +2583,14 @@ ${layers}
   </div>
 </section>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@700;800&family=Manrope:wght@400;500;600&display=swap');
+  @import url('${typography.importUrl}');
   .${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;}
   .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#f8f7f4;}
   .${cid}-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
   .${cid}-panel{position:absolute;top:0;left:0;width:52%;height:100%;pointer-events:none;display:flex;align-items:center;padding:0 clamp(32px,5.5vw,96px);background:linear-gradient(to right,rgba(248,247,244,0.9) 0%,rgba(248,247,244,0.74) 42%,rgba(248,247,244,0) 100%);}
   .${cid}-text{position:absolute;left:clamp(32px,5.5vw,96px);top:50%;transform:translateY(-50%);width:min(50vw,640px);text-align:left;opacity:0;will-change:opacity,transform;}
-  .${cid}-text h2{margin:0 0 .35em;font-family:'Unbounded',system-ui,sans-serif;font-size:clamp(2.2rem,5.5vw,5.4rem);font-weight:800;letter-spacing:-0.03em;line-height:1.0;color:#15151A;}
-  .${cid}-text p{margin:0;max-width:540px;font-family:'Manrope',system-ui,sans-serif;font-size:clamp(1rem,2vw,1.45rem);font-weight:500;line-height:1.6;color:#4a4a4f;}
+  .${cid}-text h2{margin:0 0 .35em;font-family:${typography.heading};font-size:clamp(2.2rem,5.5vw,5.4rem);font-weight:800;letter-spacing:-0.03em;line-height:1.0;color:#15151A;}
+  .${cid}-text p{margin:0;max-width:540px;font-family:${typography.body};font-size:clamp(1rem,2vw,1.45rem);font-weight:500;line-height:1.6;color:#4a4a4f;}
   @media(max-width:700px){.${cid}-panel{width:100%;background:linear-gradient(to top,rgba(248,247,244,0.96) 60%,rgba(248,247,244,0) 100%);bottom:0;top:auto;height:46%;align-items:flex-start;padding:18px 22px;} .${cid}-text{position:relative;top:auto;left:auto;transform:none;width:100%;text-align:center;} .${cid}-text h2{font-size:clamp(1.7rem,7vw,2.4rem);} .${cid}-text p{font-size:0.92rem;}}
 </style>
 <script>
