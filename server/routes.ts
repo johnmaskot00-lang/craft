@@ -9897,7 +9897,10 @@ ${fullHtml}`;
       };
 
       const updatedCode = injectYandex(project.generatedCode);
-      await storage.updateProject(projectId, { generatedCode: updatedCode });
+      const seoPatch = (project as any).type === "seo" && project.seoConfig
+        ? { seoConfig: { ...(project.seoConfig as object), yandexMetrika: metrika?.trim() || "", yandexWebmaster: webmaster?.trim() || "" } }
+        : {};
+      await storage.updateProject(projectId, { generatedCode: updatedCode, ...seoPatch } as any);
 
       const files = await storage.getProjectFiles(projectId);
       for (const f of files) {

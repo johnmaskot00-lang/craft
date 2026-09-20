@@ -166,6 +166,8 @@ export default function SeoEditorPage() {
   const [domainStatusMessage, setDomainStatusMessage] = useState("");
   const [domainChecking, setDomainChecking] = useState(false);
   const [domainIp, setDomainIp] = useState("");
+  const [yandexMetrika, setYandexMetrika] = useState("");
+  const [yandexSaving, setYandexSaving] = useState(false);
 
   /* ── single query, no polling — SSE provides live updates ── */
   const { data, isLoading, refetch } = useQuery<{
@@ -203,6 +205,7 @@ export default function SeoEditorPage() {
     if (cfg.niche) setNiche(cfg.niche);
     if (cfg.rawKeywords?.length) setKeywordsText(cfg.rawKeywords.join("\n"));
     if (cfg.targetUrl) setTargetUrl(cfg.targetUrl);
+    if ((cfg as any).yandexMetrika) setYandexMetrika(String((cfg as any).yandexMetrika));
     if (cfg.ctaLabel) setCtaLabel(cfg.ctaLabel);
     if (cfg.clusters?.length > 0) setOpenClusters(new Set(cfg.clusters.slice(0, 2).map((c: any) => c.id)));
     setGenProgress({ done: cfg.pagesGenerated || 0, total: cfg.pagesTotal || 0 });
@@ -218,6 +221,18 @@ export default function SeoEditorPage() {
   }, [phase, files.length, selectedFile, previewHtml]);
 
   /* ── analyze ── */
+  async function saveSeoMetrika() {
+    if (!id || !yandexMetrika.trim()) return;
+    setYandexSaving(true);
+    try {
+      const res = await fetch(`/api/projects/${id}/yandex`, { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify({ metrika: yandexMetrika.trim() }) });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message || "?? ??????? ????????? ???????");
+      await refetch();
+      toast({ title: "??????? ????????", description: "??? ??????? ???????? ?? ??? HTML-???????? ?????." });
+    } catch (e: any) { toast({ title: "?????? ??????????", description: e?.message || "?????????? ??? ???", variant: "destructive" }); }
+    finally { setYandexSaving(false); }
+  }
+
   async function handleAnalyze() {
     const name = projectName.trim();
     if (!name) { toast({ title: "Введите название проекта", variant: "destructive" }); return; }
@@ -1036,6 +1051,14 @@ export default function SeoEditorPage() {
 
           {(phase === "structure" || phase === "generating" || phase === "done") && cfg && (
             <>
+              {phase === "done" && (
+                <div className="mx-4 mt-3 mb-1 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="text-xs font-semibold text-slate-700 mb-1">??????.??????? ??? ???? ???????</div>
+                  <div className="text-[11px] text-slate-400 mb-2">??????? ID ?????? ????????. ?? ????? ???????? ?? ??? HTML-???????? ?????.</div>
+                  <div className="flex gap-2"><input value={yandexMetrika} onChange={e => setYandexMetrika(e.target.value.replace(/\D/g, ""))} placeholder="????????, 12345678" className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs" inputMode="numeric" /><button onClick={() => void saveSeoMetrika()} disabled={!yandexMetrika.trim() || yandexSaving} className="rounded-lg bg-slate-800 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">{yandexSaving ? "?" : "?????????"}</button></div>
+                </div>
+              )}
+
               <div className="px-5 py-3 border-b border-slate-100 flex justify-around">
                 <Stat value={cfg.pagesGenerated} label="готово" color="#10b981" />
                 <div className="w-px bg-slate-100" />
