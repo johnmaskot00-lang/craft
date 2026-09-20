@@ -118,6 +118,7 @@ import {
 import { domainToASCII } from "node:url";
 import path from "path";
 import fs from "fs";
+import fsp from "fs/promises";
 import os from "os";
 import crypto from "crypto";
 import JSZip from "jszip";
@@ -688,11 +689,11 @@ async function getFfmpegBinary(forceTmpCopy = false): Promise<string | null> {
   const base = await getFfmpegStaticPath();
   if (!base) return null;
   if (!forceTmpCopy) return base;
-  if (_ffmpegTmpPath && fs.existsSync(_ffmpegTmpPath)) return _ffmpegTmpPath;
+  if (_ffmpegTmpPath && await fsp.access(_ffmpegTmpPath).then(() => true).catch(() => false)) return _ffmpegTmpPath;
   try {
     const dest = path.join(os.tmpdir(), `craft-ffmpeg-${process.pid}`);
-    fs.copyFileSync(base, dest);
-    fs.chmodSync(dest, 0o755);
+    await fsp.copyFile(base, dest);
+    await fsp.chmod(dest, 0o755);
     _ffmpegTmpPath = dest;
     console.log(`[FFMPEG] copied binary to writable tmp: ${dest}`);
     return dest;
@@ -731,14 +732,14 @@ async function extractFramesWithFfmpeg(
       const bin = await getFfmpegBinary(t > 0); // after the first failure, exec a tmp-copied binary
       if (!bin) throw new Error("ffmpeg binary not found");
       // clear any partial frames left by a previous failed attempt
-      try { for (const f of fs.readdirSync(framesDir)) fs.rmSync(path.join(framesDir, f), { force: true }); } catch {}
+      try { for (const f of await fsp.readdir(framesDir)) await fsp.rm(path.join(framesDir, f), { force: true }); } catch {}
       try {
         await new Promise<void>((resolve, reject) => {
           const proc = spawn(bin, args, { stdio: ["ignore", "ignore", "ignore"] });
           proc.on("error", reject);
           proc.on("close", (code: number) => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)));
         });
-        const n = fs.readdirSync(framesDir).filter(f => /\.jpg$/i.test(f)).length;
+        const n = (await fsp.readdir(framesDir)).filter(f => /\.jpg$/i.test(f)).length;
         if (n > 0) { console.log(`[FFMPEG] extracted ${n} frames (try ${t + 1}, bin=${bin}, q=${q}, lowRam=${lowRam})`); return n; }
         lastErr = new Error("ffmpeg produced 0 frames");
       } catch (err: any) {
@@ -777,18 +778,18 @@ async function remuxMp4Faststart(inPath: string, outPath: string): Promise<void>
         "-movflags", "+faststart",
         outPath,
       ]);
-      const st = fs.statSync(outPath);
+      const st = await fsp.stat(outPath);
       if (!st.size || st.size < 1000) throw new Error(`scrub encode too small: ${st.size}`);
       console.log(`[SCROLLANIM] scrub-encode OK (${st.size} bytes, gop=8)`);
       return;
     } catch (encErr: any) {
       console.warn(`[SCROLLANIM] scrub-encode failed, trying copy+faststart:`, encErr?.message || encErr);
-      try { fs.rmSync(outPath, { force: true }); } catch {}
+      await fsp.rm(outPath, { force: true }).catch(() => undefined);
     }
     await run([
       "-y", "-v", "error", "-i", inPath, "-c", "copy", "-movflags", "+faststart", outPath,
     ]);
-    const st2 = fs.statSync(outPath);
+    const st2 = await fsp.stat(outPath);
     if (!st2.size || st2.size < 1000) throw new Error(`faststart output too small: ${st2.size}`);
   });
 }
@@ -807,7 +808,7 @@ async function readScrubMp4Buffer(videoPath: string, tmpDir: string): Promise<Bu
     console.warn(`[SCROLLANIM] faststart remux failed, uploading raw mp4:`, e?.message || e);
     return fs.promises.readFile(videoPath);
   } finally {
-    try { fs.rmSync(fastPath, { force: true }); } catch {}
+    await fsp.rm(fastPath, { force: true }).catch(() => undefined)
   }
 }
 
@@ -1723,26 +1724,26 @@ async function generateScrollFrames(
     }
     try {
       console.log(`[SCROLLANIM] downloading mp4 (attempt ${dlAttempt + 1}): ${mp4Url}`);
-      const vresp = await fetch(mp4Url!);
+      const vresp = await fetch(mp4Url!, { signal: AbortSignal.timeout(45_000) });
       if (!vresp.ok) throw new Error(`HTTP ${vresp.status}`);
       // Stream to disk — avoid holding the full MP4 Buffer while ffmpeg also runs.
       if (!vresp.body) throw new Error("empty response body");
       const { Readable } = await import("stream");
       const { pipeline } = await import("stream/promises");
       await pipeline(Readable.fromWeb(vresp.body as any), fs.createWriteStream(videoPath));
-      mp4Bytes = fs.statSync(videoPath).size;
+      mp4Bytes = (await fsp.stat(videoPath)).size;
       if (mp4Bytes < 10000) throw new Error(`file too small: ${mp4Bytes} bytes`);
-      fs.mkdirSync(framesDir, { recursive: true });
+      await fsp.mkdir(framesDir, { recursive: true });
       console.log(`[SCROLLANIM] mp4 downloaded: ${mp4Bytes} bytes → ${videoPath}`);
       mp4Downloaded = true;
     } catch (e: any) {
       console.warn(`[SCROLLANIM] mp4 download attempt ${dlAttempt + 1} failed:`, e?.message);
-      try { fs.rmSync(videoPath, { force: true }); } catch {}
+      await fsp.rm(videoPath, { force: true }).catch(() => undefined)
     }
   }
   if (!mp4Downloaded) {
     console.warn("[SCROLLANIM] all mp4 download attempts failed — giving up");
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined)
     return { frames: [], confirmedKieFailure: true };
   }
 
@@ -1755,7 +1756,7 @@ async function generateScrollFrames(
       // Prefer same-origin relative URL — faster in editor and publish rewrite.
       const stableVideo = relUrl;
       console.log(`[SCROLLANIM] ${layout} video scrub ready: ${stableVideo} (${mp4Buf.length} bytes)`);
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined)
       return { frames: [], videoUrl: stableVideo, posterUrl: currentStillUrl, confirmedKieFailure: false };
     } catch (upErr: any) {
       console.warn(`[SCROLLANIM] ${layout} mp4 upload failed, falling back to frame extract:`, upErr?.message);
@@ -1770,14 +1771,14 @@ async function generateScrollFrames(
     await extractFramesWithFfmpeg(videoPath, framesDir, fps, shouldStop);
   } catch (e: any) {
     console.warn("[SCROLLANIM] ffmpeg extraction failed:", e?.message);
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined)
     return { frames: [], confirmedKieFailure: false };
   }
 
   // Step 5 — upload frames in small batches (2 on 2.5GB — 8 full JPEGs in heap OOMs)
   const urls: string[] = [];
   try {
-    const files = fs.readdirSync(framesDir).filter(f => /\.jpg$/i.test(f)).sort();
+    const files = (await fsp.readdir(framesDir)).filter(f => /\.jpg$/i.test(f)).sort();
     const BATCH = RESOURCE_PROFILE.lowRamMedia ? 2 : 8;
     for (let i = 0; i < files.length; i += BATCH) {
       if (shouldStop()) break;
@@ -1791,7 +1792,7 @@ async function generateScrollFrames(
   } catch (e: any) {
     console.warn("[SCROLLANIM] frame upload failed:", e?.message);
   } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined)
   }
   console.log(`[SCROLLANIM] produced ${urls.length} frames`);
   return { frames: urls, confirmedKieFailure: false };
@@ -4765,7 +4766,7 @@ export async function registerRoutes(
   }
 
   const uploadsDir = path.join(process.cwd(), "uploads");
-  if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+  await fsp.mkdir(uploadsDir, { recursive: true });
   const express = (await import("express")).default;
   app.use("/uploads", express.static(uploadsDir));
 
@@ -4923,7 +4924,7 @@ export async function registerRoutes(
           res.status(400).json({ message: `Файл слишком большой. Максимум: ${Math.round(maxSize / 1024 / 1024)} МБ` });
           return;
         }
-        const buffer = fs.readFileSync(file.path);
+        const buffer = await fsp.readFile(file.path);
         const url = await uploadToObjectStorage(buffer, mime, ext);
         res.json({ url, filename: file.originalname || `${crypto.randomUUID()}.${ext}`, fileType: is3D ? "3d" : isVideo ? "video" : isAudio ? "audio" : "image" });
       });
@@ -4935,7 +4936,7 @@ export async function registerRoutes(
       }
       res.status(500).json({ message: "Ошибка загрузки файла" });
     } finally {
-      if (tmpPath) try { fs.rmSync(tmpPath, { force: true }); } catch {}
+      if (tmpPath) await fsp.rm(tmpPath, { force: true }).catch(() => undefined);
     }
   });
 
@@ -8664,7 +8665,7 @@ ${designAnalysis}
     }
     const MAX_FRAME_VIDEO = 40 * 1024 * 1024;
     if ((file.size || 0) > MAX_FRAME_VIDEO) {
-      if (file.path) try { fs.rmSync(file.path, { force: true }); } catch {}
+      if (file.path) await fsp.rm(file.path, { force: true }).catch(() => undefined)
       return res.status(400).json({ message: "Видео для нарезки кадров слишком большое (макс. 40 МБ)" });
     }
 
@@ -8675,14 +8676,14 @@ ${designAnalysis}
       // diskStorage — copy/move from multer temp path (no full file.buffer in heap)
       if (file.path) {
         await fs.promises.copyFile(file.path, videoPath);
-        try { fs.rmSync(file.path, { force: true }); } catch {}
+        await fsp.rm(file.path, { force: true }).catch(() => undefined)
       } else if (file.buffer) {
         await fs.promises.writeFile(videoPath, file.buffer);
         try { (file as any).buffer = Buffer.alloc(0); } catch { /* ignore */ }
       } else {
         return res.status(400).json({ message: "Видео не загружено" });
       }
-      fs.mkdirSync(framesDir, { recursive: true });
+      await fsp.mkdir(framesDir, { recursive: true });
 
       const ffmpegMod = (await import("fluent-ffmpeg")).default as any;
       await ensureFfmpegPath(ffmpegMod);
@@ -8700,7 +8701,7 @@ ${designAnalysis}
 
       await extractFramesWithFfmpeg(videoPath, framesDir, Number(fps.toFixed(4)));
 
-      const frameFiles = fs.readdirSync(framesDir).filter((f: string) => /\.jpg$/i.test(f)).sort();
+      const frameFiles = (await fsp.readdir(framesDir)).filter((f: string) => /\.jpg$/i.test(f)).sort();
       console.log(`[VIDEO-FRAMES] ffmpeg produced ${frameFiles.length} frames`);
 
       const urls: string[] = [];
@@ -8718,8 +8719,8 @@ ${designAnalysis}
       console.error("[VIDEO-FRAMES] error:", e?.message);
       return res.status(500).json({ message: "Ошибка нарезки кадров: " + (e?.message || "неизвестная ошибка") });
     } finally {
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-      if (file?.path) try { fs.rmSync(file.path, { force: true }); } catch {}
+      await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined)
+      if (file?.path) await fsp.rm(file.path, { force: true }).catch(() => undefined)
     }
   });
 
@@ -9527,6 +9528,10 @@ ${designAnalysis}
         const MAX_BUNDLE_BYTES = Number(process.env.PUBLISH_MAX_BUNDLE_BYTES) || 48 * 1024 * 1024;
         const MAX_SINGLE_ASSET = Number(process.env.PUBLISH_MAX_SINGLE_ASSET_BYTES) || 12 * 1024 * 1024;
         const MAX_VIDEO_ASSET = Number(process.env.PUBLISH_MAX_VIDEO_ASSET_BYTES) || 40 * 1024 * 1024;
+        // Never download an asset larger than the remaining bundle budget. This
+        // avoids briefly holding an oversized Buffer before the size check below.
+        const MAX_DOWNLOAD_ASSET = Math.max(MAX_SINGLE_ASSET, MAX_VIDEO_ASSET);
+        const remainingBundleBytes = () => Math.max(0, MAX_BUNDLE_BYTES - bundledBytes);
         const publishObjStorage = new ObjectStorageService();
         for (const mediaUrl of Array.from(localMediaUrls)) {
           try {
@@ -9544,6 +9549,11 @@ ${designAnalysis}
                   const gcsFile = await publishObjStorage.getObjectEntityFile(mediaUrl);
                   const [fileContent] = await gcsFile.download();
                   buffer = fileContent as Buffer;
+                  if (buffer.length > MAX_DOWNLOAD_ASSET || buffer.length > remainingBundleBytes()) {
+                    console.warn(`[Publish] Skipping oversized object ${mediaUrl} (${buffer.length} bytes)`);
+                    buffer = null;
+                    continue;
+                  }
                   setPublishMediaCached(mediaUrl, buffer);
                   console.log(`[Publish] Object download OK: ${mediaUrl} (${buffer.length} bytes)`);
                 } catch (sdkErr: any) {
@@ -9552,6 +9562,11 @@ ${designAnalysis}
                     const fetchUrl = `http://localhost:${process.env.PORT || 5000}${mediaUrl}`;
                     const mediaResp = await fetch(fetchUrl, { signal: AbortSignal.timeout(15000) });
                     if (mediaResp.ok) {
+                      const declared = Number(mediaResp.headers.get("content-length") || 0);
+                      if (declared > MAX_DOWNLOAD_ASSET || declared > remainingBundleBytes()) {
+                        console.warn(`[Publish] Skipping oversized media response ${mediaUrl} (${declared} bytes)`);
+                        continue;
+                      }
                       buffer = Buffer.from(await mediaResp.arrayBuffer());
                       setPublishMediaCached(mediaUrl, buffer);
                       console.log(`[Publish] Localhost fallback OK: ${mediaUrl} (${buffer.length} bytes)`);
@@ -9573,6 +9588,11 @@ ${designAnalysis}
                 const mediaResp = await fetch(fetchUrl, { signal: AbortSignal.timeout(15000) });
                 if (!mediaResp.ok) {
                   console.warn(`[Publish] Media fetch ${mediaUrl} returned ${mediaResp.status}`);
+                  continue;
+                }
+                const declared = Number(mediaResp.headers.get("content-length") || 0);
+                if (declared > MAX_DOWNLOAD_ASSET || declared > remainingBundleBytes()) {
+                  console.warn(`[Publish] Skipping oversized media response ${mediaUrl} (${declared} bytes)`);
                   continue;
                 }
                 buffer = Buffer.from(await mediaResp.arrayBuffer());
@@ -10974,13 +10994,13 @@ ${fullHtml}`;
                 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "scrollresume-"));
                 const videoPath = path.join(tmpDir, "src.mp4");
                 try {
-                  const vr = await fetch(mp4UrlResume);
+                  const vr = await fetch(mp4UrlResume, { signal: AbortSignal.timeout(45_000) });
                   if (!vr.ok) throw new Error(`mp4 HTTP ${vr.status}`);
                   const { Readable } = await import("stream");
                   const { pipeline } = await import("stream/promises");
                   if (!vr.body) throw new Error("empty body");
                   await pipeline(Readable.fromWeb(vr.body as any), fs.createWriteStream(videoPath));
-                  const rawSize = fs.statSync(videoPath).size;
+                  const rawSize = (await fsp.stat(videoPath)).size;
                   if (rawSize < 10000) throw new Error(`mp4 too small: ${rawSize}`);
                   const mp4Buf = await readScrubMp4Buffer(videoPath, tmpDir);
                   const relUrl = await uploadToObjectStorage(mp4Buf, "video/mp4", "mp4");
@@ -10994,7 +11014,7 @@ ${fullHtml}`;
                   finalCode = injectLoadingOverlay(finalCode);
                   await storage.updateProject(_projId, { generatedCode: finalCode });
                   console.log(`[CLEANUP-RESUME] project ${_projId}: animation restored (video scrub)`);
-                } finally { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {} }
+                } finally { await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined) }
               } catch (err: any) {
                 console.warn(`[CLEANUP-RESUME] project ${_projId} error:`, err?.message);
               }
@@ -11121,7 +11141,7 @@ ${fullHtml}`;
               } catch (e: any) {
                 console.warn(`[KLINGTASK] project ${proj.id}: faststart skipped:`, e?.message || e);
               } finally {
-                try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+                await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined)
               }
               const relUrl = await uploadToObjectStorage(scrubBuf, "video/mp4", "mp4");
               const stableVideo = relUrl;
