@@ -522,7 +522,7 @@ function buildMp4ScrubClientJs(cid: string, opts: { splitText: boolean }): strin
       seeking=true;
       try{video.currentTime=t;}catch(e){seeking=false;return;}
       clearTimeout(seekTimer);
-      seekTimer=setTimeout(function(){if(seeking){seeking=false;applySeek();}},280);
+      seekTimer=setTimeout(function(){if(seeking){seeking=false;applySeek();}},90);
     }
     video.addEventListener('seeked',function(){seeking=false;clearTimeout(seekTimer);applySeek();});
     video.addEventListener('error',function(){seeking=false;});
@@ -538,6 +538,7 @@ function buildMp4ScrubClientJs(cid: string, opts: { splitText: boolean }): strin
     video.addEventListener('loadedmetadata',markReady);
     video.addEventListener('durationchange',markReady);
     video.addEventListener('canplay',markReady);
+    video.addEventListener('canplaythrough',markReady);
     function attachSrc(url){
       video.src=url;
       try{video.load();}catch(e){}
@@ -547,8 +548,11 @@ function buildMp4ScrubClientJs(cid: string, opts: { splitText: boolean }): strin
     attachSrc(srcUrl);
     video.addEventListener('error',function(){
       if(blobUrl)return;
-      fetch(srcUrl,{credentials:'same-origin',mode:'cors'})
+      var fallbackCtl=new AbortController();
+      var fallbackTimer=setTimeout(function(){fallbackCtl.abort();},45000);
+      fetch(srcUrl,{credentials:'same-origin',mode:'cors',signal:fallbackCtl.signal})
         .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.blob();})
+        .finally(function(){clearTimeout(fallbackTimer);})
         .then(function(blob){
           if(!blob||!blob.size)throw new Error('empty blob');
           blobUrl=URL.createObjectURL(blob);
