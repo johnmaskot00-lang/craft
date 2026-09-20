@@ -1084,12 +1084,18 @@ export default function EditorPage() {
                 console.warn("[editor] fetchCode reload failed:", fetchErr);
               }
             }
-            if (targetCode) {
+            const waitingForAnimation = Boolean(
+              data.animPending && (targetCode || "").includes('data-scroll-anim-pending="1"'),
+            );
+            if (targetCode && !waitingForAnimation) {
               setStreamedCode(targetCode);
               setStreamedFile(targetFile);
               gotFinalCode = true;
             }
-            setOptimisticFiles(prev => {
+            // Do not expose the server's intermediate pending HTML as a ready
+            // site. Keep the full-screen generation state until the baked HTML
+            // replaces the pending animation section.
+            if (!waitingForAnimation) setOptimisticFiles(prev => {
               const next = { ...prev };
               if (data.code) next["index.html"] = data.code;
               if (targetFile !== "index.html" && targetCode) next[targetFile] = targetCode;
