@@ -327,6 +327,7 @@ export default function EditorPage() {
   const [isPublishing, setIsPublishing] = useState(false);
   const [publishResult, setPublishResult] = useState<string | null>(null);
   const [publishError, setPublishError] = useState<string | null>(null);
+  const publishJobPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [copied, setCopied] = useState(false);
   const [customDomain, setCustomDomain] = useState("");
   const [domainAdding, setDomainAdding] = useState(false);
@@ -483,6 +484,7 @@ export default function EditorPage() {
 
   useEffect(() => {
     return () => {
+      if (publishJobPollRef.current) clearInterval(publishJobPollRef.current);
       if (animPollRef.current) clearInterval(animPollRef.current);
       if (previewBlobUrlRef.current) {
         URL.revokeObjectURL(previewBlobUrlRef.current);
@@ -1588,7 +1590,6 @@ export default function EditorPage() {
     setPublishResult(null);
     try {
       let res = await fetch(`/api/projects/${project.id}/publish`, { method: "POST", credentials: "include" });
-      // One retry on 401 — brief Amvera restarts can race a still-valid cookie.
       if (res.status === 401) {
         await new Promise((r) => setTimeout(r, 1200));
         res = await fetch(`/api/projects/${project.id}/publish`, { method: "POST", credentials: "include" });
@@ -1596,16 +1597,45 @@ export default function EditorPage() {
       const data = await res.json().catch(() => ({}));
       if (res.status === 401) {
         clearClientAuth();
-        setPublishError("Сессия истекла — войдите снова, затем повторите публикацию.");
+        setPublishError("?????? ??????? ? ??????? ?????, ????? ????????? ??????????.");
         setTimeout(() => setLocation("/auth"), 800);
         return;
       }
-      if (!res.ok) throw new Error(data.message || "Ошибка публикации");
-      setPublishResult(data.url);
+      if (!res.ok) throw new Error(data.message || "?????? ??????????");
+      if (data.url) {
+        setPublishResult(data.url);
+        setIsPublishing(false);
+      } else if (data.jobId) {
+        setPublishError("?????????? ???????????? ?? ???????. ????????? ?????????? ?????????????.");
+        const jobId = Number(data.jobId);
+        const startedAt = Date.now();
+        if (publishJobPollRef.current) clearInterval(publishJobPollRef.current);
+        publishJobPollRef.current = setInterval(async () => {
+          try {
+            const jobRes = await fetch(`/api/jobs/${jobId}`, { credentials: "include" });
+            const job = jobRes.ok ? await jobRes.json() : null;
+            if (!job) return;
+            if (job.state === "completed" && job.result?.url) {
+              clearInterval(publishJobPollRef.current!);
+              publishJobPollRef.current = null;
+              setPublishError(null);
+              setPublishResult(job.result.url);
+              setIsPublishing(false);
+              queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+            } else if (job.state === "failed" || Date.now() - startedAt > 60 * 60 * 1000) {
+              clearInterval(publishJobPollRef.current!);
+              publishJobPollRef.current = null;
+              setPublishError(job.error || "?????????? ?? ???????????. ?????????? ??? ???.");
+              setIsPublishing(false);
+            }
+          } catch { /* keep polling through transient disconnects */ }
+        }, 3000);
+      } else {
+        throw new Error("?????? ?? ??????? ????????? ??????????");
+      }
       queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
     } catch (e: any) {
-      setPublishError(e.message);
-    } finally {
+      setPublishError(e.message || "?? ??????? ????????? ??????????");
       setIsPublishing(false);
     }
   };
