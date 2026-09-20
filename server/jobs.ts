@@ -174,9 +174,31 @@ export async function updateGenerationJob(
   const [row] = await db
     .update(generationJobs)
     .set(values as any)
-    .where(eq(generationJobs.id, id))
+    .where(
+      and(
+        eq(generationJobs.id, id),
+        sql`(worker_id IS NULL OR worker_id = ${WORKER_ID})`,
+      ),
+    )
     .returning();
   return row;
+}
+
+/** Extend a claimed job lease only while this worker still owns it. */
+export async function renewGenerationJobLease(id: number): Promise<boolean> {
+  await ensureGenerationJobsTable();
+  const result = await db.execute(sql`
+    UPDATE generation_jobs
+    SET lease_until = CURRENT_TIMESTAMP + (${Math.ceil(JOB_LEASE_MS / 1000)} || ' seconds')::interval,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ${id}
+      AND state = 'running'
+      AND worker_id = ${WORKER_ID}
+      AND lease_until >= CURRENT_TIMESTAMP
+    RETURNING id
+  `);
+  const rows = (result as any)?.rows || (Array.isArray(result) ? result : []);
+  return rows.length > 0;
 }
 
 export async function completeGenerationJob(

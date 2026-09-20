@@ -9,6 +9,7 @@ import {
   claimNextQueuedJob,
   completeGenerationJob,
   failGenerationJob,
+  renewGenerationJobLease,
   type JobKind,
   ensureGenerationJobsTable,
 } from "./jobs";
@@ -44,6 +45,16 @@ export async function processOneJob(kinds: JobKind[] = DEFAULT_KINDS): Promise<b
     console.warn(`[worker] claimed unsupported kind=${job.kind}; leaving it queued`);
     return false;
   }
+  let leaseLost = false;
+  const leaseTimer = setInterval(() => {
+    void renewGenerationJobLease(job.id).then((owned) => {
+      if (!owned) {
+        leaseLost = true;
+        console.warn(`[worker] lease lost for job ${job.id}; result will not be committed`);
+      }
+    }).catch((e) => console.warn(`[worker] lease renewal failed for job ${job.id}:`, e?.message || e));
+  }, Math.max(15_000, Math.floor(Number(process.env.CRAFT_JOB_LEASE_MS || 900_000) / 3)));
+  leaseTimer.unref?.();
   try {
     const result = await handler({
       id: job.id,
@@ -52,10 +63,14 @@ export async function processOneJob(kinds: JobKind[] = DEFAULT_KINDS): Promise<b
       kind: job.kind,
       payload: (job.payload as Record<string, unknown>) || {},
     });
-    await completeGenerationJob(job.id, (result as Record<string, unknown>) || {});
+    if (!leaseLost) {
+      await completeGenerationJob(job.id, (result as Record<string, unknown>) || {});
+    }
   } catch (e: any) {
     console.error(`[worker] job ${job.id} failed:`, e?.message || e);
-    await failGenerationJob(job.id, e?.message || String(e));
+    if (!leaseLost) await failGenerationJob(job.id, e?.message || String(e));
+  } finally {
+    clearInterval(leaseTimer);
   }
   return true;
 }

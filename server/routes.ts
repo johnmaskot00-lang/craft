@@ -241,6 +241,12 @@ const seoGenerateLimiter = rateLimit("seo-generate", {
 const proxyLimiter = rateLimit("proxy", { windowMs: 60_000, max: 60, keyGenerator: userOrIpKey });
 
 const objectStorage = new ObjectStorageService();
+let healthQueueCache: { at: number; value: { queued: number; running: number } } = {
+  at: 0,
+  value: { queued: -1, running: -1 },
+};
+const HEALTH_QUEUE_CACHE_MS = 5000;
+
 
 function extractLibraryImageUrls(html: string): string[] {
   if (!html) return [];
@@ -4549,6 +4555,14 @@ export async function registerRoutes(
         if (raw) gitSha = JSON.parse(raw)?.gitSha || null;
       } catch { /* ignore */ }
     }
+    const healthLoad = getLoadStats();
+    if (Date.now() - healthQueueCache.at >= HEALTH_QUEUE_CACHE_MS) {
+      healthQueueCache = {
+        at: Date.now(),
+        value: await queueDepth().catch(() => ({ queued: -1, running: -1 })),
+      };
+    }
+    const queue = healthQueueCache.value;
     return res.json({
       ok: true,
       database: "ok",
@@ -4557,6 +4571,16 @@ export async function registerRoutes(
       gitSha,
       redis: redisEnabled(),
       uptime: Math.round(process.uptime()),
+      instance: process.env.HOSTNAME || `pid-${process.pid}`,
+      queue,
+      load: {
+        heapPressure: healthLoad.heapPressure,
+        memoryRssMb: Math.round(Number(healthLoad.memory?.rss || 0) / 1024 / 1024),
+        generate: healthLoad.generate,
+        publish: healthLoad.publish,
+        images: healthLoad.images,
+        uploads: healthLoad.uploads,
+      },
     });
   });
 
