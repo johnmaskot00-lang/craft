@@ -3184,7 +3184,7 @@ async function generateGptImage(
           if (!urls[0]) { taskFailed = true; sawConfirmedKieFailure = true; break; }
           // KIE already billed this task — never discard a successful result.
           try {
-            const imgResp = await fetch(urls[0]);
+            const imgResp = await fetch(urls[0], { signal: AbortSignal.timeout(30_000) });
             if (imgResp.ok) {
               let buf = Buffer.from(await imgResp.arrayBuffer());
               let mime = "image/jpeg";
@@ -3608,7 +3608,7 @@ async function autoFillMissingImages(
       // only re-upload remote KIE URLs; never re-encode cutouts as JPEG.
       if (!cutout && !/^\/objects\//.test(resolvedUrl) && !resolvedUrl.includes("/objects/")) {
         try {
-          const imgResp = await fetch(resolvedUrl);
+          const imgResp = await fetch(resolvedUrl, { signal: AbortSignal.timeout(30_000) });
           if (imgResp.ok) {
             const buf = Buffer.from(await imgResp.arrayBuffer());
             const localUrl = await uploadToObjectStorage(buf, "image/jpeg", "jpg");
@@ -8537,7 +8537,7 @@ ${designAnalysis}
         const promptParam = (req.query.prompt as string) || "";
         for (const extUrl of externalUrls) {
           try {
-            const imgResp = await fetch(extUrl);
+            const imgResp = await fetch(extUrl, { signal: AbortSignal.timeout(30_000) });
             if (imgResp.ok) {
               const buf = Buffer.from(await imgResp.arrayBuffer());
               const localUrl = await uploadToObjectStorage(buf, "image/jpeg", "jpg");
@@ -8976,7 +8976,7 @@ ${designAnalysis}
       if (!allowed) {
         return res.status(400).json({ message: "Недопустимый URL" });
       }
-      const resp = await fetch(url);
+      const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) });
       if (!resp.ok) throw new Error("Failed to download GLB");
       const arrayBuf = await resp.arrayBuffer();
       const buffer = Buffer.from(arrayBuf);
@@ -11152,7 +11152,7 @@ ${fullHtml}`;
             for (let i = 0; i < 3 && !mp4Buf; i++) {
               if (i > 0) await new Promise(r => setTimeout(r, 10000));
               try {
-                const vr = await fetch(mp4Url);
+                const vr = await fetch(mp4Url, { signal: AbortSignal.timeout(45_000) });
                 if (!vr.ok) throw new Error(`HTTP ${vr.status}`);
                 const b = Buffer.from(await vr.arrayBuffer());
                 if (b.length >= 10000) mp4Buf = b;

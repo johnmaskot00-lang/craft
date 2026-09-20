@@ -341,6 +341,7 @@ export default function EditorPage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const animPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const generationStatusRequestRef = useRef(false);
 
   const { data: project, isLoading: projectLoading, isError: projectError, refetch: refetchProject } = useQuery<ProjectWithHero>({
     queryKey: ["/api/projects", projectId],
@@ -566,9 +567,12 @@ export default function EditorPage() {
 
     animPollRef.current = setInterval(async () => {
       try {
+        if (generationStatusRequestRef.current) return;
+        generationStatusRequestRef.current = true;
         const statusResp = await fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" });
-        if (!statusResp.ok) return;
+        if (!statusResp.ok) { generationStatusRequestRef.current = false; return; }
         const status = await statusResp.json().catch(() => null);
+        generationStatusRequestRef.current = false;
         if (!status) return;
 
         const prevUpdated = (queryClient.getQueryData(["/api/projects", projectId]) as any)?.updatedAt;
@@ -932,6 +936,7 @@ export default function EditorPage() {
                 const statusResp = await fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" });
                 if (!statusResp.ok) return;
                 const status = await statusResp.json().catch(() => null);
+        generationStatusRequestRef.current = false;
                 if (!status) return;
                 const done =
                   (!status.active && !status.generatingPlaceholder) ||
@@ -1167,6 +1172,7 @@ export default function EditorPage() {
                   const statusResp = await fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" });
                   if (!statusResp.ok) return;
                   const status = await statusResp.json().catch(() => null);
+        generationStatusRequestRef.current = false;
                   if (!status) return;
                   const ready = status.animReady || (!status.animPending && !status.active);
                   if (!ready) return;
@@ -1566,6 +1572,7 @@ export default function EditorPage() {
             const statusResp = await fetch(`/api/projects/${project.id}/generation-status`, { credentials: "include" });
             if (!statusResp.ok) return;
             const status = await statusResp.json().catch(() => null);
+        generationStatusRequestRef.current = false;
             if (!status) return;
             const timedOut = Date.now() - pollStart > 25 * 60 * 1000;
             const ready = status.animReady || (!status.animPending && !status.active);
