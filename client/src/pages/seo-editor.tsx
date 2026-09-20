@@ -1279,7 +1279,7 @@ export default function SeoEditorPage() {
           <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="mb-4 flex items-center justify-between"><h2 className="text-base font-bold text-slate-800">Яндекс.Метрика</h2><button onClick={() => setYandexOpen(false)}><X className="h-5 w-5 text-slate-400" /></button></div>
             <p className="mb-3 text-xs text-slate-500">Один счётчик будет добавлен на все HTML-страницы SEO-сайта.</p>
-            <div className="flex gap-2"><input value={yandexMetrika} onChange={e => setYandexMetrika(e.target.value.replace(/\D/g, ""))} placeholder="Например, 12345678" className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm" inputMode="numeric" /><button onClick={() => void saveSeoMetrika()} disabled={!yandexMetrika.trim() || yandexSaving} className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{yandexSaving ? "?" : "Сохранить"}</button></div>
+            <div className="flex gap-2"><input value={yandexMetrika} onChange={e => setYandexMetrika(e.target.value.replace(/\D/g, ""))} placeholder="Например, 12345678" className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm" inputMode="numeric" /><button onClick={() => void saveSeoMetrika()} disabled={!yandexMetrika.trim() || yandexSaving} className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{yandexSaving ? "?" : "?????????"}</button></div>
           </div>
         </div>
       )}
