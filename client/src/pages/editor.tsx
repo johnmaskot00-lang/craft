@@ -1138,7 +1138,7 @@ export default function EditorPage() {
               if (animPollRef.current) clearInterval(animPollRef.current);
               const pollStart = Date.now();
               const POLL_INTERVAL = GEN_STATUS_POLL_MS;
-              const POLL_TIMEOUT = 45 * 60 * 1000; // match Kling queue (up to ~35 min)
+              const POLL_TIMEOUT = 45 * 60 * 1000; // animation jobs can legitimately wait longer
               const finishAnim = (rawCode: string, proj?: any, timedOut = false) => {
                 clearInterval(animPollRef.current!);
                 animPollRef.current = null;
@@ -1264,7 +1264,7 @@ export default function EditorPage() {
         setGenerationStatus("Соединение прервалось — дожидаемся ответ на сервере…");
         setIsGenerating(true);
         const pollStart = Date.now();
-        const POLL_TIMEOUT = 12 * 60 * 1000;
+        const POLL_TIMEOUT = 7 * 60 * 1000;
         if (animPollRef.current) clearInterval(animPollRef.current);
         animPollRef.current = setInterval(async () => {
           try {

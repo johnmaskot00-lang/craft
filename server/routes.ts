@@ -5033,7 +5033,7 @@ export async function registerRoutes(
         const age = nowMs - new Date(job.updatedAt || job.createdAt).getTime();
         const limit = job.state === "queued"
           ? 5 * 60_000
-          : job.kind === "publish" ? 45 * 60_000 : 25 * 60_000;
+          : job.kind === "publish" ? 45 * 60_000 : 12 * 60_000;
         return age > limit && ["site-generate", "seo-generate", "seo-edit", "publish"].includes(job.kind);
       });
       for (const stale of staleJobs) {
