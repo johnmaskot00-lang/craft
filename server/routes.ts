@@ -7661,6 +7661,13 @@ ${designAnalysis}
         });
       }
 
+      // Never persist or stream raw animation markers. A marker contains the
+      // model prompt and is an implementation detail, not user-facing HTML.
+      if (immediateHtml.includes("{{SCROLLANIM:") || immediateHtml.includes("{{ANIMATIONAL:")) {
+        console.warn(`[GENERATE] raw animation marker survived replacement for project ${project.id}; forcing pending placeholder`);
+        immediateHtml = scrollAnimPendingHtml([{ title: "", sub: "" }], undefined, interactiveStyle || "parallax");
+      }
+
       // Version history (save previous code before overwrite)
       if (project.generatedCode && project.generatedCode.trim()) {
         const currentFiles = await storage.getProjectFiles(project.id);
