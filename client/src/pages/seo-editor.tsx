@@ -168,6 +168,7 @@ export default function SeoEditorPage() {
   const [domainIp, setDomainIp] = useState("");
   const [yandexMetrika, setYandexMetrika] = useState("");
   const [yandexSaving, setYandexSaving] = useState(false);
+  const [yandexOpen, setYandexOpen] = useState(false);
 
   /* ── single query, no polling — SSE provides live updates ── */
   const { data, isLoading, refetch } = useQuery<{
@@ -941,6 +942,7 @@ export default function SeoEditorPage() {
               <button onClick={() => setAddKwOpen(true)} title="Добавить новый пак ключей" className={pillBtn}>
                 <PlusCircle className="w-4 h-4" /><span className="hidden lg:inline">Ключи</span>
               </button>
+              <button onClick={() => setYandexOpen(true)} title="??????.???????" className={iconBtn} data-testid="button-yandex-metrika"><BarChart2 className="w-4 h-4" /></button>
               <input
                 ref={faviconInputRef}
                 type="file"
@@ -1051,14 +1053,6 @@ export default function SeoEditorPage() {
 
           {(phase === "structure" || phase === "generating" || phase === "done") && cfg && (
             <>
-              {phase === "done" && (
-                <div className="mx-4 mt-3 mb-1 rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  <div className="text-xs font-semibold text-slate-700 mb-1">??????.??????? ??? ???? ???????</div>
-                  <div className="text-[11px] text-slate-400 mb-2">??????? ID ?????? ????????. ?? ????? ???????? ?? ??? HTML-???????? ?????.</div>
-                  <div className="flex gap-2"><input value={yandexMetrika} onChange={e => setYandexMetrika(e.target.value.replace(/\D/g, ""))} placeholder="????????, 12345678" className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs" inputMode="numeric" /><button onClick={() => void saveSeoMetrika()} disabled={!yandexMetrika.trim() || yandexSaving} className="rounded-lg bg-slate-800 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">{yandexSaving ? "?" : "?????????"}</button></div>
-                </div>
-              )}
-
               <div className="px-5 py-3 border-b border-slate-100 flex justify-around">
                 <Stat value={cfg.pagesGenerated} label="готово" color="#10b981" />
                 <div className="w-px bg-slate-100" />
@@ -1283,6 +1277,16 @@ export default function SeoEditorPage() {
       </div>
 
       {/* ═══ MODAL: Publish + custom domain ═══ */}
+      {yandexOpen && (
+        <div className="fixed inset-0 z-[220] flex items-center justify-center bg-black/50 p-4" onClick={() => setYandexOpen(false)}>
+          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <div className="mb-4 flex items-center justify-between"><h2 className="text-base font-bold text-slate-800">??????.???????</h2><button onClick={() => setYandexOpen(false)}><X className="h-5 w-5 text-slate-400" /></button></div>
+            <p className="mb-3 text-xs text-slate-500">???? ??????? ????? ???????? ?? ??? HTML-???????? SEO-?????.</p>
+            <div className="flex gap-2"><input value={yandexMetrika} onChange={e => setYandexMetrika(e.target.value.replace(/\D/g, ""))} placeholder="????????, 12345678" className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm" inputMode="numeric" /><button onClick={() => void saveSeoMetrika()} disabled={!yandexMetrika.trim() || yandexSaving} className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{yandexSaving ? "?" : "?????????"}</button></div>
+          </div>
+        </div>
+      )}
+
       {showPublishModal && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.72)", zIndex: 220, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
           <div style={{ background: "#fff", color: "#111", borderRadius: 16, width: "100%", maxWidth: 480, maxHeight: "90vh", overflow: "hidden", display: "flex", flexDirection: "column", boxShadow: "0 24px 64px rgba(0,0,0,.45)" }}>
