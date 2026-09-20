@@ -29,6 +29,18 @@ function isCraftGeneratingHtml(code?: string | null): boolean {
   return !!(code && code.includes('data-craft-generating="1"'));
 }
 
+function hasUnbakedAnimation(code?: string | null): boolean {
+  return !!code && (
+    /data-scroll-anim-pending="1"/i.test(code) ||
+    /data-animational-pending="1"/i.test(code) ||
+    /\{\{\s*(?:SCROLLANIM|ANIMATIONAL):/i.test(code)
+  );
+}
+
+function isPreviewReady(code?: string | null): boolean {
+  return !!code && !isCraftGeneratingHtml(code) && !hasUnbakedAnimation(code);
+}
+
 /** Background generation-status polls — keep light under many concurrent editors. */
 const GEN_STATUS_POLL_MS = 8000;
 const GEN_STATUS_POLL_FAST_MS = 6000;
@@ -515,7 +527,7 @@ export default function EditorPage() {
     if (!project) return;
     const code = project.generatedCode || "";
     const waitingSite = isCraftGeneratingHtml(code);
-    const waitingAnim = code.includes('data-scroll-anim-pending="1"');
+    const waitingAnim = hasUnbakedAnimation(code);
     // A durable job can outlive the SSE and may already have written the final
     // HTML, so refresh the status once even when no placeholder is visible.
     // This is what makes a browser reload safe during V1/V2 generation.
@@ -594,7 +606,7 @@ export default function EditorPage() {
 
         const c: string = proj?.generatedCode || "";
         const stillSite = isCraftGeneratingHtml(c);
-        const stillAnim = c.includes('data-scroll-anim-pending="1"');
+        const stillAnim = hasUnbakedAnimation(c);
         const timedOut = Date.now() - pollStart > POLL_TIMEOUT;
 
         // Site HTML ready (even if video still baking) → show it and switch status.
@@ -3069,14 +3081,10 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
 
   // Freeze iframe HTML identity — never rebuild from edit/selector mode.
   const previewSrcDoc = useMemo(() => {
-    // While generating OR baking anim, prefer the latest streamed/polled HTML once
-    // the server has replaced the craft-generating placeholder.
-    if (isGenerating || animBaking) {
-      const live = streamedCode || project?.generatedCode || "";
-      if (live && !isCraftGeneratingHtml(live)) return getPreviewCode(live) || "";
-      return getPreviewCode(project?.generatedCode || "") || "";
-    }
-    return getPreviewCode(currentCode) || "";
+    const live = isGenerating || animBaking
+      ? (streamedCode || project?.generatedCode || "")
+      : currentCode;
+    return isPreviewReady(live) ? getPreviewCode(live) || "" : "";
   }, [isGenerating, animBaking, project?.generatedCode, streamedCode, currentCode, getPreviewCode]);
 
   const deviceWidths = { desktop: "100%", tablet: "768px", mobile: isMobile ? "100%" : "375px" };
