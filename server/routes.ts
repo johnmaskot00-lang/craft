@@ -5018,11 +5018,13 @@ export async function registerRoutes(
       const nowMs = Date.now();
       const staleJobs = activeJobs.filter((job: any) => {
         const age = nowMs - new Date(job.updatedAt || job.createdAt).getTime();
-        const limit = job.state === "queued" ? 5 * 60_000 : 25 * 60_000;
-        return age > limit && ["site-generate", "seo-generate", "seo-edit"].includes(job.kind);
+        const limit = job.state === "queued"
+          ? 5 * 60_000
+          : job.kind === "publish" ? 45 * 60_000 : 25 * 60_000;
+        return age > limit && ["site-generate", "seo-generate", "seo-edit", "publish"].includes(job.kind);
       });
       for (const stale of staleJobs) {
-        await failGenerationJob(stale.id, "Generation lease expired; retry is safe").catch(() => undefined);
+        await failGenerationJob(stale.id, `${stale.kind} lease expired; retry is safe`).catch(() => undefined);
       }
       if (staleJobs.length) {
         activeJobs = await listProjectJobs(projectId, { activeOnly: true, limit: 3 }).catch(() => []);
