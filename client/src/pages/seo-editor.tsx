@@ -227,19 +227,16 @@ export default function SeoEditorPage() {
     setYandexSaving(true);
     try {
       const res = await fetch(`/api/projects/${id}/yandex`, { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify({ metrika: yandexMetrika.trim() }) });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message || "?? ??????? ????????? ???????");
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message || "Не удалось сохранить Метрику." );
       await refetch();
-      toast({ title: "??????? ????????", description: "??? ??????? ???????? ?? ??? HTML-???????? ?????." });
-    } catch (e: any) { toast({ title: "?????? ??????????", description: e?.message || "?????????? ??? ???", variant: "destructive" }); }
+      toast({ title: "Счётчик сохранён", description: "Код Метрики добавлен на все HTML-страницы сайта." });
+    } catch (e: any) { toast({ title: "Ошибка сохранения", description: e?.message || "Попробуйте ещё раз", variant: "destructive" }); }
     finally { setYandexSaving(false); }
   }
 
   async function handleAnalyze() {
     const name = projectName.trim();
-      toast({ title: "??????? ????????", description: "??? ??????? ???????? ?? ??? HTML-???????? ?????." });
     const keywords = keywordsText.split(/[\n,]+/).map(k => k.trim()).filter(Boolean);
-      toast({ title: "??????? ????????", description: "??? ??????? ???????? ?? ??? HTML-???????? ?????." });
-      toast({ title: "??????? ????????", description: "??? ??????? ???????? ?? ??? HTML-???????? ?????." });
     setIsAnalyzing(true);
     setAnalyzeElapsed(0);
     analyzeTimerRef.current = setInterval(() => setAnalyzeElapsed(s => s + 1), 1000);
@@ -942,7 +939,7 @@ export default function SeoEditorPage() {
               <button onClick={() => setAddKwOpen(true)} title="Добавить новый пак ключей" className={pillBtn}>
                 <PlusCircle className="w-4 h-4" /><span className="hidden lg:inline">Ключи</span>
               </button>
-              <button onClick={() => setYandexOpen(true)} title="??????.???????" className={iconBtn} data-testid="button-yandex-metrika"><BarChart2 className="w-4 h-4" /></button>
+              <button onClick={() => setYandexOpen(true)} title="Яндекс.Метрика" className={iconBtn} data-testid="button-yandex-metrika"><BarChart2 className="w-4 h-4" /></button>
               <input
                 ref={faviconInputRef}
                 type="file"
@@ -1280,9 +1277,9 @@ export default function SeoEditorPage() {
       {yandexOpen && (
         <div className="fixed inset-0 z-[220] flex items-center justify-center bg-black/50 p-4" onClick={() => setYandexOpen(false)}>
           <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl" onClick={e => e.stopPropagation()}>
-            <div className="mb-4 flex items-center justify-between"><h2 className="text-base font-bold text-slate-800">??????.???????</h2><button onClick={() => setYandexOpen(false)}><X className="h-5 w-5 text-slate-400" /></button></div>
-            <p className="mb-3 text-xs text-slate-500">???? ??????? ????? ???????? ?? ??? HTML-???????? SEO-?????.</p>
-            <div className="flex gap-2"><input value={yandexMetrika} onChange={e => setYandexMetrika(e.target.value.replace(/\D/g, ""))} placeholder="????????, 12345678" className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm" inputMode="numeric" /><button onClick={() => void saveSeoMetrika()} disabled={!yandexMetrika.trim() || yandexSaving} className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{yandexSaving ? "?" : "?????????"}</button></div>
+            <div className="mb-4 flex items-center justify-between"><h2 className="text-base font-bold text-slate-800">Яндекс.Метрика</h2><button onClick={() => setYandexOpen(false)}><X className="h-5 w-5 text-slate-400" /></button></div>
+            <p className="mb-3 text-xs text-slate-500">Один счётчик будет добавлен на все HTML-страницы SEO-сайта.</p>
+            <div className="flex gap-2"><input value={yandexMetrika} onChange={e => setYandexMetrika(e.target.value.replace(/\D/g, ""))} placeholder="Например, 12345678" className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm" inputMode="numeric" /><button onClick={() => void saveSeoMetrika()} disabled={!yandexMetrika.trim() || yandexSaving} className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{yandexSaving ? "?" : "Сохранить"}</button></div>
           </div>
         </div>
       )}
