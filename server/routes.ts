@@ -5620,7 +5620,13 @@ export async function registerRoutes(
       const NEW_SITE_GENERATION_COST = 100;
       const EDIT_GENERATION_COST = 30;
 
-      const { prompt, images, imageBase64, imageMimeType, activeFile, selectedElement, skipEnhance, deepResearchData, idempotencyKey, multiPagesData, seoH1, seoH2s, mockupMode, imageUrls, videoUrls, modelUrls, audioUrls, leadForm, agentVersion, agentMode, interactiveMode, interactiveStyle, interactiveProductImageUrl } = req.body;
+      const { prompt, images, imageBase64, imageMimeType, activeFile, selectedElement, skipEnhance, deepResearchData, idempotencyKey, multiPagesData, seoH1, seoH2s, mockupMode, imageUrls, videoUrls, modelUrls, audioUrls, leadForm, agentVersion, agentMode, interactiveMode, interactiveProductImageUrl } = req.body;
+      // «Объём» retired from create UI — remap stale clients/drafts to parallax.
+      let interactiveStyle = req.body.interactiveStyle;
+      if (interactiveStyle === "volume") {
+        console.warn("[AGENT] interactiveStyle=volume retired → parallax");
+        interactiveStyle = "parallax";
+      }
       // Make product image URL absolute so external services (Kling) can fetch it
       let absoluteProductImageUrl: string | undefined = undefined;
       if (interactiveProductImageUrl && typeof interactiveProductImageUrl === "string") {
