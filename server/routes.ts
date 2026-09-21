@@ -6804,10 +6804,10 @@ ${designAnalysis}
           if (
             toolResult.toolsSupported &&
             toolResult.changedFiles.size === 0 &&
-            toolProviderUsed === primaryProvider &&
-            !pointEdit
+            toolProviderUsed === primaryProvider
           ) {
-            // Skip alternate retry for tiny point edits — doubles API cost for no gain.
+            // Replit-style completion: if primary finished without a patch, one
+            // alternate-model attempt (same prompt/workspace seed) before refund.
             console.warn(`[AGENT] ${primaryProvider} returned no code changes; fallback → ${alternateProvider}`);
             res.write(`data: ${JSON.stringify({
               status: `${primaryProvider === "gemini" ? "Gemini" : "Claude"} не внёс правки — пробую ${alternateProvider === "gemini" ? "Gemini" : "Claude"}…`,

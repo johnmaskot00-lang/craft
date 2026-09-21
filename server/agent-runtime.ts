@@ -1273,6 +1273,29 @@ function shouldStopAfterEditRound(
   return false;
 }
 
+/**
+ * Replit-style: a failed provider round must NOT discard patches already applied
+ * in earlier rounds. Return those changes as success; only rethrow when nothing
+ * was mutated (caller may then try an alternate model from a fresh workspace).
+ */
+function keepPartialProgressOrThrow(
+  e: unknown,
+  workspace: SiteWorkspace,
+  streamedText: string,
+  roundLabel: string,
+): { summary: string; streamedText: string } {
+  if (workspace.changedFiles.size === 0) throw e;
+  const msg = String((e as any)?.message || e).slice(0, 180);
+  console.warn(
+    `[AGENT] ${roundLabel} failed after ${workspace.changedFiles.size} file(s) already patched — keeping changes:`,
+    msg,
+  );
+  return {
+    summary: streamedText.trim().slice(0, 500) || "Правки применены (провайдер оборвал следующий шаг)",
+    streamedText,
+  };
+}
+
 async function runClaudeToolCallingAgent(opts: {
   systemPrompt: string;
   userPrompt: string;
@@ -1305,14 +1328,27 @@ async function runClaudeToolCallingAgent(opts: {
       opts.onStatus?.(`Агент думает… (шаг ${round + 1}/${maxRounds})`);
     }, 12_000);
     heartbeat.unref?.();
-    let roundResult: Awaited<ReturnType<typeof kieClaudeToolsRound>>;
+    let roundResult: Awaited<ReturnType<typeof kieClaudeToolsRound>> | undefined;
     try {
-      roundResult = await kieClaudeToolsRound(messages, opts.systemPrompt, tools);
+      try {
+        roundResult = await kieClaudeToolsRound(messages, opts.systemPrompt, tools);
+      } catch (e) {
+        const kept = keepPartialProgressOrThrow(e, workspace, streamedText, `Claude round ${round + 1}/${maxRounds}`);
+        summary = kept.summary;
+        streamedText = kept.streamedText;
+        break;
+      }
     } finally {
       clearInterval(heartbeat);
     }
+    if (!roundResult) break;
 
     if (!roundResult.toolsSupported) {
+      // Tools unavailable mid-loop: still return any patches already applied.
+      if (workspace.changedFiles.size > 0) {
+        summary = streamedText.trim().slice(0, 500) || "Правки применены";
+        break;
+      }
       return {
         ok: false,
         usedTools: false,
@@ -1409,14 +1445,26 @@ async function runGeminiToolCallingAgent(opts: {
       opts.onStatus?.(`Gemini-агент думает… (шаг ${round + 1}/${maxRounds})`);
     }, 12_000);
     heartbeat.unref?.();
-    let roundResult: Awaited<ReturnType<typeof kieGeminiToolsRound>>;
+    let roundResult: Awaited<ReturnType<typeof kieGeminiToolsRound>> | undefined;
     try {
-      roundResult = await kieGeminiToolsRound(contents, opts.systemPrompt, tools);
+      try {
+        roundResult = await kieGeminiToolsRound(contents, opts.systemPrompt, tools);
+      } catch (e) {
+        const kept = keepPartialProgressOrThrow(e, workspace, streamedText, `Gemini round ${round + 1}/${maxRounds}`);
+        summary = kept.summary;
+        streamedText = kept.streamedText;
+        break;
+      }
     } finally {
       clearInterval(heartbeat);
     }
+    if (!roundResult) break;
 
     if (!roundResult.toolsSupported) {
+      if (workspace.changedFiles.size > 0) {
+        summary = streamedText.trim().slice(0, 500) || "Правки применены";
+        break;
+      }
       return {
         ok: false,
         usedTools: false,
