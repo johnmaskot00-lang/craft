@@ -4049,6 +4049,53 @@ type SelectedEditTarget = {
   snippetTruncated: boolean;
 };
 
+/** Small exact SEARCH seed for oneshot — never dump the whole page. */
+function buildOneshotFocusSnippet(
+  pageCode: string,
+  target: SelectedEditTarget | null,
+  userPrompt: string,
+): string {
+  const fromPrompt = String(userPrompt || "").match(/HTML_BEGIN\s*\n([\s\S]*?)\nHTML_END/i)?.[1]?.trim() || "";
+  const candidate = (target?.outerSnippet || fromPrompt || "").trim();
+  if (!candidate) {
+    // Fallback only when selection HTML is missing — keep it small.
+    return String(pageCode || "")
+      .replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, "__B64__")
+      .slice(0, 8_000);
+  }
+  // Prefer a live substring from the page so SEARCH matches byte-for-byte.
+  const src = candidate.match(/\bsrc=["']([^"']+)["']/i)?.[1];
+  if (src) {
+    const srcIdx = pageCode.indexOf(src);
+    if (srcIdx >= 0) {
+      const tagStart = pageCode.lastIndexOf("<", srcIdx);
+      let tagEnd = pageCode.indexOf(">", srcIdx);
+      if (tagStart >= 0 && tagEnd > tagStart) {
+        // Include a little parent context for uniqueness without bloating.
+        const winStart = Math.max(0, tagStart - 120);
+        const winEnd = Math.min(pageCode.length, tagEnd + 1 + 120);
+        return pageCode.slice(winStart, winEnd).trim();
+      }
+    }
+  }
+  if (target?.text && target.text.length >= 12) {
+    const tIdx = pageCode.indexOf(target.text.slice(0, Math.min(80, target.text.length)));
+    if (tIdx >= 0) {
+      const tagStart = pageCode.lastIndexOf("<", tIdx);
+      const tagEnd = pageCode.indexOf(">", tIdx);
+      const close = pageCode.indexOf(`</${target.tag || "p"}>`, tIdx);
+      const winStart = Math.max(0, (tagStart >= 0 ? tagStart : tIdx) - 80);
+      const winEnd = Math.min(
+        pageCode.length,
+        close > tIdx ? close + (`</${target.tag || "p"}>`).length : (tagEnd > tIdx ? tagEnd + 1 : tIdx + 200) + 80,
+      );
+      return pageCode.slice(winStart, winEnd).trim();
+    }
+  }
+  if (pageCode.includes(candidate)) return candidate;
+  return candidate.slice(0, 2_000);
+}
+
 function compactDiffFragment(raw: string): string {
   const withoutData = String(raw || "")
     .replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/g, "[изображение]")
@@ -6340,16 +6387,29 @@ URL (для ориентира, не для прямой вставки маке
         });
 
         editPromptBase = systemContent;
+        const oneshotLikely =
+          !!selectedEditTarget
+          || /\[Выбранный элемент:/i.test(String(prompt || ""))
+          || String(prompt || "").replace(/\[Выбранный элемент:[\s\S]*?\]\s*/i, "").trim().length < 220;
+        // Drop image-library dump on oneshot — selected HTML already has the URL.
+        let baseForEdit = editPromptBase;
+        if (oneshotLikely) {
+          baseForEdit = baseForEdit
+            .replace(/\nДОСТУПНЫЕ ИЗОБРАЖЕНИЯ В БИБЛИОТЕКЕ ПОЛЬЗОВАТЕЛЯ:[\s\S]*?(?=\n═══|\n⚡|\n🔧|$)/i, "\n")
+            .replace(/\nДля загруженных фото[\s\S]*?{{GENIMG:[\s\S]*?\n/i, "\n");
+        }
         systemContent = buildMultipageEditSystemPrompt({
-          baseSystem: editPromptBase,
+          baseSystem: baseForEdit,
           activeFile: safeEditingFile,
           craftMd: craftMdForEdit,
           pages: sitePages,
           useToolsHint: true,
           budget: editBudget,
+          oneShot: oneshotLikely,
         });
         // Stash on project-scoped locals via closure — conversation history uses the same budget.
         (req as any)._craftEditBudget = editBudget;
+        (req as any)._craftOneShotLikely = oneshotLikely;
         if (selectedEditTarget) {
           systemContent += `\n\n🚨 ТОЧНАЯ ЦЕЛЬ ВЫБРАНА ПОЛЬЗОВАТЕЛЕМ:
 - Разрешённая страница: ${selectedEditTarget.page}
@@ -6357,7 +6417,7 @@ URL (для ориентира, не для прямой вставки маке
 - Текст-якорь: ${selectedEditTarget.text || "(нет)"}
 - DOM-путь в preview: ${String(selectedElement.path || "").slice(0, 120)}
 
-Сначала найди этот элемент в странице ${selectedEditTarget.page}. Меняй именно его или CSS/JS, который адресует его tag/class. Не применяй правку к похожему блоку на другой странице. Разложи запрос пользователя на список требований и перед finish проверь, что выполнено КАЖДОЕ требование. В finish перечисли только фактически сделанные изменения.\n`;
+Меняй именно этот элемент (или его обёртку), SEARCH бери из HTML_BEGIN/ФОКУС. Не трогай другие блоки. В finish перечисли только фактические изменения.\n`;
         }
         if (isDesignOnlyEditRequest(prompt)) {
           systemContent += `\n${DESIGN_ONLY_TEXT_LOCK}\n`;
@@ -6709,7 +6769,13 @@ ${designAnalysis}
               role: m.role as "user" | "assistant",
               text: m.content.map((c: any) => (c.type === "input_text" ? c.text : "")).join("\n").slice(0, 800),
             }))
-            .filter((h) => h.text.trim());
+            .filter((h) => h.text.trim())
+            // Drop billing/credit footers — they confuse tool-calling and bloat the payload.
+            .map((h) => ({
+              ...h,
+              text: h.text.replace(/\n?—\s*Списано[\s\S]*$/i, "").trim(),
+            }))
+            .filter((h) => h.text.length > 8 && !/^в\s+\S+\s+заменено/i.test(h.text));
 
           const mediaContextLines = [
             ...[...new Set(savedImageUrls)].map((url) => `- image: ${url}`),
@@ -6731,34 +6797,25 @@ ${designAnalysis}
             !!selectedEditTarget
             || /\[Выбранный элемент:/i.test(String(prompt || ""))
             || String(prompt || "").replace(/\[Выбранный элемент:[\s\S]*?\]\s*/i, "").trim().length < 220;
-          // Replit oneshot: seed the active page, pre-mark read, only apply_patch+finish, 1 API round.
+          // Replit oneshot: tiny focus seed + no chat history + apply_patch+finish only.
           const oneShot = pointEdit;
-          const seedCap = oneShot ? 40_000 : 0;
           let seededSnippet = "";
-          if (seedCap > 0 && activePageCode) {
-            const { stripped } = stripBase64(activePageCode);
-            const compact = stripped.length > seedCap
-              ? `${stripped.slice(0, seedCap)}\n...[обрезано ${stripped.length - seedCap}]`
-              : stripped;
-            seededSnippet =
-              `\n\n═══ ФОКУС: ${safeActive} (уже прочитан — SEARCH копируй отсюда ДОСЛОВНО) ═══\n` +
-              `\`\`\`html\n${compact}\n\`\`\`\n`;
+          if (oneShot && activePageCode) {
+            const focus = buildOneshotFocusSnippet(activePageCode, selectedEditTarget, String(prompt || ""));
+            if (focus) {
+              seededSnippet =
+                `\n\n═══ ФОКУС: ${safeActive} (SEARCH копируй отсюда ДОСЛОВНО) ═══\n` +
+                `\`\`\`html\n${focus}\n\`\`\`\n`;
+            }
           }
           const editMaxRounds = oneShot ? 1 : 6;
-          const oneshotSystemAddon = oneShot
-            ? `\n\n⚡ REPLIT ONESHOT (обязательно):\n` +
-              `- Ровно ОДИН ответ модели = один API-запрос.\n` +
-              `- В этом ответе вызови apply_patch И finish ВМЕСТЕ (параллельно).\n` +
-              `- НЕ вызывай list_pages / read_page / write_page — кода в блоке ФОКУС достаточно.\n` +
-              `- SEARCH — точная копия из ФОКУС; replace — только запрошенное изменение.\n`
-            : "";
 
           const runEditTools = (provider: "gemini" | "claude") => runToolCallingAgent({
-              systemPrompt: systemContent + oneshotSystemAddon,
+              systemPrompt: systemContent,
               userPrompt:
                 `${prompt}${mediaContext}${seededSnippet}\n\n` +
                 (oneShot
-                  ? `Сделай как Replit Agent за 1 шаг: в ОДНОМ ответе вызови apply_patch (SEARCH из ФОКУС) и сразу finish(summary). Никаких других tools.`
+                  ? `Сделай как Replit Agent за 1 шаг: в ОДНОМ ответе вызови apply_patch (SEARCH из HTML_BEGIN или ФОКУС) и сразу finish(summary). Никаких других tools.`
                   : `Работай как Replit Agent: 1) read_page нужных файлов 2) apply_patch 3) finish. ` +
                     `Можно несколько tool_use в одном ответе.`) +
                 ` Выполни ВСЕ пункты запроса. Если указан hero / выбранный элемент / секция — меняй только её. ` +
@@ -6766,9 +6823,10 @@ ${designAnalysis}
                 `Тексты не переписывай, если не просили явно.`,
               pages: sitePages,
               craftMd: craftMdForEdit,
-              history: hist.slice(-4),
+              // Oneshot must not replay prior chat (billing summaries / unrelated edits).
+              history: oneShot ? [] : hist.slice(-4),
               maxRounds: editMaxRounds,
-              preReadFiles: seedCap > 0 ? [safeActive] : [],
+              preReadFiles: oneShot ? [safeActive] : [],
               tools: oneShot ? SITE_AGENT_ONESHOT_TOOLS : undefined,
               oneShot,
               provider,

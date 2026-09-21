@@ -785,20 +785,28 @@ export function buildMultipageEditSystemPrompt(opts: {
   pages: SitePage[];
   useToolsHint: boolean;
   budget?: EditContextBudget;
+  /** Selected/point edit: apply_patch+finish only — no read_page cycle text. */
+  oneShot?: boolean;
 }): string {
   const budget = opts.budget || resolveEditContextBudget(opts.pages);
+  const oneShot = !!opts.oneShot;
   // Tool mode = Replit architecture: map + memory only. Code is fetched via tools.
-  // Stream/diff fallback still needs a slim code dump when tools are unsupported.
-  const manifest = buildSiteManifest(opts.pages, opts.craftMd, budget.craftMdChars);
+  // Oneshot: drop craft.md journal noise so the model focuses on the element.
+  const craftForPrompt = oneShot
+    ? opts.craftMd.replace(/## Журнал изменений[\s\S]*$/i, "").trim().slice(0, 900)
+    : opts.craftMd;
+  const manifest = buildSiteManifest(opts.pages, craftForPrompt, oneShot ? 900 : budget.craftMdChars);
 
   let prompt = opts.baseSystem;
   prompt += `\n\n${"═".repeat(43)}
-${opts.useToolsHint ? "REPLIT-STYLE AGENT — WORKSPACE TOOLS" : "РЕЖИМ РЕДАКТИРОВАНИЯ САЙТА — MULTIPAGE DIFF"}
+${oneShot ? "REPLIT ONESHOT — apply_patch + finish" : opts.useToolsHint ? "REPLIT-STYLE AGENT — WORKSPACE TOOLS" : "РЕЖИМ РЕДАКТИРОВАНИЯ САЙТА — MULTIPAGE DIFF"}
 ${"═".repeat(43)}
 Пользователь смотрит «${opts.activeFile}». Источник правды — файлы workspace на сервере.
-${opts.useToolsHint
-  ? "Полный HTML в этот промпт НЕ вложен. Сначала list_pages / read_page нужного файла, затем apply_patch, затем finish."
-  : `Контекст ужат (режим ${budget.label}).`}
+${oneShot
+  ? "Код целевого элемента уже в запросе (HTML_BEGIN / ФОКУС). В ОДНОМ ответе вызови apply_patch и finish. Не читай файлы заново."
+  : opts.useToolsHint
+    ? "Полный HTML в этот промпт НЕ вложен. Сначала list_pages / read_page нужного файла, затем apply_patch, затем finish."
+    : `Контекст ужат (режим ${budget.label}).`}
 
 ⚠️ ПРАВИЛА:
 1. Меняй только то, что просит пользователь; сохраняй nav/footer и ссылки между страницами
@@ -809,12 +817,19 @@ ${opts.useToolsHint
 6. ИНТЕРАКТИВНЫЙ HERO (data-craft-scrollanim / data-frames / data-video / …): не переписывай секцию и её <style>/<script> целиком без явной просьбы; текст оверлеев сохраняй дословно
 7. GEO: не выкидывай JSON-LD, FAQ, canonical, /llms.txt
 8. ТЕКСТ: не перефразируй копирайт без явной просьбы. «Смени дизайн» ≠ «перепиши текст»
-9. SEARCH копируй из результата read_page (актуальный файл), не придумывай по памяти
+${oneShot
+  ? "9. SEARCH копируй ДОСЛОВНО из HTML_BEGIN или ФОКУС в запросе пользователя"
+  : "9. SEARCH копируй из результата read_page (актуальный файл), не придумывай по памяти"}
 
 ${manifest}
 `;
 
-  if (opts.useToolsHint) {
+  if (oneShot) {
+    prompt += `
+🔧 ONESHOT TOOLS: только apply_patch + finish в одном ответе.
+SEARCH = точная копия из HTML_BEGIN/ФОКУС. Не вызывай list_pages / read_page / write_page.
+`;
+  } else if (opts.useToolsHint) {
     prompt += `
 🔧 ИНСТРУМЕНТЫ (как у Replit Agent):
 list_pages → read_page(filename) → apply_patch / write_page → finish(summary)
