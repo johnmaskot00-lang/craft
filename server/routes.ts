@@ -6723,15 +6723,15 @@ ${designAnalysis}
               systemPrompt: systemContent,
               userPrompt:
                 `${prompt}${mediaContext}\n\n` +
-                `Сделай ТОЛЬКО эту правку. Сначала мысленно разложи запрос на чек-лист и выполни ВСЕ его пункты. ` +
-                `Код уже в system prompt — используй точный apply_patch. После результата патча проверь каждый пункт и только затем вызови finish. ` +
-                `Если указан hero / выбранный элемент / секция — меняй только её. ` +
+                `Работай как Replit Agent: код сайта в промпт не вложен. ` +
+                `1) read_page (или list_pages) для нужных файлов 2) apply_patch с SEARCH из прочитанного кода 3) finish. ` +
+                `Выполни ВСЕ пункты запроса. Если указан hero / выбранный элемент / секция — меняй только её. ` +
                 `Не вызывай finish без реального изменения кода. Не удаляй контент, который не просили убрать. ` +
-                `В finish конкретно перечисли, что изменено; шаблонные «Сайт обновлён» и «Готово» запрещены.`,
+                `Тексты не переписывай, если не просили. В finish конкретно перечисли изменения.`,
               pages: sitePages,
               craftMd: craftMdForEdit,
-              history: hist.slice(-12),
-              maxRounds: 4,
+              history: hist.slice(-6),
+              maxRounds: 6,
               provider,
               onStatus: (status) => {
                 try { res.write(`data: ${JSON.stringify({ status })}\n\n`); } catch {}
