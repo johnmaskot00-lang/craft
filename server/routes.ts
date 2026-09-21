@@ -3982,6 +3982,32 @@ function isDesignOnlyEditRequest(rawPrompt: string): boolean {
   return /(дизайн|стил|цвет|палитр|шрифт|типограф|фон|layout|макет|оформлен|визуал|кнопк|отступ|радиус|градиент|анимац|hover|адаптив|мобил|минимал|luxury|glass|редзайн|перекрась|покрась)/i.test(prompt);
 }
 
+/** Full-site redesign / Three.js / structure overhaul — must NOT use oneshot apply_patch. */
+function isFullSiteRewriteRequest(rawPrompt: string): boolean {
+  const prompt = String(rawPrompt || "")
+    .replace(/\[Выбранный элемент:[\s\S]*?\]\s*/i, "")
+    .replace(/═══\s*ФОКУС:[\s\S]*$/i, "")
+    .trim();
+  if (!prompt) return false;
+  return (
+    /(переделай|пересобери|перестрой|редизайн|переработай|сделай\s+заново|с\s*нуля).{0,48}(полностью|целиком|весь|всю|сайт|структур|дизайн)/i.test(prompt)
+    || /(полностью|целиком|весь|всю).{0,24}(переделай|пересобери|редизайн|сайт|структур|дизайн)/i.test(prompt)
+    || /three\.?\s*js|webgl|полноценн\w*\s+3d|3d[\s-]*элемент/i.test(prompt)
+    || /(супер\s*)?анимирован\w*.{0,40}(three|3d|структур|сайт)/i.test(prompt)
+    || /добавь.{0,40}(three|webgl|3d)/i.test(prompt)
+  );
+}
+
+/**
+ * Oneshot (1 API round, apply_patch+finish only) ONLY for selected-element edits.
+ * Never oneshot for full redesign — length heuristics falsely catch short rewrite asks.
+ */
+function isOneshotEditRequest(rawPrompt: string, hasSelectedTarget: boolean): boolean {
+  if (isFullSiteRewriteRequest(rawPrompt)) return false;
+  if (hasSelectedTarget) return true;
+  return /\[Выбранный элемент:/i.test(String(rawPrompt || ""));
+}
+
 const DESIGN_ONLY_TEXT_LOCK = `
 🚨 СОХРАНЕНИЕ ТЕКСТА (ОБЯЗАТЕЛЬНО ДЛЯ ЭТОГО ЗАПРОСА):
 Пользователь просит изменить дизайн/стиль, НЕ копирайт.
@@ -3989,6 +4015,15 @@ const DESIGN_ONLY_TEXT_LOCK = `
 2. Меняй только CSS / классы / layout / цвета / шрифты / декоративные элементы.
 3. Не вызывай write_page ради «красивого нового текста». Если нужен write_page — скопируй существующие строки 1:1.
 4. В finish явно подтверди, что тексты не менялись.
+`;
+
+const FULL_SITE_REWRITE_GUIDANCE = `
+🚨 ПОЛНАЯ ПЕРЕРАБОТКА САЙТА (этот запрос):
+1. Это НЕ точечный apply_patch. Сначала read_page("index.html"), затем write_page с полноценным новым HTML (или несколько крупных патчей).
+2. Сохрани дословно все видимые тексты пользователя, JSON-LD/FAQ/canonical/llms.txt и существующие /objects|/uploads URL картинок.
+3. Three.js / WebGL / 3D: РАЗРЕШЕНО подключить с CDN (например https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js) и добавить canvas/сцену.
+4. Сделай заметную анимацию и 3D-элементы — не ограничивайся сменой пары CSS-переменных.
+5. В finish опиши, что именно стало 3D/анимированным.
 `;
 
 const AGENT_CHAT_SYSTEM_PROMPT = `Ты — Craft Agent, AI-напарник по сайту в стиле Replit Agent.
@@ -6387,10 +6422,8 @@ URL (для ориентира, не для прямой вставки маке
         });
 
         editPromptBase = systemContent;
-        const oneshotLikely =
-          !!selectedEditTarget
-          || /\[Выбранный элемент:/i.test(String(prompt || ""))
-          || String(prompt || "").replace(/\[Выбранный элемент:[\s\S]*?\]\s*/i, "").trim().length < 220;
+        const oneshotLikely = isOneshotEditRequest(String(prompt || ""), !!selectedEditTarget);
+        const fullRewrite = isFullSiteRewriteRequest(String(prompt || ""));
         // Drop image-library dump on oneshot — selected HTML already has the URL.
         let baseForEdit = editPromptBase;
         if (oneshotLikely) {
@@ -6419,7 +6452,9 @@ URL (для ориентира, не для прямой вставки маке
 
 Меняй именно этот элемент (или его обёртку), SEARCH бери из HTML_BEGIN/ФОКУС. Не трогай другие блоки. В finish перечисли только фактические изменения.\n`;
         }
-        if (isDesignOnlyEditRequest(prompt)) {
+        if (fullRewrite) {
+          systemContent += `\n${FULL_SITE_REWRITE_GUIDANCE}\n`;
+        } else if (isDesignOnlyEditRequest(prompt)) {
           systemContent += `\n${DESIGN_ONLY_TEXT_LOCK}\n`;
         }
       }
@@ -6806,11 +6841,9 @@ ${designAnalysis}
             sitePages.find((p) => p.filename.toLowerCase() === safeActive)?.code
             || sitePages.find((p) => p.filename === "index.html")?.code
             || "";
-          const pointEdit =
-            !!selectedEditTarget
-            || /\[Выбранный элемент:/i.test(String(prompt || ""))
-            || String(prompt || "").replace(/\[Выбранный элемент:[\s\S]*?\]\s*/i, "").trim().length < 220;
-          // Replit oneshot: tiny focus seed + lean chat memory + apply_patch+finish only.
+          const pointEdit = isOneshotEditRequest(String(prompt || ""), !!selectedEditTarget);
+          const fullRewrite = isFullSiteRewriteRequest(String(prompt || ""));
+          // Replit oneshot ONLY for selected-element tweaks — never for full redesign.
           const oneShot = pointEdit;
           let seededSnippet = "";
           if (oneShot && activePageCode) {
@@ -6821,9 +6854,9 @@ ${designAnalysis}
                 `\`\`\`html\n${focus}\n\`\`\`\n`;
             }
           }
-          const editMaxRounds = oneShot ? 1 : 6;
-          // Oneshot: last 2 user intents + matching replies (context without 40k HTML).
-          const agentHistory = oneShot ? hist.slice(-4) : hist.slice(-4);
+          const editMaxRounds = oneShot ? 1 : fullRewrite ? 8 : 6;
+          // Lean chat memory: last ~2 turns of intents/replies (no HTML dumps, no «Списано»).
+          const agentHistory = hist.slice(-4);
 
           const runEditTools = (provider: "gemini" | "claude") => runToolCallingAgent({
               systemPrompt: systemContent,
@@ -6831,9 +6864,17 @@ ${designAnalysis}
                 `${prompt}${mediaContext}${seededSnippet}\n\n` +
                 (oneShot
                   ? `Сделай как Replit Agent за 1 шаг: в ОДНОМ ответе вызови apply_patch (SEARCH из HTML_BEGIN или ФОКУС) и сразу finish(summary). Никаких других tools.`
-                  : `Работай как Replit Agent: 1) read_page нужных файлов 2) apply_patch 3) finish. ` +
-                    `Можно несколько tool_use в одном ответе.`) +
-                ` Выполни ВСЕ пункты запроса. Если указан hero / выбранный элемент / секция — меняй только её. ` +
+                  : fullRewrite
+                    ? `Полная переработка: 1) read_page("${safeActive}") 2) write_page с новым полноценным HTML (тексты и медиа URL сохрани) + Three.js/анимации по запросу 3) finish. ` +
+                      `Можно несколько tool_use в одном ответе. Не ограничивайся мелким apply_patch.`
+                    : `Работай как Replit Agent: 1) read_page нужных файлов 2) apply_patch 3) finish. ` +
+                      `Можно несколько tool_use в одном ответе.`) +
+                ` Выполни ВСЕ пункты запроса. ` +
+                (oneShot
+                  ? `Если указан hero / выбранный элемент / секция — меняй только её. `
+                  : fullRewrite
+                    ? `Переработай дизайн и структуру целиком, сохранив контент пользователя. `
+                    : `Если указан hero / выбранный элемент / секция — меняй только её. `) +
                 `Не вызывай finish без реального изменения кода. Не удаляй контент, который не просили. ` +
                 `Тексты не переписывай, если не просили явно.`,
               pages: sitePages,
