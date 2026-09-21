@@ -76,6 +76,83 @@ export function restoreBase64Images(code: string, map: Map<string, string>): str
   return result;
 }
 
+/**
+ * Shrink HTML for the model prompt only. Real files on disk stay untouched —
+ * apply_patch SEARCH must still match the live page, so we remove noise that
+ * is rarely patched (scripts, comments, giant SVGs) instead of rewriting markup.
+ */
+export function compressHtmlForAgentContext(code: string): string {
+  let out = code || "";
+  out = out.replace(/<script\b[\s\S]*?<\/script>/gi, "<!--script omitted; use read_page if needed-->");
+  out = out.replace(/<!--[\s\S]*?-->/g, "");
+  // Keep short inline styles; drop multi-KB <style> blobs from the prompt.
+  out = out.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, (block) =>
+    block.length > 2500 ? "<style>/* omitted large stylesheet — use read_page */</style>" : block,
+  );
+  out = out.replace(/\sd="[^"]{400,}"/gi, ' d="[path omitted]"');
+  // Trim only runs of blank lines — keep normal whitespace so SEARCH can still match.
+  out = out.replace(/\n{3,}/g, "\n\n");
+  return out.trim();
+}
+
+export function totalSiteChars(pages: SitePage[]): number {
+  return pages.reduce((sum, p) => sum + (p.code?.length || 0), 0);
+}
+
+export type EditContextBudget = {
+  maxTotalChars: number;
+  activeFileChars: number;
+  otherFilePreviewChars: number;
+  craftMdChars: number;
+  chromePerPage: number;
+  historyMessages: number;
+  historyMsgChars: number;
+  includeOtherFullPages: boolean;
+  label: "normal" | "large" | "huge";
+};
+
+/** Adaptive prompt budget — oversized sites (many edits) must not blow KIE/router.cheap. */
+export function resolveEditContextBudget(pages: SitePage[]): EditContextBudget {
+  const total = totalSiteChars(pages);
+  if (total >= 250_000 || pages.length >= 8) {
+    return {
+      maxTotalChars: 42_000,
+      activeFileChars: 32_000,
+      otherFilePreviewChars: 700,
+      craftMdChars: 1_500,
+      chromePerPage: 1_000,
+      historyMessages: 2,
+      historyMsgChars: 600,
+      includeOtherFullPages: false,
+      label: "huge",
+    };
+  }
+  if (total >= 90_000 || pages.length >= 4) {
+    return {
+      maxTotalChars: 55_000,
+      activeFileChars: 40_000,
+      otherFilePreviewChars: 1_200,
+      craftMdChars: 2_500,
+      chromePerPage: 2_000,
+      historyMessages: 4,
+      historyMsgChars: 900,
+      includeOtherFullPages: false,
+      label: "large",
+    };
+  }
+  return {
+    maxTotalChars: 80_000,
+    activeFileChars: 55_000,
+    otherFilePreviewChars: 1_800,
+    craftMdChars: 4_000,
+    chromePerPage: 4_000,
+    historyMessages: 6,
+    historyMsgChars: 1_500,
+    includeOtherFullPages: true,
+    label: "normal",
+  };
+}
+
 function extractPageTitle(code: string): string {
   const title = code.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim();
   if (title) return title.slice(0, 80);
@@ -204,7 +281,7 @@ export async function refreshCraftMdPages(
   return md;
 }
 
-export function buildSiteManifest(pages: SitePage[], craftMd: string): string {
+export function buildSiteManifest(pages: SitePage[], craftMd: string, craftMdChars = 6000): string {
   const htmlPages = pages.filter((p) => isHtmlPage(p.filename));
   const cssPages = pages.filter((p) => p.filename.toLowerCase().endsWith(".css"));
   const lines = [
@@ -216,23 +293,28 @@ export function buildSiteManifest(pages: SitePage[], craftMd: string): string {
     ...cssPages.map((p) => `• ${p.filename} — ${p.code.length} символов — глобальные стили сайта`),
   ];
 
+  const mdBudget = Math.max(800, craftMdChars);
   return `═══ КАРТА САЙТА (все страницы доступны для редактирования) ═══
 ${lines.join("\n") || "• index.html"}
 
 ═══ craft.md (память агента) ═══
-${craftMd.slice(0, 6000)}
-${craftMd.length > 6000 ? "\n...[craft.md обрезан]" : ""}
+${craftMd.slice(0, mdBudget)}
+${craftMd.length > mdBudget ? "\n...[craft.md обрезан]" : ""}
 `;
 }
 
-/** Include full page sources for the agent (with size budget). */
+/** Include page sources for the agent (with size budget + HTML compression). */
 export function buildPagesContext(
   pages: SitePage[],
   activeFile: string,
-  maxTotalChars = 110_000,
+  maxTotalChars = 80_000,
+  budget?: Pick<EditContextBudget, "activeFileChars" | "otherFilePreviewChars" | "includeOtherFullPages">,
 ): { context: string; base64Maps: Map<string, Map<string, string>> } {
   const base64Maps = new Map<string, Map<string, string>>();
   const editable = pages.filter((p) => isEditableSiteFile(p.filename));
+  const activeCap = budget?.activeFileChars ?? Math.min(55_000, maxTotalChars);
+  const otherPreview = budget?.otherFilePreviewChars ?? 1_800;
+  const includeOtherFull = budget?.includeOtherFullPages ?? true;
 
   // Prioritize active file, then CSS, then index, then others by size ascending
   const ordered = [...editable].sort((a, b) => {
@@ -251,6 +333,9 @@ export function buildPagesContext(
   for (const page of ordered) {
     const { stripped, map } = stripBase64Images(page.code || "");
     base64Maps.set(page.filename, map);
+    const isCss = page.filename.toLowerCase().endsWith(".css");
+    const compact = isCss ? stripped : compressHtmlForAgentContext(stripped);
+    const isActive = page.filename === activeFile;
 
     const header = `\n─── FILE: ${page.filename} ───\n`;
     const remaining = maxTotalChars - used;
@@ -259,32 +344,48 @@ export function buildPagesContext(
       continue;
     }
 
-    const fence = page.filename.toLowerCase().endsWith(".css") ? "css" : "html";
-    if (stripped.length + 200 <= remaining || page.filename === activeFile) {
-      const budget = page.filename === activeFile ? Math.min(stripped.length, Math.max(remaining - 200, 20_000)) : Math.min(stripped.length, remaining - 200);
-      if (budget >= stripped.length) {
-        parts.push(`${header}\`\`\`${fence}\n${stripped}\n\`\`\`\n`);
-        used += stripped.length + 200;
+    const fence = isCss ? "css" : "html";
+    if (isActive) {
+      const budgetChars = Math.min(compact.length, activeCap, remaining - 200);
+      if (budgetChars >= compact.length) {
+        parts.push(`${header}\`\`\`${fence}\n${compact}\n\`\`\`\n`);
+        used += compact.length + 200;
       } else {
-        parts.push(`${header}\`\`\`${fence}\n${stripped.slice(0, budget)}\n\`\`\`\n...[обрезано ${stripped.length - budget} символов — для полного кода вызови read_page("${page.filename}")]\n`);
-        used += budget + 200;
+        parts.push(`${header}\`\`\`${fence}\n${compact.slice(0, budgetChars)}\n\`\`\`\n...[обрезано ${compact.length - budgetChars} символов — для полного кода вызови read_page("${page.filename}")]\n`);
+        used += budgetChars + 200;
       }
-    } else {
-      const excerpt = stripped.slice(0, Math.min(1800, remaining - 200));
-      parts.push(`${header}(превью ${excerpt.length}/${stripped.length} символов)\n\`\`\`${fence}\n${excerpt}\n\`\`\`\n...[используй read_page для полного файла]\n`);
-      used += excerpt.length + 200;
+      continue;
     }
+
+    // Secondary pages: full body only when the site is still small.
+    if (includeOtherFull && (isCss || compact.length + 200 <= remaining)) {
+      const cap = Math.min(compact.length, remaining - 200, isCss ? 20_000 : 12_000);
+      if (cap >= compact.length) {
+        parts.push(`${header}\`\`\`${fence}\n${compact}\n\`\`\`\n`);
+        used += compact.length + 200;
+      } else {
+        parts.push(`${header}\`\`\`${fence}\n${compact.slice(0, cap)}\n\`\`\`\n...[обрезано — read_page("${page.filename}")]\n`);
+        used += cap + 200;
+      }
+      continue;
+    }
+
+    const excerpt = compact.slice(0, Math.min(otherPreview, remaining - 200));
+    parts.push(`${header}(превью ${excerpt.length}/${compact.length} символов)\n\`\`\`${fence}\n${excerpt}\n\`\`\`\n...[используй read_page для полного файла]\n`);
+    used += excerpt.length + 200;
   }
 
   return { context: parts.join("\n"), base64Maps };
 }
 
 /** Build a compact cross-page comparison of the shared site chrome. */
-export function buildSharedChromeContext(pages: SitePage[], maxPerPage = 7000): string {
+export function buildSharedChromeContext(pages: SitePage[], maxPerPage = 4000): string {
   const htmlPages = pages.filter((p) => isHtmlPage(p.filename));
   if (htmlPages.length < 2) return "";
-  const blocks = htmlPages.map((page) => {
-    const code = page.code || "";
+  // Cap how many shells we dump — huge multipage sites otherwise re-bloat the prompt.
+  const limited = htmlPages.slice(0, 6);
+  const blocks = limited.map((page) => {
+    const code = compressHtmlForAgentContext(page.code || "");
     const header = code.match(/<header\b[\s\S]*?<\/header>/i)?.[0] || "";
     const nav = code.match(/<nav\b[\s\S]*?<\/nav>/i)?.[0] || "";
     const footer = code.match(/<footer\b[\s\S]*?<\/footer>/i)?.[0] || "";
@@ -292,7 +393,8 @@ export function buildSharedChromeContext(pages: SitePage[], maxPerPage = 7000): 
     const clipped = shell.length > maxPerPage ? `${shell.slice(0, maxPerPage)}\n...[shared shell clipped]` : shell;
     return `\n--- SHARED SHELL: ${page.filename} ---\n${clipped || "[header/nav/footer not found]"}`;
   });
-  return `=== SHARED MENU COMPARISON FOR ALL PAGES ===${blocks.join("\n")}\n=== END SHARED MENU COMPARISON ===`;
+  const more = htmlPages.length > limited.length ? `\n(+${htmlPages.length - limited.length} страниц без shell — read_page при необходимости)` : "";
+  return `=== SHARED MENU COMPARISON FOR ALL PAGES ===${blocks.join("\n")}${more}\n=== END SHARED MENU COMPARISON ===`;
 }
 
 /** Extract shared shell (nav + footer) from SEO page HTML for compact agent context. */
@@ -655,16 +757,19 @@ export function buildMultipageEditSystemPrompt(opts: {
   craftMd: string;
   pages: SitePage[];
   useToolsHint: boolean;
+  budget?: EditContextBudget;
 }): string {
-  const manifest = buildSiteManifest(opts.pages, opts.craftMd);
-  const { context } = buildPagesContext(opts.pages, opts.activeFile);
-  const sharedChrome = buildSharedChromeContext(opts.pages);
+  const budget = opts.budget || resolveEditContextBudget(opts.pages);
+  const manifest = buildSiteManifest(opts.pages, opts.craftMd, budget.craftMdChars);
+  const { context } = buildPagesContext(opts.pages, opts.activeFile, budget.maxTotalChars, budget);
+  const sharedChrome = buildSharedChromeContext(opts.pages, budget.chromePerPage);
 
   let prompt = opts.baseSystem;
   prompt += `\n\n${"═".repeat(43)}
 РЕЖИМ РЕДАКТИРОВАНИЯ САЙТА — MULTIPAGE AGENT
 ${"═".repeat(43)}
 Пользователь сейчас смотрит файл «${opts.activeFile}», но ты видишь ВЕСЬ сайт и можешь менять ЛЮБУЮ страницу (и несколько сразу), если запрос этого требует.
+Контекст ужат (режим ${budget.label}, лимит ~${budget.maxTotalChars} символов кода): неполная страница → read_page перед патчем.
 
 ⚠️ ПРАВИЛА:
 1. Меняй только то, что просит пользователь; сохраняй nav/footer и ссылки между страницами
@@ -678,9 +783,10 @@ ${"═".repeat(43)}
 9. ИНТЕРАКТИВНЫЙ HERO: секции с data-craft-scrollanim / data-frames / data-video / data-base / data-reveal / data-base-m / data-reveal-m / data-craft-motion и следующие за ними <style>/<script> — НЕ удаляй и НЕ переписывай целиком, если пользователь явно не просит убрать анимацию. При смене дизайна меняй CSS/классы; текст оверлеев сохраняй дословно. Не подменяй /objects/... на внешние стоки (Vimeo и т.п.)
 10. GEO: не выкидывай JSON-LD, FAQ, canonical и ссылку на /llms.txt
 11. ТЕКСТ: не переписывай и не «улучшай» копирайт без явной просьбы. Запрос на дизайн/стиль/цвета/шрифты ≠ разрешение менять слова.
+12. SEARCH в apply_patch бери из актуального файла (при обрезанном контексте сначала read_page) — не из укороченного превью.
 
 ${manifest}
-
+${sharedChrome ? `\n${sharedChrome}\n` : ""}
 ═══ ИСХОДНЫЙ КОД СТРАНИЦ ═══
 ${context}
 `;
