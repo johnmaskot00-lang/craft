@@ -6764,18 +6764,31 @@ ${designAnalysis}
           const hist = conversationHistory
             .filter((m) => m.role === "user" || m.role === "assistant")
             .slice(0, -1)
-            .slice(-6)
-            .map((m) => ({
-              role: m.role as "user" | "assistant",
-              text: m.content.map((c: any) => (c.type === "input_text" ? c.text : "")).join("\n").slice(0, 800),
-            }))
-            .filter((h) => h.text.trim())
-            // Drop billing/credit footers — they confuse tool-calling and bloat the payload.
-            .map((h) => ({
-              ...h,
-              text: h.text.replace(/\n?—\s*Списано[\s\S]*$/i, "").trim(),
-            }))
-            .filter((h) => h.text.length > 8 && !/^в\s+\S+\s+заменено/i.test(h.text));
+            .slice(-8)
+            .map((m) => {
+              let text = m.content.map((c: any) => (c.type === "input_text" ? c.text : "")).join("\n").trim();
+              // Drop billing footers — they confuse tool-calling and bloat the payload.
+              text = text.replace(/\n?—\s*Списано[\s\S]*$/i, "").trim();
+              if (m.role === "user") {
+                // Keep the user's intent, not prior HTML dumps / selection blobs.
+                text = text
+                  .replace(/\[Выбранный элемент:[\s\S]*?\]\s*/gi, "")
+                  .replace(/═══\s*ФОКУС:[\s\S]*$/i, "")
+                  .replace(/```html[\s\S]*?```/gi, "")
+                  .replace(/\n{2,}/g, "\n")
+                  .trim()
+                  .slice(0, 280);
+              } else {
+                // Keep a short outcome note, drop mechanical «В index.html заменено…» walls.
+                text = text
+                  .replace(/^В\s+\S+\s+заменено[\s\S]*?(?=\n\n|$)/i, "")
+                  .trim()
+                  .slice(0, 220);
+                if (!text) text = "Правка применена.";
+              }
+              return { role: m.role as "user" | "assistant", text };
+            })
+            .filter((h) => h.text.length > 2);
 
           const mediaContextLines = [
             ...[...new Set(savedImageUrls)].map((url) => `- image: ${url}`),
@@ -6797,7 +6810,7 @@ ${designAnalysis}
             !!selectedEditTarget
             || /\[Выбранный элемент:/i.test(String(prompt || ""))
             || String(prompt || "").replace(/\[Выбранный элемент:[\s\S]*?\]\s*/i, "").trim().length < 220;
-          // Replit oneshot: tiny focus seed + no chat history + apply_patch+finish only.
+          // Replit oneshot: tiny focus seed + lean chat memory + apply_patch+finish only.
           const oneShot = pointEdit;
           let seededSnippet = "";
           if (oneShot && activePageCode) {
@@ -6809,6 +6822,8 @@ ${designAnalysis}
             }
           }
           const editMaxRounds = oneShot ? 1 : 6;
+          // Oneshot: last 2 user intents + matching replies (context without 40k HTML).
+          const agentHistory = oneShot ? hist.slice(-4) : hist.slice(-4);
 
           const runEditTools = (provider: "gemini" | "claude") => runToolCallingAgent({
               systemPrompt: systemContent,
@@ -6823,8 +6838,7 @@ ${designAnalysis}
                 `Тексты не переписывай, если не просили явно.`,
               pages: sitePages,
               craftMd: craftMdForEdit,
-              // Oneshot must not replay prior chat (billing summaries / unrelated edits).
-              history: oneShot ? [] : hist.slice(-4),
+              history: agentHistory,
               maxRounds: editMaxRounds,
               preReadFiles: oneShot ? [safeActive] : [],
               tools: oneShot ? SITE_AGENT_ONESHOT_TOOLS : undefined,
