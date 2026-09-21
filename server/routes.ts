@@ -6720,19 +6720,48 @@ ${designAnalysis}
             ? `\n\nПРИКРЕПЛЁННЫЕ МЕДИАФАЙЛЫ (используй точные URL в нужном месте сайта):\n${mediaContextLines.join("\n")}`
             : "";
 
+          const safeActive =
+            String(activeFile || "index.html").trim().toLowerCase() || "index.html";
+          const activePageCode =
+            sitePages.find((p) => p.filename.toLowerCase() === safeActive)?.code
+            || sitePages.find((p) => p.filename === "index.html")?.code
+            || "";
+          const pointEdit =
+            !!selectedEditTarget
+            || /\[Выбранный элемент:/i.test(String(prompt || ""))
+            || String(prompt || "").replace(/\[Выбранный элемент:[\s\S]*?\]\s*/i, "").trim().length < 220;
+          // Point edits: seed a window of the active page so round 1 can
+          // apply_patch+finish without a separate read_page API call.
+          const seedCap = pointEdit ? 18_000 : 0;
+          let seededSnippet = "";
+          if (seedCap > 0 && activePageCode) {
+            const { stripped } = stripBase64(activePageCode);
+            const compact = stripped.length > seedCap
+              ? `${stripped.slice(0, seedCap)}\n...[обрезано ${stripped.length - seedCap} — при необходимости read_page]`
+              : stripped;
+            seededSnippet =
+              `\n\n═══ ФОКУС: ${safeActive} (уже «прочитан», можно сразу apply_patch) ═══\n` +
+              `\`\`\`html\n${compact}\n\`\`\`\n`;
+          }
+          const editMaxRounds = pointEdit ? 3 : 6;
+
           const runEditTools = (provider: "gemini" | "claude") => runToolCallingAgent({
               systemPrompt: systemContent,
               userPrompt:
-                `${prompt}${mediaContext}\n\n` +
-                `Работай как Replit Agent: код сайта в промпт не вложен. ` +
-                `1) read_page (или list_pages) для нужных файлов 2) apply_patch с SEARCH из прочитанного кода 3) finish. ` +
-                `Выполни ВСЕ пункты запроса. Если указан hero / выбранный элемент / секция — меняй только её. ` +
-                `Не вызывай finish без реального изменения кода. Не удаляй контент, который не просили убрать. ` +
-                `Тексты не переписывай, если не просили. В finish конкретно перечисли изменения.`,
+                `${prompt}${mediaContext}${seededSnippet}\n\n` +
+                (pointEdit
+                  ? `ТОЧЕЧНАЯ ПРАВКА: в ОДНОМ ответе вызови apply_patch (SEARCH из блока ФОКУС выше) и сразу finish. ` +
+                    `Не вызывай list_pages. read_page только если SEARCH не найдётся. Максимум 1–2 шага.`
+                  : `Работай как Replit Agent: 1) read_page нужных файлов 2) apply_patch 3) finish. ` +
+                    `Можно несколько tool_use в одном ответе.`) +
+                ` Выполни ВСЕ пункты запроса. Если указан hero / выбранный элемент / секция — меняй только её. ` +
+                `Не вызывай finish без реального изменения кода. Не удаляй контент, который не просили. ` +
+                `Тексты не переписывай, если не просили явно.`,
               pages: sitePages,
               craftMd: craftMdForEdit,
-              history: hist.slice(-6),
-              maxRounds: 6,
+              history: hist.slice(-4),
+              maxRounds: editMaxRounds,
+              preReadFiles: seedCap > 0 ? [safeActive] : [],
               provider,
               onStatus: (status) => {
                 try { res.write(`data: ${JSON.stringify({ status })}\n\n`); } catch {}
@@ -6775,10 +6804,10 @@ ${designAnalysis}
           if (
             toolResult.toolsSupported &&
             toolResult.changedFiles.size === 0 &&
-            toolProviderUsed === primaryProvider
+            toolProviderUsed === primaryProvider &&
+            !pointEdit
           ) {
-            // The first model completed but failed to produce a mutation. This is
-            // a completed response (not a running task), so alternate-model retry is safe.
+            // Skip alternate retry for tiny point edits — doubles API cost for no gain.
             console.warn(`[AGENT] ${primaryProvider} returned no code changes; fallback → ${alternateProvider}`);
             res.write(`data: ${JSON.stringify({
               status: `${primaryProvider === "gemini" ? "Gemini" : "Claude"} не внёс правки — пробую ${alternateProvider === "gemini" ? "Gemini" : "Claude"}…`,

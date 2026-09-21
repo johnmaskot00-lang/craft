@@ -1054,7 +1054,7 @@ class SiteWorkspace {
   private readFiles = new Set<string>();
   private base64Maps = new Map<string, Map<string, string>>();
 
-  constructor(pages: SitePage[], craftMd: string) {
+  constructor(pages: SitePage[], craftMd: string, preReadFiles: string[] = []) {
     this.files = new Map();
     for (const p of pages) {
       const fn = normalizeSiteFilename(p.filename);
@@ -1065,6 +1065,10 @@ class SiteWorkspace {
       this.base64Maps.set(fn, map);
     }
     this.craftMd = craftMd;
+    for (const raw of preReadFiles) {
+      const fn = normalizeSiteFilename(raw);
+      if (this.files.has(fn)) this.readFiles.add(fn);
+    }
   }
 
   getRestoredFiles(): Map<string, string> {
@@ -1238,6 +1242,12 @@ export async function runToolCallingAgent(opts: {
   provider?: "claude" | "gemini";
   /** Override tool list (edits use SITE_AGENT_EDIT_TOOLS by default). */
   tools?: readonly any[];
+  /**
+   * Files the caller already supplied context for (selected element / active
+   * page snippet). Marked as read so a point edit can apply_patch+finish in
+   * one model round instead of 6.
+   */
+  preReadFiles?: string[];
 }): Promise<ToolAgentResult> {
   const provider = opts.provider || "claude";
   if (provider === "gemini") {
@@ -1273,8 +1283,9 @@ async function runClaudeToolCallingAgent(opts: {
   onContent?: AgentContentWriter;
   maxRounds?: number;
   tools?: readonly any[];
+  preReadFiles?: string[];
 }): Promise<ToolAgentResult> {
-  const workspace = new SiteWorkspace(opts.pages, opts.craftMd);
+  const workspace = new SiteWorkspace(opts.pages, opts.craftMd, opts.preReadFiles || []);
   const messages: any[] = [];
   const tools = opts.tools || SITE_AGENT_EDIT_TOOLS;
 
@@ -1285,7 +1296,7 @@ async function runClaudeToolCallingAgent(opts: {
 
   let summary = "";
   let streamedText = "";
-  // Replit loop: list/read → patch → finish. Allow enough rounds for large sites.
+  // Point edits should finish in 1–2 rounds; complex multipage work up to 6.
   const maxRounds = opts.maxRounds ?? 6;
 
   for (let round = 0; round < maxRounds; round++) {
@@ -1373,8 +1384,9 @@ async function runGeminiToolCallingAgent(opts: {
   onContent?: AgentContentWriter;
   maxRounds?: number;
   tools?: readonly any[];
+  preReadFiles?: string[];
 }): Promise<ToolAgentResult> {
-  const workspace = new SiteWorkspace(opts.pages, opts.craftMd);
+  const workspace = new SiteWorkspace(opts.pages, opts.craftMd, opts.preReadFiles || []);
   const contents: any[] = [];
   const tools = opts.tools || SITE_AGENT_EDIT_TOOLS;
 
