@@ -673,10 +673,11 @@ ${"═".repeat(43)}
 4. If the request changes shared navigation, update EVERY HTML page containing the duplicated header/nav, not only the active tab. Compare the SHARED MENU COMPARISON block first.
 5. For an identical-menu request, use index.html header/nav as the source of truth and patch every differing secondary page while preserving unique content, title, canonical, and links. One patch to index.html is not enough.
 6. Re-check every HTML file before finishing: menu items, order, URLs, logo, and active state must match.
-5. Запрещено вызывать finish без реального apply_patch/write_page, который меняет код
-6. Запрещены no-op патчи (SEARCH == REPLACE) и патчи «ради галочки»
-7. ИНТЕРАКТИВНЫЙ HERO: секции с data-craft-scrollanim / data-frames / data-video / data-base / data-reveal / data-base-m / data-reveal-m / data-craft-motion и следующие за ними <style>/<script> — НЕ удаляй и НЕ переписывай целиком, если пользователь явно не просит убрать анимацию. Меняй только текст оверлеев. Не подменяй /objects/... на внешние стоки (Vimeo и т.п.)
-8. GEO: не выкидывай JSON-LD, FAQ, canonical и ссылку на /llms.txt
+7. Запрещено вызывать finish без реального apply_patch/write_page, который меняет код
+8. Запрещены no-op патчи (SEARCH == REPLACE) и патчи «ради галочки»
+9. ИНТЕРАКТИВНЫЙ HERO: секции с data-craft-scrollanim / data-frames / data-video / data-base / data-reveal / data-base-m / data-reveal-m / data-craft-motion и следующие за ними <style>/<script> — НЕ удаляй и НЕ переписывай целиком, если пользователь явно не просит убрать анимацию. При смене дизайна меняй CSS/классы; текст оверлеев сохраняй дословно. Не подменяй /objects/... на внешние стоки (Vimeo и т.п.)
+10. GEO: не выкидывай JSON-LD, FAQ, canonical и ссылку на /llms.txt
+11. ТЕКСТ: не переписывай и не «улучшай» копирайт без явной просьбы. Запрос на дизайн/стиль/цвета/шрифты ≠ разрешение менять слова.
 
 ${manifest}
 
@@ -697,6 +698,7 @@ ${context}
 Не переписывай весь файл через write_page для мелкой правки (центрирование, шрифт, цвет, текст).
 Не удаляй текст и секции, которые пользователь не просил убирать.
 Не выводи огромный HTML в чат.
+При запросе на дизайн/стиль/цвета/шрифты сохраняй все видимые тексты дословно — правь только оформление.
 `;
   } else {
     prompt += `

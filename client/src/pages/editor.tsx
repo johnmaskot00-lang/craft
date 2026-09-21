@@ -700,6 +700,39 @@ export default function EditorPage() {
     }
   }, [newPageName, newPageTitle, projectId, allFiles, project, toast]);
 
+  const requestIframeCleanHtml = useCallback((): Promise<string | null> => {
+    return new Promise((resolve) => {
+      const win = iframeRef.current?.contentWindow;
+      if (!win) {
+        resolve(null);
+        return;
+      }
+      let done = false;
+      const finish = (html: string | null) => {
+        if (done) return;
+        done = true;
+        window.removeEventListener("message", onMsg);
+        resolve(html && html.length > 80 ? html : null);
+      };
+      const onMsg = (e: MessageEvent) => {
+        if (e.source !== win) return;
+        if (e.data?.type === "nz-html-snapshot") {
+          finish(typeof e.data.html === "string" ? e.data.html : null);
+        }
+      };
+      window.addEventListener("message", onMsg);
+      try {
+        // Blur active contenteditable so the latest keystrokes are in the DOM.
+        try { (win.document?.activeElement as HTMLElement | null)?.blur?.(); } catch {}
+        win.postMessage({ type: "nz-get-html" }, "*");
+      } catch {
+        finish(null);
+        return;
+      }
+      setTimeout(() => finish(null), 500);
+    });
+  }, []);
+
   const handleGenerate = useCallback(async (customPrompt?: string, skipEnhance?: boolean, deepResearchData?: string, multiPagesData?: string, seoH1Data?: string, seoH2sData?: string, injectedImages?: Array<{base64: string, mimeType: string, preview: string | null, fileName: string, url?: string}>, leadFormEnabled?: boolean, interactiveMode?: boolean, interactiveStyle?: string, interactiveProductImageUrl?: string) => {
     let text = customPrompt || prompt;
     const selectionForRequest = selectedElement
@@ -717,6 +750,12 @@ export default function EditorPage() {
     if (!text.trim()) {
       text = "Размести прикреплённые медиафайлы на сайте в подходящих по смыслу секциях.";
     }
+
+    // Pull the live iframe DOM (includes in-progress contenteditable text even
+    // before blur) so the agent never redesigns against a stale page without
+    // the user's manual copy edits.
+    const liveHtml = await requestIframeCleanHtml();
+    if (liveHtml) latestEditHtmlRef.current = liveHtml;
 
     // In-iframe visual edits are persisted asynchronously. Wait for the latest
     // preview snapshot before the agent reads DB code, otherwise it patches a
@@ -1334,7 +1373,7 @@ export default function EditorPage() {
         setGenerationStatus(null);
       }
     }
-  }, [prompt, agentMode, projectId, project?.generatedCode, attachedImages, attachedVideos, attachedModels, attachedAudios, mockupMode, activeFile, toast, selectedElement, setLocation, applyBakedPreview, agentVersion, messages.length]);
+  }, [prompt, agentMode, projectId, project?.generatedCode, attachedImages, attachedVideos, attachedModels, attachedAudios, mockupMode, activeFile, toast, selectedElement, setLocation, applyBakedPreview, agentVersion, messages.length, requestIframeCleanHtml]);
 
   const handleDownloadZip = async () => {
     const indexCode = project?.generatedCode || currentCode;
@@ -2486,6 +2525,19 @@ window.__PROJECT_ID__=${projectId};
         setTimeout(go,40);
         setTimeout(go,160);
       }catch(e){}
+    }
+    if(ev.data.type==='nz-get-html'){
+      try{
+        var clone=document.documentElement.cloneNode(true);
+        var eds=clone.querySelectorAll('[data-nz-editor],[data-nz-leads],[data-nz-stickyfix],[data-nz-preloader-kill],[data-nz-selector]');
+        for(var i=0;i<eds.length;i++){if(eds[i].parentNode)eds[i].parentNode.removeChild(eds[i]);}
+        var tips=clone.querySelectorAll('.__nz-tooltip,.__nz-sel-label');
+        for(var i=0;i<tips.length;i++){if(tips[i].parentNode)tips[i].parentNode.removeChild(tips[i]);}
+        var ces=clone.querySelectorAll('[contenteditable]');
+        for(var i=0;i<ces.length;i++) ces[i].removeAttribute('contenteditable');
+        var html='<!DOCTYPE html>\\n'+clone.outerHTML;
+        window.parent.postMessage({type:'nz-html-snapshot',html:html},'*');
+      }catch(e){try{window.parent.postMessage({type:'nz-html-snapshot',html:null},'*');}catch(_e){}}
     }
     if(ev.data.type==='nz-scroll-anchor'&&ev.data.anchor){
       try{var el=document.querySelector(ev.data.anchor);if(el)el.scrollIntoView({behavior:'smooth'});}catch(e){}
