@@ -947,6 +947,24 @@ async function kieClaudeToolsRound(
       if ((status === 400 || status === 422 || /tool/i.test(msg)) && !(e as any)?.status) {
         // already handled inside routerCheapToolsRound as toolsSupported:false
       }
+      // Anthropic SDK "Request timed out" / empty stream — client waited out; safe to retry/fallback.
+      if (
+        /request timed out|timed?\s*out|timeout of \d+ms|stream ended without producing|without producing a message/i.test(
+          msg,
+        )
+      ) {
+        if (attempt < KIE_TOOL_ROUND_RETRIES - 1) {
+          const delay = (attempt + 1) * 2000;
+          console.warn(`[AGENT] Claude tools stream/timeout, retry in ${delay}ms:`, msg.slice(0, 120));
+          await sleep(delay);
+          continue;
+        }
+        if (e instanceof KieApiError) throw e;
+        throw new KieApiError(
+          `Claude tools round failed after retries: ${msg.slice(0, 180)}`,
+          { source: "http", cause: e },
+        );
+      }
       const transient =
         (e as any)?.confirmedKieFailure === true ||
         /fetch failed|network|econnreset|etimedout|socket/i.test(msg);

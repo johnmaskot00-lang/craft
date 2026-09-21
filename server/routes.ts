@@ -3674,6 +3674,8 @@ function canSafelyFallbackKieModel(err: unknown): boolean {
   if (status >= 400 && status < 600) return true;
   const message = String((err as any)?.message || err);
   if (/(?:KIE API|Gemini KIE|Claude).*error\s+\d{3}/i.test(message)) return true;
+  // Anthropic SDK / fetch client waited out — safe to try the other model for tools.
+  if (/request timed out|timed?\s*out|timeout of \d+ms|tools round timed out|stream ended without producing|without producing a message/i.test(message)) return true;
   return false;
 }
 
@@ -4024,11 +4026,11 @@ const DESIGN_ONLY_TEXT_LOCK = `
 
 const FULL_SITE_REWRITE_GUIDANCE = `
 🚨 ПОЛНАЯ ПЕРЕРАБОТКА САЙТА (этот запрос):
-1. Это НЕ точечный apply_patch. Сначала read_page("index.html"), затем write_page с полноценным новым HTML (или несколько крупных патчей).
-2. Сохрани дословно все видимые тексты пользователя, JSON-LD/FAQ/canonical/llms.txt и существующие /objects|/uploads URL картинок.
-3. Three.js / WebGL / 3D: РАЗРЕШЕНО подключить с CDN (например https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js) и добавить canvas/сцену.
-4. Сделай заметную анимацию и 3D-элементы — не ограничивайся сменой пары CSS-переменных.
-5. В finish опиши, что именно стало 3D/анимированным.
+1. Сначала read_page("index.html").
+2. Предпочтительно несколько apply_patch (CDN Three.js + canvas в hero + CSS/JS анимации). Гигантский write_page всего файла — только если без него нельзя; на Claude он часто таймаутится.
+3. Сохрани дословно все видимые тексты, JSON-LD/FAQ/canonical/llms.txt и /objects|/uploads URL.
+4. Three.js / WebGL: CDN разрешён (например https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js).
+5. Сделай заметный 3D/анимационный результат. В finish опиши, что именно стало 3D.
 `;
 
 const AGENT_CHAT_SYSTEM_PROMPT = `Ты — Craft Agent, AI-напарник по сайту в стиле Replit Agent.
@@ -6870,18 +6872,25 @@ ${designAnalysis}
           const editMaxRounds = fullRewrite ? 8 : quickPatch ? 4 : 6;
           const agentHistory = hist.slice(-4);
 
-          const buildEditUserPrompt = (escalate = false) =>
+          const buildEditUserPrompt = (
+            escalate = false,
+            provider: "gemini" | "claude" = "gemini",
+          ) =>
             `${prompt}${mediaContext}${seededSnippet}\n\n` +
             (escalate
               ? `Предыдущая попытка не изменила код. ОБЯЗАТЕЛЬНО измени файлы: read_page("${safeActive}") затем apply_patch и/или write_page, потом finish. `
               : fullRewrite
-                ? `Полная переработка как Replit Agent: 1) read_page("${safeActive}") 2) write_page с полноценным HTML (тексты и медиа URL сохрани) + Three.js/анимации по запросу 3) finish. `
+                ? provider === "claude"
+                  ? `Полная переработка (Claude/V1): НЕ пиши весь сайт через write_page (стрим обрывается). ` +
+                    `1) read_page("${safeActive}") 2) 3–5 apply_patch: CDN three.js + <canvas> в hero + CSS анимации + JS-сцена 3) finish. ` +
+                    `SEARCH — уникальный длинный фрагмент; не патчь JSON-LD вместо CSS.`
+                  : `Полная переработка как Replit Agent: 1) read_page("${safeActive}") 2) write_page или крупные патчи + Three.js/анимации 3) finish. `
                 : quickPatch
                   ? `Как Replit Agent: предпочтительно в одном ответе apply_patch (SEARCH из HTML_BEGIN/ФОКУС) + finish. Если запрос шире элемента — read_page/write_page. `
                   : `Как Replit Agent: сам выбери инструмент — apply_patch для точечного, write_page для крупного. Можно несколько tool_use в одном ответе. `) +
             `Выполни ВСЕ пункты запроса. ` +
             (fullRewrite
-              ? `Переработай дизайн и структуру целиком, сохранив контент пользователя. `
+              ? `Переработай дизайн и структуру, сохранив контент пользователя. `
               : quickPatch
                 ? `Меняй выбранный элемент / его обёртку, если запрос точечный. `
                 : `Если указан hero / выбранный элемент / секция — меняй только её. `) +
@@ -6893,7 +6902,7 @@ ${designAnalysis}
             opts?: { escalate?: boolean; maxRounds?: number },
           ) => runToolCallingAgent({
               systemPrompt: systemContent,
-              userPrompt: buildEditUserPrompt(!!opts?.escalate),
+              userPrompt: buildEditUserPrompt(!!opts?.escalate, provider),
               pages: sitePages,
               craftMd: craftMdForEdit,
               history: agentHistory,
@@ -6913,8 +6922,19 @@ ${designAnalysis}
               },
             });
 
-          const primaryProvider: "gemini" | "claude" = useGemini ? "gemini" : "claude";
-          const alternateProvider: "gemini" | "claude" = useGemini ? "claude" : "gemini";
+          // Full redesign: Gemini first (Claude V1 often drops stream / times out on write_page).
+          const primaryProvider: "gemini" | "claude" = fullRewrite
+            ? "gemini"
+            : useGemini
+              ? "gemini"
+              : "claude";
+          const alternateProvider: "gemini" | "claude" =
+            primaryProvider === "gemini" ? "claude" : "gemini";
+          if (fullRewrite && !useGemini) {
+            try {
+              res.write(`data: ${JSON.stringify({ status: "Полная переработка — Gemini (надёжнее на больших правках)…" })}\n\n`);
+            } catch {}
+          }
           let toolResult;
           let toolProviderUsed = primaryProvider;
           try {
