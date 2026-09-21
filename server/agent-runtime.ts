@@ -1,12 +1,14 @@
 /**
  * Multipage site agent runtime (Replit-style).
  *
- * - Per-project craft.md — short agent memory (site brief + change log)
- * - Claude (agent V1) function calling via Anthropic SDK → router.cheap (1M context)
- * - Gemini (agent V2) function calling via KIE `tools.functionDeclarations`
- * - Multipage text protocol fallback when tools unavailable
+ * Source of truth = files on disk (in-memory workspace during the turn).
+ * System prompt carries only a site map + short craft.md — never the full HTML
+ * dump. The model discovers code via list_pages / read_page, then mutates with
+ * apply_patch / write_page, then finish. Same loop as Replit Agent.
  *
- * Agents can list/read/patch any page, not only the editor's active tab.
+ * - Claude (agent V1) function calling via Anthropic SDK → router.cheap
+ * - Gemini (agent V2) function calling via KIE `tools.functionDeclarations`
+ * - Multipage text protocol fallback when tools unavailable (slim HTML then)
  */
 
 import { storage } from "./storage";
@@ -527,11 +529,14 @@ export const SITE_AGENT_TOOLS = [
   },
   {
     name: "read_page",
-    description: "Прочитать полный код страницы (с плейсхолдерами __B64_N__ вместо base64).",
+    description:
+      "Прочитать код страницы (с плейсхолдерами __B64_N__ вместо base64). Для больших файлов используй offset/limit. Обязателен перед apply_patch.",
     input_schema: {
       type: "object",
       properties: {
         filename: { type: "string", description: "Имя файла, например about.html или index.html" },
+        offset: { type: "number", description: "С какого символа читать (по умолчанию 0)" },
+        limit: { type: "number", description: "Сколько символов вернуть (по умолчанию 60000, макс 80000)" },
       },
       required: ["filename"],
       additionalProperties: false,
@@ -597,12 +602,11 @@ export const SITE_AGENT_TOOLS = [
 ] as const;
 
 /**
- * Lean tool set for point edits (Replit-style).
- * Pages + craft.md are already in the system prompt — no list/read/craft tools
- * that burn extra KIE rounds. read_page kept only if a file was truncated.
+ * Replit-style edit tools: explore the workspace, then mutate.
+ * Full HTML is NOT preloaded into the system prompt — use read_page.
  */
 export const SITE_AGENT_EDIT_TOOLS = SITE_AGENT_TOOLS.filter((t) =>
-  t.name === "apply_patch" || t.name === "write_page" || t.name === "read_page" || t.name === "finish",
+  ["list_pages", "read_page", "apply_patch", "write_page", "read_craft_md", "finish"].includes(t.name),
 );
 
 export function applySinglePatch(originalCode: string, searchBlock: string, replaceBlock: string): { code: string; ok: boolean; error?: string } {
@@ -760,54 +764,55 @@ export function buildMultipageEditSystemPrompt(opts: {
   budget?: EditContextBudget;
 }): string {
   const budget = opts.budget || resolveEditContextBudget(opts.pages);
+  // Tool mode = Replit architecture: map + memory only. Code is fetched via tools.
+  // Stream/diff fallback still needs a slim code dump when tools are unsupported.
   const manifest = buildSiteManifest(opts.pages, opts.craftMd, budget.craftMdChars);
-  const { context } = buildPagesContext(opts.pages, opts.activeFile, budget.maxTotalChars, budget);
-  const sharedChrome = buildSharedChromeContext(opts.pages, budget.chromePerPage);
 
   let prompt = opts.baseSystem;
   prompt += `\n\n${"═".repeat(43)}
-РЕЖИМ РЕДАКТИРОВАНИЯ САЙТА — MULTIPAGE AGENT
+${opts.useToolsHint ? "REPLIT-STYLE AGENT — WORKSPACE TOOLS" : "РЕЖИМ РЕДАКТИРОВАНИЯ САЙТА — MULTIPAGE DIFF"}
 ${"═".repeat(43)}
-Пользователь сейчас смотрит файл «${opts.activeFile}», но ты видишь ВЕСЬ сайт и можешь менять ЛЮБУЮ страницу (и несколько сразу), если запрос этого требует.
-Контекст ужат (режим ${budget.label}, лимит ~${budget.maxTotalChars} символов кода): неполная страница → read_page перед патчем.
+Пользователь смотрит «${opts.activeFile}». Источник правды — файлы workspace на сервере.
+${opts.useToolsHint
+  ? "Полный HTML в этот промпт НЕ вложен. Сначала list_pages / read_page нужного файла, затем apply_patch, затем finish."
+  : `Контекст ужат (режим ${budget.label}).`}
 
 ⚠️ ПРАВИЛА:
 1. Меняй только то, что просит пользователь; сохраняй nav/footer и ссылки между страницами
-2. Если в запросе указан конкретный блок (hero, «Выбранный элемент», section#id, class) — правь ТОЛЬКО его. Не переписывай соседние секции «заодно»
+2. Если указан конкретный блок (hero, «Выбранный элемент», section#id, class) — правь ТОЛЬКО его
 3. Плейсхолдеры __B64_N__ — изображения. НЕ удаляй и НЕ меняй их
-4. If the request changes shared navigation, update EVERY HTML page containing the duplicated header/nav, not only the active tab. Compare the SHARED MENU COMPARISON block first.
-5. For an identical-menu request, use index.html header/nav as the source of truth and patch every differing secondary page while preserving unique content, title, canonical, and links. One patch to index.html is not enough.
-6. Re-check every HTML file before finishing: menu items, order, URLs, logo, and active state must match.
-7. Запрещено вызывать finish без реального apply_patch/write_page, который меняет код
-8. Запрещены no-op патчи (SEARCH == REPLACE) и патчи «ради галочки»
-9. ИНТЕРАКТИВНЫЙ HERO: секции с data-craft-scrollanim / data-frames / data-video / data-base / data-reveal / data-base-m / data-reveal-m / data-craft-motion и следующие за ними <style>/<script> — НЕ удаляй и НЕ переписывай целиком, если пользователь явно не просит убрать анимацию. При смене дизайна меняй CSS/классы; текст оверлеев сохраняй дословно. Не подменяй /objects/... на внешние стоки (Vimeo и т.п.)
-10. GEO: не выкидывай JSON-LD, FAQ, canonical и ссылку на /llms.txt
-11. ТЕКСТ: не переписывай и не «улучшай» копирайт без явной просьбы. Запрос на дизайн/стиль/цвета/шрифты ≠ разрешение менять слова.
-12. SEARCH в apply_patch бери из актуального файла (при обрезанном контексте сначала read_page) — не из укороченного превью.
+4. Общее меню: правь все HTML с дублированным header/nav; эталон — index.html
+5. Запрещён finish без реального apply_patch/write_page; запрещены no-op патчи
+6. ИНТЕРАКТИВНЫЙ HERO (data-craft-scrollanim / data-frames / data-video / …): не переписывай секцию и её <style>/<script> целиком без явной просьбы; текст оверлеев сохраняй дословно
+7. GEO: не выкидывай JSON-LD, FAQ, canonical, /llms.txt
+8. ТЕКСТ: не перефразируй копирайт без явной просьбы. «Смени дизайн» ≠ «перепиши текст»
+9. SEARCH копируй из результата read_page (актуальный файл), не придумывай по памяти
 
 ${manifest}
-${sharedChrome ? `\n${sharedChrome}\n` : ""}
-═══ ИСХОДНЫЙ КОД СТРАНИЦ ═══
-${context}
 `;
 
   if (opts.useToolsHint) {
     prompt += `
-🔧 ИНСТРУМЕНТЫ (быстрый Replit-стиль):
-Доступны: apply_patch, write_page, read_page (только если файл обрезан), finish.
-Код страниц и craft.md УЖЕ в контексте выше — НЕ трать шаги на list_pages / read_craft_md / update_craft_md (журнал обновит сервер).
+🔧 ИНСТРУМЕНТЫ (как у Replit Agent):
+list_pages → read_page(filename) → apply_patch / write_page → finish(summary)
 
-⚡ ЦЕЛЬ: уложиться в 1–2 шага.
-1) Сразу apply_patch (можно несколько патчей параллельно на нужные файлы) — код ДОЛЖЕН реально измениться
-2) В том же ответе вызови finish(summary) — 2–4 предложения: проблема → конкретное решение → видимый результат → затронутые файлы. Не повторяй запрос пользователя и не начинай с шаблонного «Готово»
-Если не можешь найти точный фрагмент — НЕ вызывай finish с «Сайт обновлён»; верни ошибку через неуспешный патч и уточни.
-Не переписывай весь файл через write_page для мелкой правки (центрирование, шрифт, цвет, текст).
-Не удаляй текст и секции, которые пользователь не просил убирать.
-Не выводи огромный HTML в чат.
-При запросе на дизайн/стиль/цвета/шрифты сохраняй все видимые тексты дословно — правь только оформление.
+Рабочий цикл:
+1) list_pages если не уверен в имени файла
+2) read_page для каждого файла, который собираешься менять (обязательно перед apply_patch)
+3) apply_patch с точным SEARCH из прочитанного кода (можно несколько патчей)
+4) finish — 2–4 предложения: что сделано, в каких файлах, что увидит пользователь
+
+Не вызывай write_page для мелкой правки. Не лей огромный HTML в чат.
+Не удаляй контент, который не просили убирать.
+При дизайне/стиле/цветах/шрифтах сохраняй видимые тексты дословно.
 `;
   } else {
-    prompt += `
+    const { context } = buildPagesContext(opts.pages, opts.activeFile, budget.maxTotalChars, budget);
+    const sharedChrome = buildSharedChromeContext(opts.pages, budget.chromePerPage);
+    prompt += `${sharedChrome ? `\n${sharedChrome}\n` : ""}
+═══ ИСХОДНЫЙ КОД СТРАНИЦ ═══
+${context}
+
 🔧 ФОРМАТ ОТВЕТА — MULTIPAGE DIFF (не полный сайт целиком!):
 1) 1-3 предложения о изменениях
 2) Для КАЖДОГО изменяемого файла блок:
@@ -1045,6 +1050,8 @@ class SiteWorkspace {
   changedFiles = new Set<string>();
   /** Successful apply_patch / write_page mutations (excludes no-ops). */
   patchCount = 0;
+  /** Replit-style: file must be read in this turn before patching. */
+  private readFiles = new Set<string>();
   private base64Maps = new Map<string, Map<string, string>>();
 
   constructor(pages: SitePage[], craftMd: string) {
@@ -1083,15 +1090,36 @@ class SiteWorkspace {
         const filename = String(input.filename || "").trim().toLowerCase();
         const code = this.files.get(filename);
         if (code === undefined) return { result: { error: `Файл не найден: ${filename}`, available: [...this.files.keys()] } };
-        return { result: { filename, code, chars: code.length } };
+        this.readFiles.add(filename);
+        const offset = Math.max(0, Math.floor(Number(input.offset) || 0));
+        const limit = Math.min(80_000, Math.max(1_000, Math.floor(Number(input.limit) || 60_000)));
+        const slice = code.slice(offset, offset + limit);
+        return {
+          result: {
+            filename,
+            code: slice,
+            chars: code.length,
+            offset,
+            returned: slice.length,
+            truncated: offset + slice.length < code.length,
+            nextOffset: offset + slice.length < code.length ? offset + slice.length : null,
+          },
+        };
       }
       case "apply_patch": {
         const filename = String(input.filename || "").trim().toLowerCase();
         const search = String(input.search ?? "");
         const replace = String(input.replace ?? "");
         if (!this.files.has(filename)) {
-          // Allow creating via patch only if file exists; use write_page for new
           return { result: { ok: false, error: `Файл не найден: ${filename}` } };
+        }
+        if (!this.readFiles.has(filename)) {
+          return {
+            result: {
+              ok: false,
+              error: `Сначала вызови read_page("${filename}") — как в Replit, патч только по прочитанному файлу.`,
+            },
+          };
         }
         const current = this.files.get(filename)!;
         const { code, ok } = applySinglePatch(current, search, replace);
@@ -1110,15 +1138,21 @@ class SiteWorkspace {
         if (!isValidAgentWriteFilename(filename)) {
           return { result: { ok: false, error: "Имя файла: name.html, category/slug/index.html или assets/style.css" } };
         }
+        if (this.files.has(filename) && !this.readFiles.has(filename)) {
+          return {
+            result: {
+              ok: false,
+              error: `Сначала вызови read_page("${filename}") перед перезаписью существующего файла.`,
+            },
+          };
+        }
         if (filename.endsWith(".css")) {
           if (code.length < 20) return { result: { ok: false, error: "CSS слишком короткий" } };
         } else if (!code.includes("<") || code.length < 50) {
           return { result: { ok: false, error: "code слишком короткий или не HTML" } };
         }
-        // Preserve existing base64 map if rewriting known file
         if (!this.base64Maps.has(filename)) this.base64Maps.set(filename, new Map());
         const { stripped, map } = stripBase64Images(code);
-        // Merge maps
         const existing = this.base64Maps.get(filename)!;
         for (const [k, v] of map) existing.set(k, v);
         const prev = this.files.get(filename);
@@ -1126,6 +1160,7 @@ class SiteWorkspace {
           return { result: { ok: false, error: "write_page не меняет файл — код совпадает с текущим." } };
         }
         this.files.set(filename, stripped);
+        this.readFiles.add(filename);
         this.changedFiles.add(filename);
         this.patchCount += 1;
         return { result: { ok: true, filename, chars: stripped.length } };
@@ -1250,8 +1285,8 @@ async function runClaudeToolCallingAgent(opts: {
 
   let summary = "";
   let streamedText = "";
-  // Point edits should finish in 1–2 KIE calls; hard cap keeps cost predictable.
-  const maxRounds = opts.maxRounds ?? 4;
+  // Replit loop: list/read → patch → finish. Allow enough rounds for large sites.
+  const maxRounds = opts.maxRounds ?? 6;
 
   for (let round = 0; round < maxRounds; round++) {
     opts.onStatus?.(`Агент думает… (шаг ${round + 1}/${maxRounds})`);
@@ -1353,7 +1388,7 @@ async function runGeminiToolCallingAgent(opts: {
 
   let summary = "";
   let streamedText = "";
-  const maxRounds = opts.maxRounds ?? 4;
+  const maxRounds = opts.maxRounds ?? 6;
 
   for (let round = 0; round < maxRounds; round++) {
     opts.onStatus?.(`Gemini-агент думает… (шаг ${round + 1}/${maxRounds})`);
