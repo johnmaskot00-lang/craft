@@ -83,7 +83,7 @@ export function restoreBase64Images(code: string, map: Map<string, string>): str
  */
 export function compressHtmlForAgentContext(code: string): string {
   let out = code || "";
-  out = out.replace(/<script\b[\s\S]*?<\/script>/gi, "<!--script omitted; use read_page if needed-->");
+  out = out.replace(/<script\b[\s\S]*?<\/script>/gi, "");
   out = out.replace(/<!--[\s\S]*?-->/g, "");
   // Keep short inline styles; drop multi-KB <style> blobs from the prompt.
   out = out.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, (block) =>
