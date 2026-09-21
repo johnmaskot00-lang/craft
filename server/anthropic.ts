@@ -197,6 +197,8 @@ export async function routerCheapToolsRound(opts: {
   tools: readonly Tool[] | readonly any[];
   maxTokens?: number;
   model?: string;
+  /** Force at least one tool call (Replit oneshot: apply_patch+finish in one round). */
+  forceToolUse?: boolean;
 }): Promise<RouterCheapToolRoundResult> {
   assertRouterCheapConfigured();
 
@@ -210,7 +212,7 @@ export async function routerCheapToolsRound(opts: {
         system: opts.systemPrompt,
         messages: opts.messages,
         tools: opts.tools as Tool[],
-        tool_choice: { type: "auto" },
+        tool_choice: opts.forceToolUse ? { type: "any" } : { type: "auto" },
       })
       .finalMessage();
 

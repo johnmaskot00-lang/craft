@@ -135,6 +135,7 @@ import {
   applyDiffPatchesToCode,
   isHtmlPage,
   resolveEditContextBudget,
+  SITE_AGENT_ONESHOT_TOOLS,
   type SitePage,
 } from "./agent-runtime";
 import { registerGeoRoutes } from "./geo";
@@ -6730,28 +6731,34 @@ ${designAnalysis}
             !!selectedEditTarget
             || /\[Выбранный элемент:/i.test(String(prompt || ""))
             || String(prompt || "").replace(/\[Выбранный элемент:[\s\S]*?\]\s*/i, "").trim().length < 220;
-          // Point edits: seed a window of the active page so round 1 can
-          // apply_patch+finish without a separate read_page API call.
-          const seedCap = pointEdit ? 18_000 : 0;
+          // Replit oneshot: seed the active page, pre-mark read, only apply_patch+finish, 1 API round.
+          const oneShot = pointEdit;
+          const seedCap = oneShot ? 40_000 : 0;
           let seededSnippet = "";
           if (seedCap > 0 && activePageCode) {
             const { stripped } = stripBase64(activePageCode);
             const compact = stripped.length > seedCap
-              ? `${stripped.slice(0, seedCap)}\n...[обрезано ${stripped.length - seedCap} — при необходимости read_page]`
+              ? `${stripped.slice(0, seedCap)}\n...[обрезано ${stripped.length - seedCap}]`
               : stripped;
             seededSnippet =
-              `\n\n═══ ФОКУС: ${safeActive} (уже «прочитан», можно сразу apply_patch) ═══\n` +
+              `\n\n═══ ФОКУС: ${safeActive} (уже прочитан — SEARCH копируй отсюда ДОСЛОВНО) ═══\n` +
               `\`\`\`html\n${compact}\n\`\`\`\n`;
           }
-          const editMaxRounds = pointEdit ? 3 : 6;
+          const editMaxRounds = oneShot ? 1 : 6;
+          const oneshotSystemAddon = oneShot
+            ? `\n\n⚡ REPLIT ONESHOT (обязательно):\n` +
+              `- Ровно ОДИН ответ модели = один API-запрос.\n` +
+              `- В этом ответе вызови apply_patch И finish ВМЕСТЕ (параллельно).\n` +
+              `- НЕ вызывай list_pages / read_page / write_page — кода в блоке ФОКУС достаточно.\n` +
+              `- SEARCH — точная копия из ФОКУС; replace — только запрошенное изменение.\n`
+            : "";
 
           const runEditTools = (provider: "gemini" | "claude") => runToolCallingAgent({
-              systemPrompt: systemContent,
+              systemPrompt: systemContent + oneshotSystemAddon,
               userPrompt:
                 `${prompt}${mediaContext}${seededSnippet}\n\n` +
-                (pointEdit
-                  ? `ТОЧЕЧНАЯ ПРАВКА: в ОДНОМ ответе вызови apply_patch (SEARCH из блока ФОКУС выше) и сразу finish. ` +
-                    `Не вызывай list_pages. read_page только если SEARCH не найдётся. Максимум 1–2 шага.`
+                (oneShot
+                  ? `Сделай как Replit Agent за 1 шаг: в ОДНОМ ответе вызови apply_patch (SEARCH из ФОКУС) и сразу finish(summary). Никаких других tools.`
                   : `Работай как Replit Agent: 1) read_page нужных файлов 2) apply_patch 3) finish. ` +
                     `Можно несколько tool_use в одном ответе.`) +
                 ` Выполни ВСЕ пункты запроса. Если указан hero / выбранный элемент / секция — меняй только её. ` +
@@ -6762,6 +6769,8 @@ ${designAnalysis}
               history: hist.slice(-4),
               maxRounds: editMaxRounds,
               preReadFiles: seedCap > 0 ? [safeActive] : [],
+              tools: oneShot ? SITE_AGENT_ONESHOT_TOOLS : undefined,
+              oneShot,
               provider,
               onStatus: (status) => {
                 try { res.write(`data: ${JSON.stringify({ status })}\n\n`); } catch {}
