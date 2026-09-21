@@ -4025,12 +4025,14 @@ const DESIGN_ONLY_TEXT_LOCK = `
 `;
 
 const FULL_SITE_REWRITE_GUIDANCE = `
-🚨 ПОЛНАЯ ПЕРЕРАБОТКА САЙТА (этот запрос):
+🚨 ПОЛНАЯ ПЕРЕРАБОТКА САЙТА (этот запрос) — результат должен быть ПОЛНЫМ, не «чуть подкрутить CSS»:
 1. Сначала read_page("index.html").
-2. Предпочтительно несколько apply_patch (CDN Three.js + canvas в hero + CSS/JS анимации). Гигантский write_page всего файла — только если без него нельзя; на Claude он часто таймаутится.
-3. Сохрани дословно все видимые тексты, JSON-LD/FAQ/canonical/llms.txt и /objects|/uploads URL.
-4. Three.js / WebGL: CDN разрешён (например https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js).
-5. Сделай заметный 3D/анимационный результат. В finish опиши, что именно стало 3D.
+2. Работай серией apply_patch (как Replit): каждый патч = крупный кусок (весь <style>/:root, весь hero/<section>, блок <script>, CDN в <head>). 4–8 патчей нормальны.
+3. Вместе патчи обязаны закрыть ВЕСЬ запрос пользователя (дизайн + структура + анимации + Three.js/3D). Не вызывай finish, пока не выполнены все пункты.
+4. write_page всего файла — только если без него реально нельзя; на Claude предпочитай крупные section-патчи.
+5. Сохрани дословно тексты, JSON-LD/FAQ/canonical/llms.txt и /objects|/uploads URL.
+6. Three.js CDN разрешён (например https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js) + живой canvas/сцена.
+7. В finish перечисли, что именно стало новым (3D, анимации, какие секции).
 `;
 
 const AGENT_CHAT_SYSTEM_PROMPT = `Ты — Craft Agent, AI-напарник по сайту в стиле Replit Agent.
@@ -6878,19 +6880,23 @@ ${designAnalysis}
           ) =>
             `${prompt}${mediaContext}${seededSnippet}\n\n` +
             (escalate
-              ? `Предыдущая попытка не изменила код. ОБЯЗАТЕЛЬНО измени файлы: read_page("${safeActive}") затем apply_patch и/или write_page, потом finish. `
+              ? provider === "claude"
+                ? `Предыдущий проход недостаточен. Продолжи на Claude: read_page("${safeActive}"), затем ЕЩЁ крупные apply_patch пока не закрыты ВСЕ пункты запроса (дизайн/структура/анимации/3D), потом finish. write_page всего файла — только если патчами уже нельзя.`
+                : `Предыдущая попытка не изменила код. ОБЯЗАТЕЛЬНО измени файлы: read_page("${safeActive}") затем apply_patch и/или write_page, потом finish. `
               : fullRewrite
                 ? provider === "claude"
-                  ? `Полная переработка (Claude/V1 — работай САМ до конца): ЗАПРЕЩЁН write_page всего файла. ` +
-                    `1) read_page("${safeActive}") 2) серия apply_patch (CDN three.js, canvas в hero, CSS/JS анимации) 3) finish. ` +
-                    `Каждый SEARCH — уникальный длинный фрагмент из прочитанного кода. Не патчь JSON-LD вместо CSS.`
-                  : `Полная переработка как Replit Agent: 1) read_page("${safeActive}") 2) write_page или крупные патчи + Three.js/анимации 3) finish. `
+                  ? `Полная переработка (Claude/V1 — сам до конца): это НЕ один мелкий патч. ` +
+                    `1) read_page("${safeActive}") ` +
+                    `2) серия КРУПНЫХ apply_patch (можно несколько в одном ответе): (A) CDN+canvas Three.js в head/hero (B) переписать :root/<style> под новый дизайн (C) обновить ключевые <section> (D) JS анимации/3D-сцена. ` +
+                    `3) finish ТОЛЬКО когда визуально сайт другой и все пункты запроса закрыты. ` +
+                    `SEARCH — длинный уникальный фрагмент из прочитанного кода. Не патчь JSON-LD вместо CSS.`
+                  : `Полная переработка как Replit Agent: 1) read_page("${safeActive}") 2) write_page или крупные патчи + Three.js/анимации 3) finish когда ВЕСЬ запрос выполнен. `
                 : quickPatch
                   ? `Как Replit Agent: предпочтительно в одном ответе apply_patch (SEARCH из HTML_BEGIN/ФОКУС) + finish. Если запрос шире элемента — read_page/write_page. `
                   : `Как Replit Agent: сам выбери инструмент — apply_patch для точечного, write_page для крупного. Можно несколько tool_use в одном ответе. `) +
             `Выполни ВСЕ пункты запроса. ` +
             (fullRewrite
-              ? `Переработай дизайн и структуру, сохранив контент пользователя. `
+              ? `Закрой ВСЕ пункты запроса (дизайн + структура + анимации/3D), сохранив тексты и медиа пользователя. Не останавливайся после одного патча. `
               : quickPatch
                 ? `Меняй выбранный элемент / его обёртку, если запрос точечный. `
                 : `Если указан hero / выбранный элемент / секция — меняй только её. `) +
