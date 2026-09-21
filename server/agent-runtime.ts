@@ -785,62 +785,67 @@ export function buildMultipageEditSystemPrompt(opts: {
   pages: SitePage[];
   useToolsHint: boolean;
   budget?: EditContextBudget;
-  /** Selected/point edit: apply_patch+finish only — no read_page cycle text. */
+  /**
+   * Soft hint: selected-element tweak — prefer apply_patch+finish in one turn,
+   * but keep full tools (read/write) so the agent can escalate like Replit.
+   */
+  preferQuickPatch?: boolean;
+  /** Soft hint: full redesign / Three.js — prefer write_page after read_page. */
+  fullRewrite?: boolean;
+  /** @deprecated hard oneshot — maps to preferQuickPatch for backward compat */
   oneShot?: boolean;
 }): string {
   const budget = opts.budget || resolveEditContextBudget(opts.pages);
-  const oneShot = !!opts.oneShot;
-  // Tool mode = Replit architecture: map + memory only. Code is fetched via tools.
-  // Oneshot: drop craft.md journal noise so the model focuses on the element.
-  const craftForPrompt = oneShot
+  const preferQuick = !!(opts.preferQuickPatch || opts.oneShot) && !opts.fullRewrite;
+  const fullRewrite = !!opts.fullRewrite;
+  // Keep craft.md short for focused edits; full rewrite needs a bit more memory.
+  const craftForPrompt = preferQuick
     ? opts.craftMd.replace(/## Журнал изменений[\s\S]*$/i, "").trim().slice(0, 900)
     : opts.craftMd;
-  const manifest = buildSiteManifest(opts.pages, craftForPrompt, oneShot ? 900 : budget.craftMdChars);
+  const manifest = buildSiteManifest(
+    opts.pages,
+    craftForPrompt,
+    preferQuick ? 900 : budget.craftMdChars,
+  );
 
   let prompt = opts.baseSystem;
   prompt += `\n\n${"═".repeat(43)}
-${oneShot ? "REPLIT ONESHOT — apply_patch + finish" : opts.useToolsHint ? "REPLIT-STYLE AGENT — WORKSPACE TOOLS" : "РЕЖИМ РЕДАКТИРОВАНИЯ САЙТА — MULTIPAGE DIFF"}
+REPLIT-STYLE AGENT — FULL WORKSPACE TOOLS
 ${"═".repeat(43)}
 Пользователь смотрит «${opts.activeFile}». Источник правды — файлы workspace на сервере.
-${oneShot
-  ? "Код целевого элемента уже в запросе (HTML_BEGIN / ФОКУС). В ОДНОМ ответе вызови apply_patch и finish. Не читай файлы заново."
-  : opts.useToolsHint
-    ? "Полный HTML в этот промпт НЕ вложен. Сначала list_pages / read_page нужного файла, затем apply_patch, затем finish."
-    : `Контекст ужат (режим ${budget.label}).`}
+${preferQuick
+  ? "Есть выбранный элемент (HTML_BEGIN / ФОКУС). Предпочтительно в одном ответе: apply_patch + finish. Если патч не закрывает запрос — read_page / write_page."
+  : fullRewrite
+    ? "Запрос на полную переработку. Сначала read_page, затем write_page (или крупные патчи). Мелкого apply_patch недостаточно."
+    : opts.useToolsHint
+      ? "Полный HTML в этот промпт НЕ вложен. Сам выбери: apply_patch для точечного, write_page для крупного."
+      : `Контекст ужат (режим ${budget.label}).`}
 
 ⚠️ ПРАВИЛА:
 1. Меняй только то, что просит пользователь; сохраняй nav/footer и ссылки между страницами
-2. Если указан конкретный блок (hero, «Выбранный элемент», section#id, class) — правь ТОЛЬКО его
+2. Если указан конкретный блок (hero, «Выбранный элемент», section#id, class) — правь ТОЛЬКО его (кроме явной полной переработки)
 3. Плейсхолдеры __B64_N__ — изображения. НЕ удаляй и НЕ меняй их
 4. Общее меню: правь все HTML с дублированным header/nav; эталон — index.html
 5. Запрещён finish без реального apply_patch/write_page; запрещены no-op патчи
 6. ИНТЕРАКТИВНЫЙ HERO (data-craft-scrollanim / data-frames / data-video / …): не переписывай секцию и её <style>/<script> целиком без явной просьбы; текст оверлеев сохраняй дословно
 7. GEO: не выкидывай JSON-LD, FAQ, canonical, /llms.txt
 8. ТЕКСТ: не перефразируй копирайт без явной просьбы. «Смени дизайн» ≠ «перепиши текст»
-${oneShot
-  ? "9. SEARCH копируй ДОСЛОВНО из HTML_BEGIN или ФОКУС в запросе пользователя"
-  : "9. SEARCH копируй из результата read_page (актуальный файл), не придумывай по памяти"}
+9. SEARCH копируй из ФОКУС/HTML_BEGIN или из результата read_page — не выдумывай
 
 ${manifest}
 `;
 
-  if (oneShot) {
+  if (opts.useToolsHint) {
     prompt += `
-🔧 ONESHOT TOOLS: только apply_patch + finish в одном ответе.
-SEARCH = точная копия из HTML_BEGIN/ФОКУС. Не вызывай list_pages / read_page / write_page.
-`;
-  } else if (opts.useToolsHint) {
-    prompt += `
-🔧 ИНСТРУМЕНТЫ (как у Replit Agent):
-list_pages → read_page(filename) → apply_patch / write_page → finish(summary)
+🔧 ИНСТРУМЕНТЫ (как у Replit Agent — все доступны всегда):
+list_pages · read_page · apply_patch · write_page · read_craft_md · finish
 
-Рабочий цикл:
-1) list_pages если не уверен в имени файла
-2) read_page для каждого файла, который собираешься менять (обязательно перед apply_patch)
-3) apply_patch с точным SEARCH из прочитанного кода (можно несколько патчей)
-4) finish — 2–4 предложения: что сделано, в каких файлах, что увидит пользователь
+Как выбирать:
+- Точечная правка / выбранный элемент → apply_patch (+ finish в том же ответе, если хватает)
+- Крупный redesign / новая структура / Three.js / «переделай полностью» → read_page → write_page → finish
+- Несколько файлов → несколько tool_use в одном ответе
 
-Не вызывай write_page для мелкой правки. Не лей огромный HTML в чат.
+Не вызывай write_page для смены одного слова. Не лей огромный HTML в чат.
 Не удаляй контент, который не просили убирать.
 При дизайне/стиле/цветах/шрифтах сохраняй видимые тексты дословно.
 `;

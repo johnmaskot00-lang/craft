@@ -135,7 +135,6 @@ import {
   applyDiffPatchesToCode,
   isHtmlPage,
   resolveEditContextBudget,
-  SITE_AGENT_ONESHOT_TOOLS,
   type SitePage,
 } from "./agent-runtime";
 import { registerGeoRoutes } from "./geo";
@@ -4001,11 +4000,17 @@ function isFullSiteRewriteRequest(rawPrompt: string): boolean {
 /**
  * Oneshot (1 API round, apply_patch+finish only) ONLY for selected-element edits.
  * Never oneshot for full redesign — length heuristics falsely catch short rewrite asks.
+ * @deprecated Prefer soft preferQuickPatch — hard oneshot locked tools and broke redesigns.
  */
-function isOneshotEditRequest(rawPrompt: string, hasSelectedTarget: boolean): boolean {
+function preferQuickPatchEdit(rawPrompt: string, hasSelectedTarget: boolean): boolean {
   if (isFullSiteRewriteRequest(rawPrompt)) return false;
   if (hasSelectedTarget) return true;
   return /\[Выбранный элемент:/i.test(String(rawPrompt || ""));
+}
+
+/** @deprecated use preferQuickPatchEdit */
+function isOneshotEditRequest(rawPrompt: string, hasSelectedTarget: boolean): boolean {
+  return preferQuickPatchEdit(rawPrompt, hasSelectedTarget);
 }
 
 const DESIGN_ONLY_TEXT_LOCK = `
@@ -6422,11 +6427,11 @@ URL (для ориентира, не для прямой вставки маке
         });
 
         editPromptBase = systemContent;
-        const oneshotLikely = isOneshotEditRequest(String(prompt || ""), !!selectedEditTarget);
+        const quickPatch = preferQuickPatchEdit(String(prompt || ""), !!selectedEditTarget);
         const fullRewrite = isFullSiteRewriteRequest(String(prompt || ""));
-        // Drop image-library dump on oneshot — selected HTML already has the URL.
+        // Drop image-library dump on selected-element tweaks — URL already in selection.
         let baseForEdit = editPromptBase;
-        if (oneshotLikely) {
+        if (quickPatch && !fullRewrite) {
           baseForEdit = baseForEdit
             .replace(/\nДОСТУПНЫЕ ИЗОБРАЖЕНИЯ В БИБЛИОТЕКЕ ПОЛЬЗОВАТЕЛЯ:[\s\S]*?(?=\n═══|\n⚡|\n🔧|$)/i, "\n")
             .replace(/\nДля загруженных фото[\s\S]*?{{GENIMG:[\s\S]*?\n/i, "\n");
@@ -6438,11 +6443,13 @@ URL (для ориентира, не для прямой вставки маке
           pages: sitePages,
           useToolsHint: true,
           budget: editBudget,
-          oneShot: oneshotLikely,
+          preferQuickPatch: quickPatch,
+          fullRewrite,
         });
         // Stash on project-scoped locals via closure — conversation history uses the same budget.
         (req as any)._craftEditBudget = editBudget;
-        (req as any)._craftOneShotLikely = oneshotLikely;
+        (req as any)._craftQuickPatch = quickPatch;
+        (req as any)._craftFullRewrite = fullRewrite;
         if (selectedEditTarget) {
           systemContent += `\n\n🚨 ТОЧНАЯ ЦЕЛЬ ВЫБРАНА ПОЛЬЗОВАТЕЛЕМ:
 - Разрешённая страница: ${selectedEditTarget.page}
@@ -6841,12 +6848,11 @@ ${designAnalysis}
             sitePages.find((p) => p.filename.toLowerCase() === safeActive)?.code
             || sitePages.find((p) => p.filename === "index.html")?.code
             || "";
-          const pointEdit = isOneshotEditRequest(String(prompt || ""), !!selectedEditTarget);
+          const quickPatch = preferQuickPatchEdit(String(prompt || ""), !!selectedEditTarget);
           const fullRewrite = isFullSiteRewriteRequest(String(prompt || ""));
-          // Replit oneshot ONLY for selected-element tweaks — never for full redesign.
-          const oneShot = pointEdit;
+          // Soft routing only: always full Replit tools. Never hard-oneshot (that blocked write_page).
           let seededSnippet = "";
-          if (oneShot && activePageCode) {
+          if (quickPatch && activePageCode) {
             const focus = buildOneshotFocusSnippet(activePageCode, selectedEditTarget, String(prompt || ""));
             if (focus) {
               seededSnippet =
@@ -6854,36 +6860,41 @@ ${designAnalysis}
                 `\`\`\`html\n${focus}\n\`\`\`\n`;
             }
           }
-          const editMaxRounds = oneShot ? 1 : fullRewrite ? 8 : 6;
-          // Lean chat memory: last ~2 turns of intents/replies (no HTML dumps, no «Списано»).
+          // Selected tweak can still finish in 1–2 rounds; leave headroom to escalate.
+          const editMaxRounds = fullRewrite ? 8 : quickPatch ? 4 : 6;
           const agentHistory = hist.slice(-4);
 
-          const runEditTools = (provider: "gemini" | "claude") => runToolCallingAgent({
+          const buildEditUserPrompt = (escalate = false) =>
+            `${prompt}${mediaContext}${seededSnippet}\n\n` +
+            (escalate
+              ? `Предыдущая попытка не изменила код. ОБЯЗАТЕЛЬНО измени файлы: read_page("${safeActive}") затем apply_patch и/или write_page, потом finish. `
+              : fullRewrite
+                ? `Полная переработка как Replit Agent: 1) read_page("${safeActive}") 2) write_page с полноценным HTML (тексты и медиа URL сохрани) + Three.js/анимации по запросу 3) finish. `
+                : quickPatch
+                  ? `Как Replit Agent: предпочтительно в одном ответе apply_patch (SEARCH из HTML_BEGIN/ФОКУС) + finish. Если запрос шире элемента — read_page/write_page. `
+                  : `Как Replit Agent: сам выбери инструмент — apply_patch для точечного, write_page для крупного. Можно несколько tool_use в одном ответе. `) +
+            `Выполни ВСЕ пункты запроса. ` +
+            (fullRewrite
+              ? `Переработай дизайн и структуру целиком, сохранив контент пользователя. `
+              : quickPatch
+                ? `Меняй выбранный элемент / его обёртку, если запрос точечный. `
+                : `Если указан hero / выбранный элемент / секция — меняй только её. `) +
+            `Не вызывай finish без реального изменения кода. Не удаляй контент, который не просили. ` +
+            `Тексты не переписывай, если не просили явно.`;
+
+          const runEditTools = (
+            provider: "gemini" | "claude",
+            opts?: { escalate?: boolean; maxRounds?: number },
+          ) => runToolCallingAgent({
               systemPrompt: systemContent,
-              userPrompt:
-                `${prompt}${mediaContext}${seededSnippet}\n\n` +
-                (oneShot
-                  ? `Сделай как Replit Agent за 1 шаг: в ОДНОМ ответе вызови apply_patch (SEARCH из HTML_BEGIN или ФОКУС) и сразу finish(summary). Никаких других tools.`
-                  : fullRewrite
-                    ? `Полная переработка: 1) read_page("${safeActive}") 2) write_page с новым полноценным HTML (тексты и медиа URL сохрани) + Three.js/анимации по запросу 3) finish. ` +
-                      `Можно несколько tool_use в одном ответе. Не ограничивайся мелким apply_patch.`
-                    : `Работай как Replit Agent: 1) read_page нужных файлов 2) apply_patch 3) finish. ` +
-                      `Можно несколько tool_use в одном ответе.`) +
-                ` Выполни ВСЕ пункты запроса. ` +
-                (oneShot
-                  ? `Если указан hero / выбранный элемент / секция — меняй только её. `
-                  : fullRewrite
-                    ? `Переработай дизайн и структуру целиком, сохранив контент пользователя. `
-                    : `Если указан hero / выбранный элемент / секция — меняй только её. `) +
-                `Не вызывай finish без реального изменения кода. Не удаляй контент, который не просили. ` +
-                `Тексты не переписывай, если не просили явно.`,
+              userPrompt: buildEditUserPrompt(!!opts?.escalate),
               pages: sitePages,
               craftMd: craftMdForEdit,
               history: agentHistory,
-              maxRounds: editMaxRounds,
-              preReadFiles: oneShot ? [safeActive] : [],
-              tools: oneShot ? SITE_AGENT_ONESHOT_TOOLS : undefined,
-              oneShot,
+              maxRounds: opts?.maxRounds ?? editMaxRounds,
+              // Always full toolbelt (read/patch/write/finish) — model chooses like Replit.
+              preReadFiles: quickPatch ? [safeActive] : [],
+              oneShot: false,
               provider,
               onStatus: (status) => {
                 try { res.write(`data: ${JSON.stringify({ status })}\n\n`); } catch {}
@@ -6915,13 +6926,26 @@ ${designAnalysis}
             }
             fullResponse = "";
             toolProviderUsed = alternateProvider;
-            toolResult = await runEditTools(alternateProvider);
+            toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
           }
           if (!toolResult.toolsSupported && toolProviderUsed === primaryProvider) {
             console.warn(`[AGENT] ${primaryProvider} tools unsupported; fallback tools → ${alternateProvider}`);
             fullResponse = "";
             toolProviderUsed = alternateProvider;
-            toolResult = await runEditTools(alternateProvider);
+            toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
+          }
+          // Same provider escalate: quick-patch preference failed → force deeper tool use.
+          if (
+            toolResult.toolsSupported &&
+            toolResult.changedFiles.size === 0 &&
+            toolProviderUsed === primaryProvider &&
+            quickPatch &&
+            !fullRewrite
+          ) {
+            console.warn(`[AGENT] ${primaryProvider} quick-patch produced 0 changes — escalate same provider`);
+            res.write(`data: ${JSON.stringify({ status: "Углубляю правку — читаю файл и применяю шире…" })}\n\n`);
+            fullResponse = "";
+            toolResult = await runEditTools(primaryProvider, { escalate: true, maxRounds: 6 });
           }
           if (
             toolResult.toolsSupported &&
@@ -6929,14 +6953,14 @@ ${designAnalysis}
             toolProviderUsed === primaryProvider
           ) {
             // Replit-style completion: if primary finished without a patch, one
-            // alternate-model attempt (same prompt/workspace seed) before refund.
+            // alternate-model attempt before refund.
             console.warn(`[AGENT] ${primaryProvider} returned no code changes; fallback → ${alternateProvider}`);
             res.write(`data: ${JSON.stringify({
               status: `${primaryProvider === "gemini" ? "Gemini" : "Claude"} не внёс правки — пробую ${alternateProvider === "gemini" ? "Gemini" : "Claude"}…`,
             })}\n\n`);
             fullResponse = "";
             toolProviderUsed = alternateProvider;
-            toolResult = await runEditTools(alternateProvider);
+            toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
           }
 
           if (toolResult.toolsSupported && toolResult.changedFiles.size > 0) {
