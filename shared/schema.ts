@@ -224,6 +224,15 @@ export const projects = pgTable("projects", {
   customDomain: text("custom_domain"),
   /** First image of the site, cached on save so dashboard lists never scan HTML. */
   previewImage: text("preview_image"),
+  /**
+   * Cached HTML size + animation/generation flags. Hot paths (dashboard list,
+   * /generation-status) must NEVER call octet_length/position on generated_code —
+   * that detoasts multi-MB HTML and stalls the whole Postgres pool.
+   */
+  codeBytes: integer("code_bytes").notNull().default(0),
+  generatingPlaceholder: boolean("generating_placeholder").notNull().default(false),
+  animPending: boolean("anim_pending").notNull().default(false),
+  animReady: boolean("anim_ready").notNull().default(false),
   type: varchar("type", { length: 20 }).notNull().default("website"),
   seoConfig: json("seo_config").$type<SeoConfig>(),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),

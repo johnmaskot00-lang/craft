@@ -22,7 +22,12 @@ export function clearClientAuth() {
 }
 
 async function fetchAuthUser(): Promise<AuthUser | null> {
-  const res = await fetch("/api/auth/user", { credentials: "include" });
+  // Hard deadline: when the API pool is starved, an unbounded fetch leaves the
+  // whole app on the ProtectedRoute spinner with nothing in Amvera error logs.
+  const res = await fetch("/api/auth/user", {
+    credentials: "include",
+    signal: AbortSignal.timeout(12_000),
+  });
   if (res.status === 401) return null;
   if (!res.ok) {
     throw new Error(`auth check failed: ${res.status}`);

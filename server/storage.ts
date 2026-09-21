@@ -3,7 +3,7 @@ import { users, projects, projectMessages, projectImages, projectVersions, proje
 import { eq, desc, and, sql, gte, isNull } from "drizzle-orm";
 import crypto from "crypto";
 import { referralBonusTokens, normalizeReferralCode } from "./referral";
-import { extractPreviewImage } from "./site-preview-image";
+import { deriveProjectContentMeta, extractPreviewImage } from "./site-preview-image";
 import {
   deleteVersionBlobs,
   getVersionBlob,
@@ -409,6 +409,23 @@ export class DatabaseStorage implements IStorage {
 
   async getProject(id: number): Promise<Project | undefined> {
     const [project] = await db.select().from(projects).where(eq(projects.id, id));
+    if (!project) return undefined;
+    // Full row already paid the TOAST cost — refresh cached flags cheaply in memory
+    // and write-through so /generation-status never needs to scan HTML again.
+    const meta = deriveProjectContentMeta(project.generatedCode);
+    const stale =
+      meta.codeBytes !== Number(project.codeBytes || 0) ||
+      meta.generatingPlaceholder !== Boolean(project.generatingPlaceholder) ||
+      meta.animPending !== Boolean(project.animPending) ||
+      meta.animReady !== Boolean(project.animReady);
+    if (stale) {
+      void db
+        .update(projects)
+        .set(meta)
+        .where(eq(projects.id, id))
+        .catch((e: any) => console.warn("[projects] meta refresh:", e?.message || e));
+      return { ...project, ...meta };
+    }
     return project;
   }
 
@@ -423,16 +440,16 @@ export class DatabaseStorage implements IStorage {
     messageCount: number;
     lastModelAt: Date | null;
   } | undefined> {
+    // Read ONLY cached columns — never touch generated_code (TOAST detoast stalls the pool).
     const [row] = await db
       .select({
         id: projects.id,
         userId: projects.userId,
         updatedAt: projects.updatedAt,
-        codeBytes: sql<number>`coalesce(octet_length(${projects.generatedCode}), 0)::int`,
-        generatingPlaceholder: sql<boolean>`(position('data-craft-generating="1"' in coalesce(${projects.generatedCode}, '')) > 0)`,
-        animPending: sql<boolean>`(position('data-scroll-anim-pending="1"' in coalesce(${projects.generatedCode}, '')) > 0)`,
-        hasScrollAnim: sql<boolean>`(position('data-craft-scrollanim' in coalesce(${projects.generatedCode}, '')) > 0)`,
-        hasAnimFallback: sql<boolean>`(position('data-scroll-anim-fallback="1"' in coalesce(${projects.generatedCode}, '')) > 0)`,
+        codeBytes: projects.codeBytes,
+        generatingPlaceholder: projects.generatingPlaceholder,
+        animPending: projects.animPending,
+        animReady: projects.animReady,
       })
       .from(projects)
       .where(eq(projects.id, id));
@@ -446,23 +463,22 @@ export class DatabaseStorage implements IStorage {
       .from(projectMessages)
       .where(eq(projectMessages.projectId, id));
 
-    const animPending = Boolean(row.animPending);
     return {
       id: row.id,
       userId: row.userId,
       updatedAt: row.updatedAt,
       codeBytes: Number(row.codeBytes || 0),
       generatingPlaceholder: Boolean(row.generatingPlaceholder),
-      animPending,
-      animReady: !animPending && (Boolean(row.hasScrollAnim) || Boolean(row.hasAnimFallback)),
+      animPending: Boolean(row.animPending),
+      animReady: Boolean(row.animReady),
       messageCount: Number(msg?.messageCount || 0),
       lastModelAt: msg?.lastModelAt ?? null,
     };
   }
 
   async getProjectsByUser(userId: number): Promise<Project[]> {
-    // Never select generated_code for list views — full HTML OOMs the 1.8GB heap
-    // when dashboards load many projects (iframe srcDoc × N).
+    // Never select / measure generated_code here — octet_length detoasts multi-MB HTML
+    // and is what hung /api/projects + starved session lookups (infinite spinner).
     const rows = await db
       .select({
         id: projects.id,
@@ -480,8 +496,7 @@ export class DatabaseStorage implements IStorage {
         seoConfig: projects.seoConfig,
         createdAt: projects.createdAt,
         updatedAt: projects.updatedAt,
-        hasPreview: sql<boolean>`(octet_length(coalesce(${projects.generatedCode}, '')) > 80)`,
-        codeBytes: sql<number>`coalesce(octet_length(${projects.generatedCode}), 0)::int`,
+        codeBytes: projects.codeBytes,
       })
       .from(projects)
       .where(eq(projects.userId, userId))
@@ -489,17 +504,19 @@ export class DatabaseStorage implements IStorage {
     return rows.map((r) => ({
       ...r,
       generatedCode: "",
-      hasPreview: Boolean(r.hasPreview),
+      hasPreview: Boolean(r.previewImage) || Number(r.codeBytes || 0) > 80 || r.publishStatus === "published",
       codeBytes: Number(r.codeBytes || 0),
     })) as Project[];
   }
 
   async createProject(insertProject: InsertProject): Promise<Project> {
+    const meta = deriveProjectContentMeta(insertProject.generatedCode);
     const [project] = await db
       .insert(projects)
       .values({
         ...insertProject,
         previewImage: extractPreviewImage(insertProject.generatedCode),
+        ...meta,
       })
       .returning();
     return project;
@@ -511,6 +528,7 @@ export class DatabaseStorage implements IStorage {
 
     // Hosting fields stay empty: the clone is a fresh draft that publishes to its
     // own bucket/domain instead of hijacking the original site.
+    const meta = deriveProjectContentMeta(source.generatedCode);
     const [copy] = await db
       .insert(projects)
       .values({
@@ -522,6 +540,7 @@ export class DatabaseStorage implements IStorage {
         type: source.type,
         seoConfig: source.seoConfig,
         publishStatus: "draft",
+        ...meta,
       })
       .returning();
     if (!copy) return undefined;
@@ -552,9 +571,12 @@ export class DatabaseStorage implements IStorage {
 
   async updateProject(id: number, data: Partial<Project>): Promise<Project | undefined> {
     const patch: Partial<Project> = { ...data, updatedAt: new Date() };
-    // Refresh the cached thumbnail whenever the site HTML changes.
-    if (data.generatedCode !== undefined && data.previewImage === undefined) {
-      patch.previewImage = extractPreviewImage(data.generatedCode);
+    // Refresh cached thumbnail + content flags whenever the site HTML changes.
+    if (data.generatedCode !== undefined) {
+      if (data.previewImage === undefined) {
+        patch.previewImage = extractPreviewImage(data.generatedCode);
+      }
+      Object.assign(patch, deriveProjectContentMeta(data.generatedCode));
     }
     const [project] = await db.update(projects).set(patch).where(eq(projects.id, id)).returning();
     return project;
@@ -1139,7 +1161,7 @@ export class DatabaseStorage implements IStorage {
         seoConfig: projects.seoConfig,
         createdAt: projects.createdAt,
         updatedAt: projects.updatedAt,
-        codeBytes: sql<number>`coalesce(octet_length(${projects.generatedCode}), 0)::int`,
+        codeBytes: projects.codeBytes,
       })
       .from(projects)
       .where(eq(projects.userId, userId))

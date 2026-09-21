@@ -295,6 +295,33 @@ export async function queueDepth(): Promise<{ queued: number; running: number }>
   return { queued, running };
 }
 
+/**
+ * Inline site-generate jobs often have no lease_until. If the API process dies
+ * mid-flight they stay `running` forever, inflate queueDepth, and confuse the UI.
+ * Fail anything that has not been touched within the allowed window.
+ */
+export async function recoverStaleActiveJobs(): Promise<number> {
+  await ensureGenerationJobsTable();
+  const result = await db.execute(sql`
+    UPDATE generation_jobs
+    SET state = 'failed',
+        finished_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP,
+        lease_until = NULL,
+        worker_id = NULL,
+        error = COALESCE(error, 'stale job recovered')
+    WHERE state IN ('queued', 'running')
+      AND (
+        (kind = 'publish' AND updated_at < CURRENT_TIMESTAMP - INTERVAL '45 minutes')
+        OR (kind <> 'publish' AND updated_at < CURRENT_TIMESTAMP - INTERVAL '12 minutes')
+      )
+    RETURNING id
+  `);
+  const n = ((result as any)?.rows || []).length;
+  if (n > 0) console.warn(`[jobs] recovered ${n} stale active job(s)`);
+  return n;
+}
+
 /** Soft backpressure threshold before accepting new queued work. */
 export function jobQueueOverloaded(depth: { queued: number; running: number }): boolean {
   const maxQueued = Number(process.env.CRAFT_JOB_QUEUE_MAX) || 200;
