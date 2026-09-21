@@ -1,5 +1,5 @@
-{
-  "gitSha": "c8fd9ef",
-  "gitShaFull": "c8fd9efbc357599ba04407f82e8e369a749ba3c1",
-  "deployedAt": "2026-09-21T07:52:00Z"
+﻿{
+  "gitSha": "'@ + $short + @'",
+  "gitShaFull": "'@ + $full + @'",
+  "deployedAt": "2026-09-21T07:53:00Z"
 }
