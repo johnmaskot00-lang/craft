@@ -134,6 +134,7 @@ import {
   parseMultipageEditResponse,
   applyDiffPatchesToCode,
   isHtmlPage,
+  resolveEditContextBudget,
   type SitePage,
 } from "./agent-runtime";
 import { registerGeoRoutes } from "./geo";
@@ -5711,16 +5712,22 @@ export async function registerRoutes(
           userPrompt: prompt,
           pages: chatPages,
         });
-        const manifest = buildSiteManifest(chatPages, chatCraftMd);
-        const { context: pagesContext } = buildPagesContext(chatPages, activeFile || "index.html", 70_000);
+        const chatBudget = resolveEditContextBudget(chatPages);
+        const manifest = buildSiteManifest(chatPages, chatCraftMd, chatBudget.craftMdChars);
+        const { context: pagesContext } = buildPagesContext(
+          chatPages,
+          activeFile || "index.html",
+          Math.min(chatBudget.maxTotalChars, 50_000),
+          chatBudget,
+        );
         const chatSystemContent =
           `${AGENT_CHAT_SYSTEM_PROMPT}\n\n${manifest}\n\n═══ ИСХОДНЫЙ КОД САЙТА ДЛЯ АНАЛИЗА ═══\n${pagesContext}`;
         const chatHistory: KieMessage[] = [];
-        for (const msg of priorMessages.slice(-12)) {
+        for (const msg of priorMessages.slice(-chatBudget.historyMessages)) {
           if (msg.role === "user") {
-            chatHistory.push({ role: "user", content: [{ type: "input_text", text: msg.content.slice(0, 3000) }] });
+            chatHistory.push({ role: "user", content: [{ type: "input_text", text: msg.content.slice(0, chatBudget.historyMsgChars) }] });
           } else if (msg.role === "assistant" || msg.role === "model") {
-            chatHistory.push({ role: "assistant", content: [{ type: "input_text", text: msg.content.slice(0, 3000) }] });
+            chatHistory.push({ role: "assistant", content: [{ type: "input_text", text: msg.content.slice(0, chatBudget.historyMsgChars) }] });
           }
         }
         chatHistory.push({ role: "user", content: [{ type: "input_text", text: prompt }] });
@@ -6318,7 +6325,11 @@ URL (для ориентира, не для прямой вставки маке
           : existingFiles.find(f => f.filename === safeEditingFile)?.code || project.generatedCode;
         const { map } = stripBase64(editingFileCodeRaw || "");
         base64Map = map;
-        console.log(`[AGENT] Multipage edit. Active: ${safeEditingFile}, pages: ${sitePages.map(p => p.filename).join(", ")}`);
+        const editBudget = resolveEditContextBudget(sitePages);
+        console.log(
+          `[AGENT] Multipage edit. Active: ${safeEditingFile}, pages: ${sitePages.map(p => p.filename).join(", ")}, ` +
+          `context=${editBudget.label} max=${editBudget.maxTotalChars} siteChars=${sitePages.reduce((s, p) => s + (p.code?.length || 0), 0)}`,
+        );
 
         craftMdForEdit = await ensureCraftMd(project.id, {
           title: project.title || "Сайт",
@@ -6334,7 +6345,10 @@ URL (для ориентира, не для прямой вставки маке
           craftMd: craftMdForEdit,
           pages: sitePages,
           useToolsHint: true,
+          budget: editBudget,
         });
+        // Stash on project-scoped locals via closure — conversation history uses the same budget.
+        (req as any)._craftEditBudget = editBudget;
         if (selectedEditTarget) {
           systemContent += `\n\n🚨 ТОЧНАЯ ЦЕЛЬ ВЫБРАНА ПОЛЬЗОВАТЕЛЕМ:
 - Разрешённая страница: ${selectedEditTarget.page}
@@ -6599,12 +6613,22 @@ ${designAnalysis}
       let fullResponse = "";
 
       const conversationHistory: KieMessage[] = [];
+      const editBudgetForHistory = (req as any)._craftEditBudget as
+        | ReturnType<typeof resolveEditContextBudget>
+        | undefined;
+      const histCount = editBudgetForHistory?.historyMessages ?? 6;
+      const histChars = editBudgetForHistory?.historyMsgChars ?? 1500;
 
-      for (const msg of priorMessages.slice(-10)) {
+      for (const msg of priorMessages.slice(-histCount)) {
         if (msg.role === "user") {
-          conversationHistory.push({ role: "user", content: [{ type: "input_text", text: msg.content }] });
+          const text = msg.content.length > histChars
+            ? msg.content.substring(0, histChars) + "...[обрезано]"
+            : msg.content;
+          conversationHistory.push({ role: "user", content: [{ type: "input_text", text }] });
         } else if (msg.role === "assistant" || msg.role === "model") {
-          const truncated = msg.content.length > 2000 ? msg.content.substring(0, 2000) + "...[обрезано]" : msg.content;
+          const truncated = msg.content.length > histChars
+            ? msg.content.substring(0, histChars) + "...[обрезано]"
+            : msg.content;
           conversationHistory.push({ role: "assistant", content: [{ type: "input_text", text: truncated }] });
         }
       }
@@ -6804,6 +6828,7 @@ ${designAnalysis}
               craftMd: craftMdForEdit,
               pages: sitePages,
               useToolsHint: false,
+              budget: (req as any)._craftEditBudget || resolveEditContextBudget(sitePages),
             });
           }
         } catch (agentErr: any) {
@@ -6818,6 +6843,7 @@ ${designAnalysis}
               craftMd: craftMdForEdit,
               pages: sitePages,
               useToolsHint: false,
+              budget: (req as any)._craftEditBudget || resolveEditContextBudget(sitePages),
             });
             fullResponse = await kimiK3GenerateSync({
               messages: toClaudeMessages(conversationHistory),
