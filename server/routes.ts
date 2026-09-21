@@ -3999,6 +3999,47 @@ function isFullSiteRewriteRequest(rawPrompt: string): boolean {
   );
 }
 
+/** True when a "full redesign" pass only changed a few CSS tokens — not a real redesign. */
+function isInsufficientFullRewriteResult(
+  rawPrompt: string,
+  beforeCode: string,
+  afterCode: string,
+  patchCount = 1,
+): boolean {
+  if (!isFullSiteRewriteRequest(rawPrompt)) return false;
+  const before = String(beforeCode || "");
+  const after = String(afterCode || "");
+  if (!after || after === before) return true;
+
+  const prompt = String(rawPrompt || "");
+  const wants3d = /three\.?\s*js|webgl|\b3d\b/i.test(prompt);
+  const wantsHeavyAnim = /анимир|супер\s*аним|three|3d|структур/i.test(prompt);
+  const delta = Math.abs(after.length - before.length);
+  const has3d = (html: string) =>
+    /three(\.min)?\.js|from\s+['"]three['"]|THREE\.|WebGLRenderer|webgl|data-craft-three/i.test(html);
+  const hasNewMotion = (html: string) =>
+    /requestAnimationFrame|@keyframes|gsap|data-craft-(?:scrollanim|three|motion)|canvas[\s>][\s\S]{0,200}three/i.test(
+      html,
+    );
+
+  // Must introduce Three.js/WebGL when the user asked for it.
+  if (wants3d && !has3d(after)) return true;
+
+  // Cosmetic-only: tiny delta / few patches without new motion systems.
+  if (patchCount <= 2 && delta < 3_000) {
+    if (wantsHeavyAnim && !hasNewMotion(after) && !has3d(after)) return true;
+    // Diff looks like CSS custom-property swaps only.
+    const { oldPart, newPart } = changedFragment(before, after);
+    const cssVarOnly =
+      /^--[\w-]+|^[a-z-]+:\s*#|rgba?\(|hsl\(/i.test(oldPart || "") &&
+      /^--[\w-]+|^[a-z-]+:\s*#|rgba?\(|hsl\(/i.test(newPart || "") &&
+      !/<(section|canvas|script|div)/i.test(oldPart + newPart);
+    if (cssVarOnly && delta < 4_000) return true;
+  }
+
+  return false;
+}
+
 /**
  * Oneshot (1 API round, apply_patch+finish only) ONLY for selected-element edits.
  * Never oneshot for full redesign — length heuristics falsely catch short rewrite asks.
@@ -6905,10 +6946,12 @@ ${designAnalysis}
 
           const runEditTools = (
             provider: "gemini" | "claude",
-            opts?: { escalate?: boolean; maxRounds?: number },
-          ) => runToolCallingAgent({
-              systemPrompt: systemContent,
-              userPrompt: buildEditUserPrompt(!!opts?.escalate, provider),
+            opts?: { escalate?: boolean; maxRounds?: number; extraNote?: string },
+          ) => {
+            const note = opts?.extraNote || "";
+            return runToolCallingAgent({
+              systemPrompt: systemContent + note,
+              userPrompt: buildEditUserPrompt(!!opts?.escalate, provider) + note,
               pages: sitePages,
               craftMd: craftMdForEdit,
               history: agentHistory,
@@ -6927,6 +6970,7 @@ ${designAnalysis}
                 fullResponse += chunk;
               },
             });
+          };
 
           // Respect agent version: V1 = Claude, V2 = Gemini. No silent provider swap.
           const primaryProvider: "gemini" | "claude" = useGemini ? "gemini" : "claude";
@@ -7010,7 +7054,113 @@ ${designAnalysis}
             toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
           }
 
+          // Full redesign quality gate: CSS-variable tweaks ≠ Three.js / structural redesign.
+          if (fullRewrite && toolResult.toolsSupported && toolResult.changedFiles.size > 0) {
+            const afterCode =
+              toolResult.changedFiles.get(safeActive)
+              || toolResult.changedFiles.get("index.html")
+              || [...toolResult.changedFiles.values()][0]
+              || "";
+            if (
+              isInsufficientFullRewriteResult(
+                String(prompt || ""),
+                activePageCode,
+                afterCode,
+                toolResult.patchCount ?? 1,
+              )
+            ) {
+              console.warn(
+                `[AGENT] full rewrite too trivial (patches=${toolResult.patchCount ?? "?"}, delta=${afterCode.length - activePageCode.length}) — escalate`,
+              );
+              try {
+                res.write(`data: ${JSON.stringify({
+                  status: "Слишком мало изменений — добавляю Three.js и полный редизайн…",
+                })}\n\n`);
+              } catch {}
+              fullResponse = "";
+              const insufficiencyNote =
+                `\n\n⚠ ПРОШЛЫЙ ПРОХОД ОТКЛОНЁН: были только мелкие CSS/косметические правки. ` +
+                `Сейчас ОБЯЗАТЕЛЬНО: CDN three.js + <canvas> 3D-сцена + заметный редизайн секций/анимаций. ` +
+                `Нельзя finish на смене --text-main / цветов.`;
+              toolResult = await runEditTools(toolProviderUsed, {
+                escalate: true,
+                maxRounds: 8,
+                extraNote: insufficiencyNote,
+              });
+              const after2 =
+                toolResult.changedFiles.get(safeActive)
+                || toolResult.changedFiles.get("index.html")
+                || [...toolResult.changedFiles.values()][0]
+                || "";
+              if (
+                toolResult.toolsSupported
+                && (
+                  toolResult.changedFiles.size === 0
+                  || isInsufficientFullRewriteResult(
+                    String(prompt || ""),
+                    activePageCode,
+                    after2,
+                    toolResult.patchCount ?? 1,
+                  )
+                )
+                && toolProviderUsed === primaryProvider
+              ) {
+                console.warn(`[AGENT] full rewrite still trivial after escalate — try ${alternateProvider}`);
+                try {
+                  res.write(`data: ${JSON.stringify({
+                    status: `Всё ещё мало — пробую ${alternateProvider === "gemini" ? "Gemini" : "Claude"}…`,
+                  })}\n\n`);
+                } catch {}
+                fullResponse = "";
+                toolProviderUsed = alternateProvider;
+                toolResult = await runEditTools(alternateProvider, {
+                  escalate: true,
+                  maxRounds: 8,
+                  extraNote: insufficiencyNote,
+                });
+              }
+            }
+          }
+
           if (toolResult.toolsSupported && toolResult.changedFiles.size > 0) {
+            const finalAfter =
+              toolResult.changedFiles.get(safeActive)
+              || toolResult.changedFiles.get("index.html")
+              || [...toolResult.changedFiles.values()][0]
+              || "";
+            if (
+              fullRewrite
+              && isInsufficientFullRewriteResult(
+                String(prompt || ""),
+                activePageCode,
+                finalAfter,
+                toolResult.patchCount ?? 1,
+              )
+            ) {
+              // Still cosmetic after all retries — refund rather than fake success.
+              console.warn(`[AGENT] full rewrite remained trivial — refusing fake success`);
+              let refunded = false;
+              if (genBilled && user?.id && GENERATION_COST > 0) {
+                try {
+                  await storage.refundCredits(user.id, GENERATION_COST, genIkey);
+                  refunded = true;
+                  genBilled = false;
+                  console.log(`[REFUND] edit-trivial-redesign: +${GENERATION_COST} tokens`);
+                } catch (re: any) {
+                  console.warn("[REFUND] edit-trivial-redesign failed:", re?.message);
+                }
+              }
+              const freshBal = user?.id ? (await storage.getUser(user.id))?.credits : undefined;
+              const failMsg = refunded
+                ? "Редизайн не выполнен (только косметика без Three.js/анимаций). Токены возвращены — повторите запрос."
+                : "Редизайн не выполнен (только косметика без Three.js/анимаций). Повторите запрос.";
+              try {
+                await storage.createProjectMessage({ projectId: project.id, role: "model", content: failMsg });
+              } catch {}
+              res.write(`data: ${JSON.stringify({ done: true, error: failMsg, newBalance: freshBal, refunded, refundAmount: refunded ? GENERATION_COST : 0 })}\n\n`);
+              res.end();
+              return;
+            }
             agentToolHandled = true;
             agentChangedFiles = toolResult.changedFiles;
             agentSummary = toolResult.summary;
@@ -7571,6 +7721,7 @@ ${designAnalysis}
 
         let realChange = verifiedEditChanges.length > 0;
         let wrongSelectedTarget = false;
+        let trivialFullRewrite = false;
         if (realChange && selectedEditTarget) {
           const selectedChange = verifiedEditChanges.find(
             (change) => change.filename === selectedEditTarget!.page,
@@ -7599,6 +7750,40 @@ ${designAnalysis}
           }
         }
 
+        // Safety net: full redesign that only touched CSS tokens must not bill as success.
+        if (realChange && isFullSiteRewriteRequest(String(prompt || ""))) {
+          const indexChange =
+            verifiedEditChanges.find((c) => c.filename === "index.html")
+            || verifiedEditChanges[0];
+          if (
+            indexChange
+            && isInsufficientFullRewriteResult(
+              String(prompt || ""),
+              indexChange.before,
+              indexChange.after,
+              verifiedEditChanges.length,
+            )
+          ) {
+            console.warn(
+              `[EDIT] full rewrite still cosmetic after verify — reverting (project ${project.id})`,
+            );
+            for (const change of verifiedEditChanges) {
+              if (change.filename !== "index.html") {
+                await storage.upsertProjectFile({
+                  projectId: project.id,
+                  filename: change.filename,
+                  code: change.before,
+                });
+              }
+            }
+            verifiedEditChanges = [];
+            realChange = false;
+            trivialFullRewrite = true;
+            // Force mainHtmlCode back so we don't persist cosmetic-only index.
+            mainHtmlCode = project.generatedCode || "";
+          }
+        }
+
         if (!realChange) {
           console.warn(`[EDIT] No real code change for project ${project.id} — refusing fake success (responseLen=${fullResponse.length})`);
           let refunded = false;
@@ -7615,7 +7800,9 @@ ${designAnalysis}
           const freshBal = user?.id ? (await storage.getUser(user.id))?.credits : undefined;
           const failBase = wrongSelectedTarget
             ? "Агент изменил не выбранный элемент, поэтому ошибочная правка отменена."
-            : "Изменения не попали в код сайта.";
+            : trivialFullRewrite
+              ? "Редизайн не выполнен (только косметика без Three.js/анимаций)."
+              : "Изменения не попали в код сайта.";
           const failMsg = refunded
             ? `${failBase} Токены возвращены — повторите запрос.`
             : `${failBase} Повторите запрос.`;
@@ -7627,7 +7814,19 @@ ${designAnalysis}
           return;
         }
 
-        aiTextReply = buildVerifiedEditSummary(verifiedEditChanges);
+        // Prefer the agent's finish() summary when it is substantive.
+        // buildVerifiedEditSummary turns CSS-var swaps into a fake "success log"
+        // that looks like a redesign happened when the preview barely changed.
+        const finishSummary = String(agentSummary || "").trim();
+        if (
+          agentToolHandled
+          && finishSummary.length >= 24
+          && !/сайт обновл|готово\.?$/i.test(finishSummary)
+        ) {
+          aiTextReply = finishSummary.slice(0, 900);
+        } else {
+          aiTextReply = buildVerifiedEditSummary(verifiedEditChanges);
+        }
       }
 
       // Final safety net: if any parsing path still left conversational preamble
