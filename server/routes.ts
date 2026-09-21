@@ -90,6 +90,7 @@ import {
   ensureGenerationJobsTable,
   queueDepth,
   jobQueueOverloaded,
+  recoverStaleActiveJobs,
 } from "./jobs";
 import { registerJobHandler, startInProcessWorker } from "./job-worker";
 import {
@@ -4533,8 +4534,17 @@ export async function registerRoutes(
   });
 
   app.get("/api/health", async (_req, res) => {
+    const withDeadline = <T,>(work: Promise<T>, ms: number, label: string): Promise<T> =>
+      new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+        work.then(
+          (value) => { clearTimeout(timer); resolve(value); },
+          (err) => { clearTimeout(timer); reject(err); },
+        );
+      });
+
     try {
-      await db.execute(sql`SELECT 1`);
+      await withDeadline(db.execute(sql`SELECT 1`), 2500, "db");
     } catch (err: any) {
       return res.status(503).json({
         ok: false,
@@ -4542,12 +4552,12 @@ export async function registerRoutes(
         objectStorage: "unknown",
         message: "Database unavailable",
         uptime: Math.round(process.uptime()),
-        error: String(err?.code || "DB_ERROR"),
+        error: String(err?.code || err?.message || "DB_ERROR"),
       });
     }
     const mediaBackend = getMediaBackendLabel();
     try {
-      await probeMediaStorage();
+      await withDeadline(probeMediaStorage(), 3000, "object-storage");
     } catch (err: any) {
       return res.status(503).json({
         ok: false,
@@ -4577,7 +4587,11 @@ export async function registerRoutes(
     if (Date.now() - healthQueueCache.at >= HEALTH_QUEUE_CACHE_MS) {
       healthQueueCache = {
         at: Date.now(),
-        value: await queueDepth().catch(() => ({ queued: -1, running: -1 })),
+        value: await withDeadline(
+          queueDepth().catch(() => ({ queued: -1, running: -1 })),
+          2000,
+          "queue-depth",
+        ).catch(() => ({ queued: -1, running: -1 })),
       };
     }
     const queue = healthQueueCache.value;
@@ -4608,6 +4622,14 @@ export async function registerRoutes(
     console.warn("[boot] generation_jobs:", e?.message?.slice?.(0, 200) || e);
   }
 
+  // Fail orphaned inline jobs without lease_until so queueDepth and editors recover.
+  void recoverStaleActiveJobs().catch((e: any) =>
+    console.warn("[boot] stale jobs:", e?.message || e),
+  );
+  setInterval(() => {
+    void recoverStaleActiveJobs().catch(() => undefined);
+  }, 60_000).unref?.();
+
   startInProcessWorker({ kinds: ["publish"] });
 
   // Queued publish jobs (optional CRAFT_ASYNC_PUBLISH path / future workers).
@@ -4636,6 +4658,16 @@ export async function registerRoutes(
 
   await db.execute(sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS preview_image text`)
     .catch((e: any) => console.warn("[boot] projects.preview_image:", e?.message?.slice?.(0, 160) || e));
+  for (const stmt of [
+    sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS code_bytes integer NOT NULL DEFAULT 0`,
+    sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS generating_placeholder boolean NOT NULL DEFAULT false`,
+    sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS anim_pending boolean NOT NULL DEFAULT false`,
+    sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS anim_ready boolean NOT NULL DEFAULT false`,
+  ]) {
+    await db.execute(stmt).catch((e: any) =>
+      console.warn("[boot] projects content meta:", e?.message?.slice?.(0, 160) || e),
+    );
+  }
 
   await db.execute(sql`ALTER TABLE leads ADD COLUMN IF NOT EXISTS fingerprint text`).catch(() => undefined);
   await db.execute(sql`CREATE INDEX IF NOT EXISTS leads_fingerprint_created_idx ON leads (fingerprint, created_at DESC)`).catch(() => undefined);

@@ -125,13 +125,14 @@ export async function backfillProjectPreviewImages(): Promise<void> {
   let filled = 0;
   try {
     for (;;) {
+      // Never filter with octet_length(generated_code) — that detoasts every
+      // candidate row and is what stalled the shared Postgres pool under load.
       const res = await db.execute(sql`
         SELECT id, left(coalesce(generated_code, ''), 200000) AS head
         FROM projects
         WHERE preview_image IS NULL
-          AND octet_length(coalesce(generated_code, '')) > 80
-        ORDER BY id DESC
-        LIMIT 25
+        ORDER BY updated_at DESC NULLS LAST, id DESC
+        LIMIT 10
       `);
       const rows = res.rows as Array<{ id: number; head: string | null }>;
       if (!rows.length) break;
@@ -145,7 +146,9 @@ export async function backfillProjectPreviewImages(): Promise<void> {
         scanned += 1;
         if (src) filled += 1;
       }
-      await sleep(500);
+      await sleep(750);
+      // Cap a single pass so boot/maintenance cannot monopolize the pool.
+      if (scanned >= 200) break;
     }
     if (scanned) console.log(`[projects] preview backfill: ${filled}/${scanned} sites got a thumbnail`);
   } catch (e: any) {

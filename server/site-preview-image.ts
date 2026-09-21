@@ -27,3 +27,22 @@ export function extractPreviewImage(html: string | null | undefined): string | n
   }
   return null;
 }
+
+/** Cheap in-memory flags derived once on save — never recompute inside SQL. */
+export function deriveProjectContentMeta(html: string | null | undefined): {
+  codeBytes: number;
+  generatingPlaceholder: boolean;
+  animPending: boolean;
+  animReady: boolean;
+} {
+  const code = html || "";
+  const animPending = code.includes('data-scroll-anim-pending="1"');
+  return {
+    codeBytes: Buffer.byteLength(code, "utf8"),
+    generatingPlaceholder: code.includes('data-craft-generating="1"'),
+    animPending,
+    animReady:
+      !animPending &&
+      (code.includes("data-craft-scrollanim") || code.includes('data-scroll-anim-fallback="1"')),
+  };
+}

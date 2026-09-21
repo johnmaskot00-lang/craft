@@ -22,11 +22,21 @@ export const pool = new pg.Pool({
   max: poolMax,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 8000,
+  // Cap any single query so a TOAST detoast / lock wait cannot pin a connection
+  // forever and starve /api/auth/user (infinite dashboard spinner).
+  statement_timeout: Math.max(5_000, Number(process.env.DB_STATEMENT_TIMEOUT_MS) || 15_000),
+  query_timeout: Math.max(5_000, Number(process.env.DB_QUERY_TIMEOUT_MS) || 20_000),
 });
 
 // Gracefully handle unexpected connection errors so the pool auto-recovers
 pool.on("error", (err) => {
   console.error("[DB Pool] Unexpected client error:", err.message);
+});
+
+pool.on("connect", (client) => {
+  // Defense in depth if the driver ignores constructor timeouts on older pg.
+  void client.query("SET statement_timeout = '15s'").catch(() => undefined);
+  void client.query("SET lock_timeout = '8s'").catch(() => undefined);
 });
 
 export const db = drizzle(pool, { schema });
