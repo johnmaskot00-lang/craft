@@ -9,6 +9,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { MessageParam, ContentBlockParam, Tool } from "@anthropic-ai/sdk/resources/messages";
+import { KieApiError } from "./kie-errors";
 
 export const ROUTER_CHEAP_BASE_URL =
   process.env.ROUTER_CHEAP_BASE_URL?.trim() || "https://router.cheap";
@@ -246,10 +247,24 @@ export async function routerCheapToolsRound(opts: {
     // Don't treat "Streaming is required…" as a tools rejection.
     if (
       (status === 400 || status === 422 || /tool/i.test(msg)) &&
-      !/streaming is required/i.test(msg)
+      !/streaming is required/i.test(msg) &&
+      !/stream ended without producing/i.test(msg)
     ) {
       console.warn("[AGENT] Claude tools rejected by router.cheap:", status, msg.slice(0, 300));
       return { content: [], stop_reason: "tools_unsupported", toolsSupported: false };
+    }
+    // Router dropped the SSE mid-flight (common on long tool rounds / write_page).
+    if (/stream ended without producing|without producing a message/i.test(msg)) {
+      throw new KieApiError(
+        `Claude stream ended without assistant message (router.cheap). Retry or use Gemini.`,
+        { source: "http", cause: err },
+      );
+    }
+    if (/request timed out|timed?\s*out|timeout of \d+ms/i.test(msg)) {
+      throw new KieApiError(`Claude tools request timed out (router.cheap).`, {
+        source: "http",
+        cause: err,
+      });
     }
     throw err;
   }
