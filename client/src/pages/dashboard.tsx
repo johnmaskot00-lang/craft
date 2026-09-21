@@ -1829,11 +1829,6 @@ export default function DashboardPage() {
                               В Моушн ИИ сделает 2 кадра 16:9 для ПК (hover) и 2 кадра 9:16 для телефона (анимация по скроллу)
                             </p>
                           )}
-                          {interactiveStyle === "volume" && (
-                            <p className="shrink-0" style={{ fontSize: '0.68rem', color: '#0d9488', margin: 0, paddingLeft: 4, lineHeight: 1.35 }}>
-                              Объём: единый фон → подложка (горшок/стол) → объект на ней; фото продукта станет подложкой или героем
-                            </p>
-                          )}
                           <input
                             ref={interactiveProductImgRef}
                             type="file"
@@ -1887,9 +1882,7 @@ export default function DashboardPage() {
                                 <p className="text-[10px] mt-0.5" style={{ color: '#5eead4' }}>
                                   {interactiveStyle === "motion"
                                     ? "PNG, JPG до 10 МБ — AI: 16:9 + 9:16 пары для morph"
-                                    : interactiveStyle === "volume"
-                                      ? "PNG, JPG до 10 МБ — подложка или герой сцены"
-                                      : "PNG, JPG до 10 МБ — AI оживит его"}
+                                    : "PNG, JPG до 10 МБ — AI оживит его"}
                                 </p>
                               </div>
                             </button>
