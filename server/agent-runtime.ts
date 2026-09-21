@@ -609,6 +609,29 @@ export const SITE_AGENT_EDIT_TOOLS = SITE_AGENT_TOOLS.filter((t) =>
   ["list_pages", "read_page", "apply_patch", "write_page", "read_craft_md", "finish"].includes(t.name),
 );
 
+/**
+ * Point / selected-element edits: code is already seeded in the user prompt and
+ * pre-marked as read. Only apply_patch + finish — one model round, like Replit.
+ */
+export const SITE_AGENT_ONESHOT_TOOLS = SITE_AGENT_TOOLS.filter((t) =>
+  ["apply_patch", "finish"].includes(t.name),
+).map((t) =>
+  t.name === "apply_patch"
+    ? {
+        ...t,
+        description:
+          "Применить SEARCH/REPLACE. SEARCH копируй ДОСЛОВНО из блока ФОКУС в запросе пользователя. " +
+          "В том же ответе обязательно вызови finish.",
+      }
+    : t.name === "finish"
+      ? {
+          ...t,
+          description:
+            "Завершить сразу после apply_patch в ЭТОМ ЖЕ ответе. Краткий отчёт 1–3 предложения.",
+        }
+      : t,
+);
+
 export function applySinglePatch(originalCode: string, searchBlock: string, replaceBlock: string): { code: string; ok: boolean; error?: string } {
   if (!searchBlock.trim()) return { code: originalCode, ok: false, error: "empty SEARCH" };
 
@@ -879,6 +902,7 @@ async function kieClaudeToolsRound(
   messages: any[],
   systemPrompt: string,
   tools: readonly any[],
+  forceToolUse = false,
 ): Promise<{ content: ClaudeContentBlock[]; stop_reason: string; toolsSupported: boolean }> {
   if (!isRouterCheapConfigured()) throw new Error("ROUTER_CHEAP_API_KEY missing");
 
@@ -889,6 +913,7 @@ async function kieClaudeToolsRound(
         messages,
         systemPrompt,
         tools,
+        forceToolUse,
       });
       return {
         content: round.content as ClaudeContentBlock[],
@@ -933,6 +958,7 @@ async function kieGeminiToolsRound(
   contents: any[],
   systemPrompt: string,
   tools: readonly any[] = SITE_AGENT_EDIT_TOOLS,
+  forceToolUse = false,
 ): Promise<{ text: string; functionCalls: GeminiToolCall[]; modelParts: any[]; toolsSupported: boolean }> {
   if (!KIE_API_KEY) throw new Error("KIE_API_KEY missing");
 
@@ -940,7 +966,8 @@ async function kieGeminiToolsRound(
     stream: false,
     contents,
     tools: [{ functionDeclarations: toGeminiFunctionDeclarations(tools) }],
-    toolConfig: { functionCallingConfig: { mode: "AUTO" } },
+    // ANY = must call a tool (oneshot apply_patch+finish). AUTO = model may text-only.
+    toolConfig: { functionCallingConfig: { mode: forceToolUse ? "ANY" : "AUTO" } },
   };
   if (systemPrompt) {
     body.systemInstruction = { parts: [{ text: systemPrompt }] };
@@ -1248,6 +1275,11 @@ export async function runToolCallingAgent(opts: {
    * one model round instead of 6.
    */
   preReadFiles?: string[];
+  /**
+   * Replit oneshot: force tool use and stop after one round (apply_patch+finish
+   * in a single API call). Caller should pass SITE_AGENT_ONESHOT_TOOLS + seed.
+   */
+  oneShot?: boolean;
 }): Promise<ToolAgentResult> {
   const provider = opts.provider || "claude";
   if (provider === "gemini") {
@@ -1307,10 +1339,12 @@ async function runClaudeToolCallingAgent(opts: {
   maxRounds?: number;
   tools?: readonly any[];
   preReadFiles?: string[];
+  oneShot?: boolean;
 }): Promise<ToolAgentResult> {
   const workspace = new SiteWorkspace(opts.pages, opts.craftMd, opts.preReadFiles || []);
   const messages: any[] = [];
-  const tools = opts.tools || SITE_AGENT_EDIT_TOOLS;
+  const oneShot = !!opts.oneShot;
+  const tools = opts.tools || (oneShot ? SITE_AGENT_ONESHOT_TOOLS : SITE_AGENT_EDIT_TOOLS);
 
   for (const h of opts.history || []) {
     messages.push({ role: h.role, content: [{ type: "text", text: h.text }] });
@@ -1319,19 +1353,19 @@ async function runClaudeToolCallingAgent(opts: {
 
   let summary = "";
   let streamedText = "";
-  // Point edits should finish in 1–2 rounds; complex multipage work up to 6.
-  const maxRounds = opts.maxRounds ?? 6;
+  // Oneshot = exactly 1 API round (apply_patch+finish together). Else up to 6.
+  const maxRounds = opts.maxRounds ?? (oneShot ? 1 : 6);
 
   for (let round = 0; round < maxRounds; round++) {
-    opts.onStatus?.(`Агент думает… (шаг ${round + 1}/${maxRounds})`);
+    opts.onStatus?.(oneShot ? "Агент правит… (1 запрос)" : `Агент думает… (шаг ${round + 1}/${maxRounds})`);
     const heartbeat = setInterval(() => {
-      opts.onStatus?.(`Агент думает… (шаг ${round + 1}/${maxRounds})`);
+      opts.onStatus?.(oneShot ? "Агент правит… (1 запрос)" : `Агент думает… (шаг ${round + 1}/${maxRounds})`);
     }, 12_000);
     heartbeat.unref?.();
     let roundResult: Awaited<ReturnType<typeof kieClaudeToolsRound>> | undefined;
     try {
       try {
-        roundResult = await kieClaudeToolsRound(messages, opts.systemPrompt, tools);
+        roundResult = await kieClaudeToolsRound(messages, opts.systemPrompt, tools, oneShot);
       } catch (e) {
         const kept = keepPartialProgressOrThrow(e, workspace, streamedText, `Claude round ${round + 1}/${maxRounds}`);
         summary = kept.summary;
@@ -1401,6 +1435,12 @@ async function runClaudeToolCallingAgent(opts: {
       break;
     }
 
+    // Oneshot: stop after the single round even without finish — patches already count.
+    if (oneShot) {
+      summary = streamedText.trim().slice(0, 500) || (workspace.changedFiles.size > 0 ? "Правка применена" : "");
+      break;
+    }
+
     if (shouldStopAfterEditRound(toolNames, changedBefore, workspace.changedFiles.size, finishedSummary)) {
       summary = streamedText.trim().slice(0, 500);
       break;
@@ -1421,10 +1461,12 @@ async function runGeminiToolCallingAgent(opts: {
   maxRounds?: number;
   tools?: readonly any[];
   preReadFiles?: string[];
+  oneShot?: boolean;
 }): Promise<ToolAgentResult> {
   const workspace = new SiteWorkspace(opts.pages, opts.craftMd, opts.preReadFiles || []);
   const contents: any[] = [];
-  const tools = opts.tools || SITE_AGENT_EDIT_TOOLS;
+  const oneShot = !!opts.oneShot;
+  const tools = opts.tools || (oneShot ? SITE_AGENT_ONESHOT_TOOLS : SITE_AGENT_EDIT_TOOLS);
 
   for (const h of opts.history || []) {
     contents.push({
@@ -1436,19 +1478,19 @@ async function runGeminiToolCallingAgent(opts: {
 
   let summary = "";
   let streamedText = "";
-  const maxRounds = opts.maxRounds ?? 6;
+  const maxRounds = opts.maxRounds ?? (oneShot ? 1 : 6);
 
   for (let round = 0; round < maxRounds; round++) {
-    opts.onStatus?.(`Gemini-агент думает… (шаг ${round + 1}/${maxRounds})`);
+    opts.onStatus?.(oneShot ? "Gemini правит… (1 запрос)" : `Gemini-агент думает… (шаг ${round + 1}/${maxRounds})`);
     // Keep SSE alive while KIE sync generateContent waits (can be minutes).
     const heartbeat = setInterval(() => {
-      opts.onStatus?.(`Gemini-агент думает… (шаг ${round + 1}/${maxRounds})`);
+      opts.onStatus?.(oneShot ? "Gemini правит… (1 запрос)" : `Gemini-агент думает… (шаг ${round + 1}/${maxRounds})`);
     }, 12_000);
     heartbeat.unref?.();
     let roundResult: Awaited<ReturnType<typeof kieGeminiToolsRound>> | undefined;
     try {
       try {
-        roundResult = await kieGeminiToolsRound(contents, opts.systemPrompt, tools);
+        roundResult = await kieGeminiToolsRound(contents, opts.systemPrompt, tools, oneShot);
       } catch (e) {
         const kept = keepPartialProgressOrThrow(e, workspace, streamedText, `Gemini round ${round + 1}/${maxRounds}`);
         summary = kept.summary;
@@ -1523,6 +1565,11 @@ async function runGeminiToolCallingAgent(opts: {
       summary = finishedSummary;
       opts.onContent?.(finishedSummary.startsWith(streamedText) ? "" : (streamedText ? `\n\n${finishedSummary}` : finishedSummary));
       if (!streamedText.includes(finishedSummary)) streamedText = (streamedText ? streamedText + "\n\n" : "") + finishedSummary;
+      break;
+    }
+
+    if (oneShot) {
+      summary = streamedText.trim().slice(0, 500) || (workspace.changedFiles.size > 0 ? "Правка применена" : "");
       break;
     }
 
