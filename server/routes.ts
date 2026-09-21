@@ -6881,9 +6881,9 @@ ${designAnalysis}
               ? `Предыдущая попытка не изменила код. ОБЯЗАТЕЛЬНО измени файлы: read_page("${safeActive}") затем apply_patch и/или write_page, потом finish. `
               : fullRewrite
                 ? provider === "claude"
-                  ? `Полная переработка (Claude/V1): НЕ пиши весь сайт через write_page (стрим обрывается). ` +
-                    `1) read_page("${safeActive}") 2) 3–5 apply_patch: CDN three.js + <canvas> в hero + CSS анимации + JS-сцена 3) finish. ` +
-                    `SEARCH — уникальный длинный фрагмент; не патчь JSON-LD вместо CSS.`
+                  ? `Полная переработка (Claude/V1 — работай САМ до конца): ЗАПРЕЩЁН write_page всего файла. ` +
+                    `1) read_page("${safeActive}") 2) серия apply_patch (CDN three.js, canvas в hero, CSS/JS анимации) 3) finish. ` +
+                    `Каждый SEARCH — уникальный длинный фрагмент из прочитанного кода. Не патчь JSON-LD вместо CSS.`
                   : `Полная переработка как Replit Agent: 1) read_page("${safeActive}") 2) write_page или крупные патчи + Three.js/анимации 3) finish. `
                 : quickPatch
                   ? `Как Replit Agent: предпочтительно в одном ответе apply_patch (SEARCH из HTML_BEGIN/ФОКУС) + finish. Если запрос шире элемента — read_page/write_page. `
@@ -6922,67 +6922,82 @@ ${designAnalysis}
               },
             });
 
-          // Full redesign: Gemini first (Claude V1 often drops stream / times out on write_page).
-          const primaryProvider: "gemini" | "claude" = fullRewrite
-            ? "gemini"
-            : useGemini
-              ? "gemini"
-              : "claude";
-          const alternateProvider: "gemini" | "claude" =
-            primaryProvider === "gemini" ? "claude" : "gemini";
-          if (fullRewrite && !useGemini) {
-            try {
-              res.write(`data: ${JSON.stringify({ status: "Полная переработка — Gemini (надёжнее на больших правках)…" })}\n\n`);
-            } catch {}
-          }
+          // Respect agent version: V1 = Claude, V2 = Gemini. No silent provider swap.
+          const primaryProvider: "gemini" | "claude" = useGemini ? "gemini" : "claude";
+          const alternateProvider: "gemini" | "claude" = useGemini ? "claude" : "gemini";
           let toolResult;
           let toolProviderUsed = primaryProvider;
           try {
             toolResult = await runEditTools(primaryProvider);
           } catch (primaryErr: any) {
-            if (!canSafelyFallbackKieModel(primaryErr)) {
-              // Do not duplicate a task after timeout/socket disconnect: the
-              // original KIE request may still be running.
-              throw primaryErr;
+            // V1 must finish on Claude: retry escalate on same provider before any cross-model hop.
+            if (primaryProvider === "claude") {
+              console.warn(`[AGENT] Claude error — V1 self-retry escalate:`, primaryErr?.message);
+              try {
+                res.write(`data: ${JSON.stringify({ status: "Claude оборвался — повторяю на V1 меньшими патчами…" })}\n\n`);
+              } catch {}
+              fullResponse = "";
+              try {
+                toolResult = await runEditTools("claude", { escalate: true, maxRounds: 8 });
+              } catch (retryErr: any) {
+                if (!canSafelyFallbackKieModel(retryErr)) throw retryErr;
+                console.warn(`[AGENT] Claude escalate failed; last-resort → ${alternateProvider}:`, retryErr?.message);
+                res.write(`data: ${JSON.stringify({ status: "V1 не смог — запасной проход Gemini…" })}\n\n`);
+                fullResponse = "";
+                toolProviderUsed = alternateProvider;
+                toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
+              }
+            } else {
+              if (!canSafelyFallbackKieModel(primaryErr)) {
+                throw primaryErr;
+              }
+              console.warn(`[AGENT] ${primaryProvider} completed with error; fallback → ${alternateProvider}:`, primaryErr?.message);
+              res.write(`data: ${JSON.stringify({ status: `${primaryProvider === "gemini" ? "Gemini" : "Claude"} вернул ошибку — переключаюсь на ${alternateProvider === "gemini" ? "Gemini" : "Claude"}…` })}\n\n`);
+              if (isDefinitelyUnsentTransportError(primaryErr)) {
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+              }
+              fullResponse = "";
+              toolProviderUsed = alternateProvider;
+              toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
             }
-            console.warn(`[AGENT] ${primaryProvider} completed with error; fallback → ${alternateProvider}:`, primaryErr?.message);
-            res.write(`data: ${JSON.stringify({ status: `${primaryProvider === "gemini" ? "Gemini" : "Claude"} вернул ошибку — переключаюсь на ${alternateProvider === "gemini" ? "Gemini" : "Claude"}…` })}\n\n`);
-            if (isDefinitelyUnsentTransportError(primaryErr)) {
-              await new Promise((resolve) => setTimeout(resolve, 2000));
-            }
-            fullResponse = "";
-            toolProviderUsed = alternateProvider;
-            toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
           }
           if (!toolResult.toolsSupported && toolProviderUsed === primaryProvider) {
-            console.warn(`[AGENT] ${primaryProvider} tools unsupported; fallback tools → ${alternateProvider}`);
-            fullResponse = "";
-            toolProviderUsed = alternateProvider;
-            toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
+            // V1: stay on Claude if tools somehow unsupported mid-call (rare).
+            if (primaryProvider === "claude") {
+              console.warn(`[AGENT] Claude tools unsupported flag — escalate Claude anyway`);
+              fullResponse = "";
+              toolResult = await runEditTools("claude", { escalate: true, maxRounds: 8 });
+            } else {
+              console.warn(`[AGENT] ${primaryProvider} tools unsupported; fallback tools → ${alternateProvider}`);
+              fullResponse = "";
+              toolProviderUsed = alternateProvider;
+              toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
+            }
           }
-          // Same provider escalate: quick-patch preference failed → force deeper tool use.
+          // Same-provider escalate whenever the first pass changed nothing (V1 stays on Claude).
           if (
             toolResult.toolsSupported &&
             toolResult.changedFiles.size === 0 &&
-            toolProviderUsed === primaryProvider &&
-            quickPatch &&
-            !fullRewrite
+            toolProviderUsed === primaryProvider
           ) {
-            console.warn(`[AGENT] ${primaryProvider} quick-patch produced 0 changes — escalate same provider`);
-            res.write(`data: ${JSON.stringify({ status: "Углубляю правку — читаю файл и применяю шире…" })}\n\n`);
+            console.warn(`[AGENT] ${primaryProvider} produced 0 changes — escalate same provider`);
+            res.write(`data: ${JSON.stringify({
+              status: primaryProvider === "claude"
+                ? "V1: углубляю — только apply_patch по частям…"
+                : "Углубляю правку — читаю файл и применяю шире…",
+            })}\n\n`);
             fullResponse = "";
-            toolResult = await runEditTools(primaryProvider, { escalate: true, maxRounds: 6 });
+            toolResult = await runEditTools(primaryProvider, { escalate: true, maxRounds: 8 });
           }
           if (
             toolResult.toolsSupported &&
             toolResult.changedFiles.size === 0 &&
             toolProviderUsed === primaryProvider
           ) {
-            // Replit-style completion: if primary finished without a patch, one
-            // alternate-model attempt before refund.
-            console.warn(`[AGENT] ${primaryProvider} returned no code changes; fallback → ${alternateProvider}`);
+            // Last resort other model (V1 only after Claude already self-retried).
+            console.warn(`[AGENT] ${primaryProvider} still 0 changes; last-resort → ${alternateProvider}`);
             res.write(`data: ${JSON.stringify({
-              status: `${primaryProvider === "gemini" ? "Gemini" : "Claude"} не внёс правки — пробую ${alternateProvider === "gemini" ? "Gemini" : "Claude"}…`,
+              status: `${primaryProvider === "gemini" ? "Gemini" : "Claude"} не внёс правки — запасной проход ${alternateProvider === "gemini" ? "Gemini" : "Claude"}…`,
             })}\n\n`);
             fullResponse = "";
             toolProviderUsed = alternateProvider;

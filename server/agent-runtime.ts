@@ -18,7 +18,7 @@ import {
   KIE_GEMINI_SYNC_URL,
   isRetryableKieGeminiError,
 } from "./kie-gemini";
-import { routerCheapToolsRound, isRouterCheapConfigured } from "./anthropic";
+import { routerCheapToolsRound, isRouterCheapConfigured, ROUTER_CHEAP_TOOLS_MAX_TOKENS } from "./anthropic";
 
 export const CRAFT_MD_FILENAME = "craft.md";
 
@@ -28,8 +28,10 @@ const KIE_GEMINI_GENERATE_URL = KIE_GEMINI_SYNC_URL;
 /**
  * One automatic retry on flaky KIE errors (~5%). Do not raise further:
  * after a transport disconnect KIE may still be running the original task.
+ * Claude/router.cheap empty-stream is flaky — allow 3 attempts for V1 tools.
  */
 const KIE_TOOL_ROUND_RETRIES = KIE_GEMINI_ATTEMPTS;
+const CLAUDE_TOOL_ROUND_RETRIES = Math.max(3, KIE_TOOL_ROUND_RETRIES);
 /** Hard cap per Gemini tools round — hung sync generateContent must not pin the UI forever. */
 const KIE_GEMINI_TOOLS_TIMEOUT_MS = Number(process.env.CRAFT_GEMINI_TOOLS_TIMEOUT_MS) || 4 * 60 * 1000;
 
@@ -927,13 +929,16 @@ async function kieClaudeToolsRound(
   if (!isRouterCheapConfigured()) throw new Error("ROUTER_CHEAP_API_KEY missing");
 
   let lastErr: unknown;
-  for (let attempt = 0; attempt < KIE_TOOL_ROUND_RETRIES; attempt++) {
+  for (let attempt = 0; attempt < CLAUDE_TOOL_ROUND_RETRIES; attempt++) {
     try {
       const round = await routerCheapToolsRound({
         messages,
         systemPrompt,
         tools,
         forceToolUse,
+        maxTokens: ROUTER_CHEAP_TOOLS_MAX_TOKENS,
+        // Prefer non-streaming — avoids router.cheap dropping SSE mid tool-call.
+        preferNonStreaming: true,
       });
       return {
         content: round.content as ClaudeContentBlock[],
@@ -947,28 +952,28 @@ async function kieClaudeToolsRound(
       if ((status === 400 || status === 422 || /tool/i.test(msg)) && !(e as any)?.status) {
         // already handled inside routerCheapToolsRound as toolsSupported:false
       }
-      // Anthropic SDK "Request timed out" / empty stream — client waited out; safe to retry/fallback.
+      // Anthropic SDK "Request timed out" / empty stream — retry on Claude before giving up.
       if (
         /request timed out|timed?\s*out|timeout of \d+ms|stream ended without producing|without producing a message/i.test(
           msg,
         )
       ) {
-        if (attempt < KIE_TOOL_ROUND_RETRIES - 1) {
-          const delay = (attempt + 1) * 2000;
-          console.warn(`[AGENT] Claude tools stream/timeout, retry in ${delay}ms:`, msg.slice(0, 120));
+        if (attempt < CLAUDE_TOOL_ROUND_RETRIES - 1) {
+          const delay = (attempt + 1) * 2500;
+          console.warn(`[AGENT] Claude tools stream/timeout, retry ${attempt + 1}/${CLAUDE_TOOL_ROUND_RETRIES} in ${delay}ms:`, msg.slice(0, 120));
           await sleep(delay);
           continue;
         }
         if (e instanceof KieApiError) throw e;
         throw new KieApiError(
-          `Claude tools round failed after retries: ${msg.slice(0, 180)}`,
+          `Claude tools round failed after ${CLAUDE_TOOL_ROUND_RETRIES} retries: ${msg.slice(0, 180)}`,
           { source: "http", cause: e },
         );
       }
       const transient =
         (e as any)?.confirmedKieFailure === true ||
         /fetch failed|network|econnreset|etimedout|socket/i.test(msg);
-      if (transient && attempt < KIE_TOOL_ROUND_RETRIES - 1) {
+      if (transient && attempt < CLAUDE_TOOL_ROUND_RETRIES - 1) {
         const delay = (attempt + 1) * 1500;
         console.warn(`[AGENT] Claude router.cheap network error, retry in ${delay}ms:`, msg.slice(0, 160));
         await sleep(delay);

@@ -28,6 +28,19 @@ export const ROUTER_CHEAP_MAX_TOKENS = Math.max(
   Number(process.env.ROUTER_CHEAP_MAX_TOKENS || 32000) || 32000,
 );
 
+/**
+ * Tool rounds use a lower cap so the Anthropic SDK can use non-streaming
+ * (avoids router.cheap "stream ended without producing a Message").
+ * Non-streaming is allowed when expected wall time < ~10 min ≈ max_tokens ≲ 20k.
+ */
+export const ROUTER_CHEAP_TOOLS_MAX_TOKENS = Math.max(
+  2048,
+  Math.min(
+    20000,
+    Number(process.env.ROUTER_CHEAP_TOOLS_MAX_TOKENS || 12288) || 12288,
+  ),
+);
+
 // Opus can legitimately spend several minutes producing a large patch/tool round.
 // The SDK default timeout otherwise surfaces as the unhelpful "Request timed out".
 export const ROUTER_CHEAP_TIMEOUT_MS = Math.max(
@@ -200,23 +213,28 @@ export async function routerCheapToolsRound(opts: {
   model?: string;
   /** Force at least one tool call (Replit oneshot: apply_patch+finish in one round). */
   forceToolUse?: boolean;
+  /** Prefer non-streaming (more reliable through router.cheap for tool rounds). */
+  preferNonStreaming?: boolean;
 }): Promise<RouterCheapToolRoundResult> {
   assertRouterCheapConfigured();
 
-  try {
-    // Must stream: non-streaming is blocked by the SDK when max_tokens is high
-    // (see calculateNonstreamingTimeout). finalMessage() still returns full tool_use.
-    const resp = await anthropic.messages
-      .stream({
-        model: opts.model || ROUTER_CHEAP_MODEL,
-        max_tokens: opts.maxTokens ?? ROUTER_CHEAP_MAX_TOKENS,
-        system: opts.systemPrompt,
-        messages: opts.messages,
-        tools: opts.tools as Tool[],
-        tool_choice: opts.forceToolUse ? { type: "any" } : { type: "auto" },
-      })
-      .finalMessage();
+  const maxTokens = opts.maxTokens ?? ROUTER_CHEAP_TOOLS_MAX_TOKENS;
+  // SDK blocks non-streaming when max_tokens implies >10 min; stay under that.
+  const canNonStream = maxTokens <= 20000;
+  const preferNonStream = opts.preferNonStreaming !== false && canNonStream;
 
+  const requestBody = {
+    model: opts.model || ROUTER_CHEAP_MODEL,
+    max_tokens: maxTokens,
+    system: opts.systemPrompt,
+    messages: opts.messages,
+    tools: opts.tools as Tool[],
+    tool_choice: (opts.forceToolUse ? { type: "any" } : { type: "auto" }) as
+      | { type: "any" }
+      | { type: "auto" },
+  };
+
+  const toResult = (resp: { content: Anthropic.Messages.ContentBlock[]; stop_reason: string | null }): RouterCheapToolRoundResult => {
     const content: RouterCheapToolRoundResult["content"] = [];
     for (const block of resp.content) {
       if (block.type === "text" && block.text) {
@@ -234,17 +252,35 @@ export async function routerCheapToolsRound(opts: {
         });
       }
     }
-
     return {
       content,
       stop_reason: resp.stop_reason || "end_turn",
       toolsSupported: true,
     };
+  };
+
+  try {
+    if (preferNonStream) {
+      try {
+        const resp = await anthropic.messages.create(requestBody);
+        return toResult(resp);
+      } catch (nonStreamErr: any) {
+        const nsMsg = String(nonStreamErr?.message || nonStreamErr);
+        // Fall through to streaming if router/SDK insists.
+        if (!/streaming is required|non-streaming|timeout/i.test(nsMsg)) {
+          throw nonStreamErr;
+        }
+        console.warn("[AGENT] Claude non-stream tools rejected, falling back to stream:", nsMsg.slice(0, 160));
+      }
+    }
+
+    const resp = await anthropic.messages.stream(requestBody).finalMessage();
+    return toResult(resp);
   } catch (err: any) {
     const status = Number(err?.status || err?.statusCode || 0);
     const msg = String(err?.message || err);
     // Tools rejected by the router → signal multipage stream fallback.
-    // Don't treat "Streaming is required…" as a tools rejection.
+    // Don't treat "Streaming is required…" / empty-stream as a tools rejection.
     if (
       (status === 400 || status === 422 || /tool/i.test(msg)) &&
       !/streaming is required/i.test(msg) &&
@@ -256,7 +292,7 @@ export async function routerCheapToolsRound(opts: {
     // Router dropped the SSE mid-flight (common on long tool rounds / write_page).
     if (/stream ended without producing|without producing a message/i.test(msg)) {
       throw new KieApiError(
-        `Claude stream ended without assistant message (router.cheap). Retry or use Gemini.`,
+        `Claude stream ended without assistant message (router.cheap).`,
         { source: "http", cause: err },
       );
     }
