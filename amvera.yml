@@ -25,6 +25,9 @@ build:
 run:
   # Scale-out: set REDIS_URL, CRAFT_API_INSTANCES, CRAFT_RUN_WORKER=1.
   # Optional: CRAFT_JOB_QUEUE_MAX, CRAFT_WORKER_INTERVAL_MS, CRAFT_MAX_SEO.
-  command: npm run start
+  # Run node directly. `npm run start` puts npm + sh between the platform and node:
+  # SIGTERM stops at the wrapper, node never sees it, and every stop is a hard kill
+  # (no "[boot] SIGTERM" line in 14 days of logs). Env expansion is done by node itself.
+  command: node --max-old-space-size=1792 dist/index.cjs
   containerPort: 5000
   persistenceMount: /data

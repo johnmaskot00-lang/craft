@@ -4227,10 +4227,40 @@ function buildVerifiedEditSummary(changes: VerifiedEditChange[]): string {
   return parts.join(" ").slice(0, 900);
 }
 
+/**
+ * CSS rules whose selector mentions `selector`, joined for before/after comparison.
+ *
+ * Linear scan over <style> blocks only. The previous implementation ran
+ * `[^{}]{0,180}${sel}[^{}]*\{[^{}]*\}` over the WHOLE page: on HTML the body has
+ * no braces at all, so for every occurrence of a short tag selector ("a", "p",
+ * "li", "section") the engine scanned to the end of the document and backtracked
+ * — O(n²). Measured: 40 KB → 0.4 s, 80 KB → 1.5 s, 1.1 MB → minutes, which
+ * froze the event loop after an edit (23.09, 06:03 → 07:16 UTC outage).
+ */
 function selectorRules(source: string, selector: string): string {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const matches = source.match(new RegExp(`[^{}]{0,180}${escaped}[^{}]*\\{[^{}]*\\}`, "gi")) || [];
-  return matches.join("\n");
+  const sel = selector.toLowerCase();
+  if (!sel) return "";
+  const out: string[] = [];
+  const styleRe = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+  const scanCss = (css: string) => {
+    let pos = 0;
+    while (pos < css.length && out.length < 400) {
+      const open = css.indexOf("{", pos);
+      if (open === -1) break;
+      const close = css.indexOf("}", open + 1);
+      if (close === -1) break;
+      // Selector list = text between previous "}" (or block start) and this "{".
+      const prevClose = css.lastIndexOf("}", open - 1);
+      const selectorText = css.slice(prevClose + 1, open);
+      if (selectorText.toLowerCase().includes(sel)) {
+        out.push(selectorText.trim().slice(-180) + "{" + css.slice(open + 1, close) + "}");
+      }
+      pos = close + 1;
+    }
+  };
+  let m: RegExpExecArray | null;
+  while ((m = styleRe.exec(source)) !== null && out.length < 400) scanCss(m[1]);
+  return out.join("\n");
 }
 
 /**

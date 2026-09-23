@@ -1,8 +1,14 @@
 import express, { type Request, Response, NextFunction } from "express";
+import { isMainThread, workerData } from "node:worker_threads";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { startWatchdog } from "./watchdog";
 import { createServer } from "http";
+
+// The watchdog worker thread loads THIS bundle (dist/index.cjs) to reach the
+// worker branch in ./watchdog. Everything below is main-thread only: without this
+// guard the worker would create a second Express app, HTTP server and DB pool.
+const isWatchdogWorker = !isMainThread && !!(workerData as any)?.__craftWatchdog;
 
 const app = express();
 const httpServer = createServer(app);
@@ -86,6 +92,38 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  if (isWatchdogWorker) return; // worker thread: ./watchdog owns this thread
+
+  // Register process-level handlers BEFORE the async boot work (DB, routes).
+  // Previously they were installed only after `await registerRoutes(...)`, so a
+  // SIGTERM arriving during startup was never handled.
+  const shutdown = (signal: string) => {
+    console.warn(`[boot] ${signal} — closing HTTP server`);
+    httpServer.close(() => {
+      console.warn("[boot] HTTP server closed");
+      process.exit(0);
+    });
+    // Idle keep-alive sockets keep close() pending — drop them explicitly.
+    (httpServer as any).closeIdleConnections?.();
+    setTimeout(() => {
+      (httpServer as any).closeAllConnections?.();
+      process.exit(1);
+    }, 12_000).unref?.();
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("unhandledRejection", (reason) => {
+    console.error("[boot] unhandledRejection:", reason);
+  });
+  process.on("uncaughtException", (err) => {
+    console.error("[boot] uncaughtException:", err);
+    // Exit so Amvera can restart a clean process instead of a wedged one.
+    setTimeout(() => process.exit(1), 500).unref?.();
+  });
+
+  // Worker-thread watchdog: arm before boot so a hang during startup is caught too.
+  startWatchdog();
+
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
@@ -116,27 +154,6 @@ app.use((req, res, next) => {
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
-
-  const shutdown = (signal: string) => {
-    console.warn(`[boot] ${signal} — closing HTTP server`);
-    httpServer.close(() => {
-      console.warn("[boot] HTTP server closed");
-      process.exit(0);
-    });
-    setTimeout(() => process.exit(1), 12_000).unref?.();
-  };
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
-  process.on("unhandledRejection", (reason) => {
-    console.error("[boot] unhandledRejection:", reason);
-  });
-  process.on("uncaughtException", (err) => {
-    console.error("[boot] uncaughtException:", err);
-    // Exit so Amvera can restart a clean process instead of a wedged one.
-    setTimeout(() => process.exit(1), 500).unref?.();
-  });
-
-  startWatchdog();
 
   httpServer.listen(
     {
