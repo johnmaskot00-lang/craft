@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
+import { intParam, idParam } from "./route-params";
 import { storage, VERSION_RETENTION_PER_PROJECT, publicUser } from "./storage";
 import {
   SCROLL_IMMERSION_COST,
@@ -341,9 +342,16 @@ async function extractTextFromFile(base64Data: string, mimeType: string): Promis
   try {
     const buffer = Buffer.from(base64Data, "base64");
     if (mimeType === "application/pdf") {
-      const pdfParse = (await import("pdf-parse")).default;
-      const result = await pdfParse(buffer);
-      return result.text?.trim() || null;
+      // pdf-parse v2 dropped the v1 default-export function: the module exports only
+      // the PDFParse class (new PDFParse({ data }) -> getText() -> destroy()).
+      const { PDFParse } = await import("pdf-parse");
+      const parser = new PDFParse({ data: new Uint8Array(buffer) });
+      try {
+        const result = await parser.getText();
+        return result.text?.trim() || null;
+      } finally {
+        await parser.destroy();
+      }
     }
     if (
       mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
@@ -958,7 +966,7 @@ async function generateStillForVideo(
       console.log(`[SCROLLANIM] still-image KIE retry ${attempt + 1}/6…`);
       await new Promise(r => setTimeout(r, 2500));
     }
-    let taskId: string | null = null;
+    let taskId: string;
     const createBody: any = await kieRequestJson(
       NANO_BANANA_CREATE_URL,
       {
@@ -976,7 +984,7 @@ async function generateStillForVideo(
       },
       { label: "SCROLLANIM still-create", retries: 3, shouldStop },
     );
-    if (createBody?.code === 200 && createBody?.data?.taskId) taskId = createBody.data.taskId;
+    if (createBody?.code === 200 && createBody?.data?.taskId) taskId = createBody.data.taskId as string;
     else { console.warn("[SCROLLANIM] still-image create failed:", createBody?.msg); continue; }
     const terminal = await waitKieTaskViaCallback(taskId, {
       deadlineMs: 120000,
@@ -2690,6 +2698,13 @@ function buildAnimationalDeps(opts: {
     appBaseUrl: opts.appBaseUrl || process.env.APP_BASE_URL || "https://craft-ai.ru",
     shouldStop: opts.shouldStop,
     onStatus: opts.onStatus,
+    // Kling → frames for the GSAP canvas scrub. Layout "animational" is deliberately
+    // absent from usesMp4Scrub(), so generateScrollFrames takes the ffmpeg frame-extraction
+    // path and hands back still frames — which is what the canvas scrubber consumes.
+    generateFrames: async (videoPrompt, shouldStop, referenceStillUrl) => {
+      const out = await generateScrollFrames(videoPrompt, shouldStop, referenceStillUrl, "animational");
+      return { frames: out.frames, confirmedKieFailure: out.confirmedKieFailure };
+    },
   };
 }
 
@@ -2725,10 +2740,13 @@ async function resolveAnimationalMarkers(
     } catch {}
 
     let billed = false;
-    let ikey: string | undefined;
+    // Derived from the marker + run, never from userId: compute it unconditionally so the
+    // refund path below always has a real key. An undefined key makes storage.refundCredits
+    // throw REFUND_IDEMPOTENCY_KEY_REQUIRED, and the surrounding `catch {}` would swallow it
+    // — the charge would stand with no trace in the logs.
+    const ikey = `animational-${projectId}-${runKey}-${crypto.createHash("md5").update(raw).digest("hex").slice(0, 8)}`;
     try {
       if (userId) {
-        ikey = `animational-${projectId}-${runKey}-${crypto.createHash("md5").update(raw).digest("hex").slice(0, 8)}`;
         const ded = await storage.deductCredits(userId, SCROLL_ANIMATIONAL_COST, "animational", ikey);
         if (!ded.success) break;
         billed = !ded.alreadyProcessed;
@@ -2871,10 +2889,12 @@ async function resolveScrollAnimMarkers(
     } catch {}
 
     let billed = false;
-    let ikey: string | undefined;
+    // Same reasoning as the animational loop: the key derives from the marker + run, so build it
+    // unconditionally. A key that is undefined here would make storage.refundCredits throw into
+    // the `catch {}` below and silently keep a charge the user is owed back.
+    const ikey = `${blockReason}-${projectId}-${runKey}-${crypto.createHash("md5").update(raw).digest("hex").slice(0, 8)}`;
     try {
     if (userId) {
-      ikey = `${blockReason}-${projectId}-${runKey}-${crypto.createHash("md5").update(raw).digest("hex").slice(0, 8)}`;
       const ded = await storage.deductCredits(userId, blockCost, blockReason, ikey);
       if (!ded.success) break; // out of credits → leave for static fallback (finalize() still runs)
       billed = !ded.alreadyProcessed;
@@ -5597,7 +5617,7 @@ export async function registerRoutes(
     let distributedGenerationLeaseHeld = false;
     let durableJobId: number | null = null;
     try {
-      const project = await storage.getProject(parseInt(req.params.id));
+      const project = await storage.getProject(intParam(req.params.id));
       if (!project) {
         return res.status(404).json({ message: "Проект не найден" });
       }
@@ -8627,7 +8647,7 @@ ${designAnalysis}
       releaseBg();
     };
     try {
-      const projectId = parseInt(req.params.id);
+      const projectId = intParam(req.params.id);
       const user = req.user as any;
       const project = await storage.getProject(projectId);
       if (!project || project.userId !== user.id) {
@@ -9917,7 +9937,7 @@ ${designAnalysis}
     }
     let publishJobId: number | null = null;
     try {
-      const projectId = parseInt(req.params.id);
+      const projectId = intParam(req.params.id);
       const project = await storage.getProject(projectId);
       if (!project) return res.status(404).json({ message: "Проект не найден" });
       if (project.userId !== (req.user as any).id) return res.status(403).json({ message: "Нет доступа" });
@@ -10265,7 +10285,7 @@ ${designAnalysis}
       if (publishJobId) await completeGenerationJob(publishJobId, { url });
       res.json({ url, jobId: publishJobId });
     } catch (err: any) {
-      await storage.updateProject(parseInt(req.params.id), { publishStatus: "error" });
+      await storage.updateProject(intParam(req.params.id), { publishStatus: "error" });
       if (publishJobId) await failGenerationJob(publishJobId, err?.message || "publish failed");
       res.status(500).json({ message: err.message || "Ошибка публикации" });
     } finally {
@@ -10580,7 +10600,7 @@ ${fullHtml}`;
   app.post("/api/leads/:projectId", leadIntakeLimiter, async (req, res) => {
     res.header("Access-Control-Allow-Origin", "*");
     try {
-      const projectId = parseInt(req.params.projectId);
+      const projectId = intParam(req.params.projectId);
       if (!Number.isInteger(projectId) || projectId <= 0) {
         return res.status(400).json({ message: "Некорректный проект" });
       }

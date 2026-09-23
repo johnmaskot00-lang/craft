@@ -118,6 +118,19 @@ export class YandexMediaFile {
 
 export type CraftObjectFile = LocalFile | YandexMediaFile;
 
+/**
+ * The slice of a storage file that the ACL helpers actually use. Typing those
+ * helpers against `File` (the GCS class) was wrong for this deployment: the files
+ * here are `CraftObjectFile`, which are structurally compatible with this surface
+ * but not nominal members of `File`.
+ */
+export type AclObjectFile = {
+  name: string;
+  exists(): Promise<[boolean]>;
+  getMetadata(): Promise<[any]>;
+  setMetadata(payload: { metadata?: Record<string, string> }): Promise<void>;
+};
+
 function isYandexFile(file: CraftObjectFile): file is YandexMediaFile {
   return (file as YandexMediaFile).kind === "yandex";
 }

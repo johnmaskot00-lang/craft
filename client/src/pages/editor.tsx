@@ -7,7 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Input } from "@/components/ui/input";
 import { useAuth, clearClientAuth } from "@/lib/auth";
 import { useLocation, useParams } from "wouter";
-import { queryClient } from "@/lib/queryClient";
+import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
 import type { Project, ProjectMessage, ProjectImage, ProjectFile } from "@shared/schema";

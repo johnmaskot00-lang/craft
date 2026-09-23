@@ -1,6 +1,18 @@
-import { File } from "@google-cloud/storage";
-
 const ACL_POLICY_METADATA_KEY = "custom:aclPolicy";
+
+/**
+ * The slice of a storage file the ACL helpers need. These helpers were typed
+ * against the GCS `File` class, which is the wrong contract for this deployment:
+ * the files handed in are local-disk or Yandex-object-storage handles that are
+ * structurally compatible with this surface without being `File` instances.
+ * Declaring the shape here keeps the ACL layer independent of where files live.
+ */
+export interface AclObjectFile {
+  name: string;
+  exists(): Promise<[boolean]>;
+  getMetadata(): Promise<[any]>;
+  setMetadata(payload: { metadata?: Record<string, string> }): Promise<void>;
+}
 
 // The type of the access group.
 //
@@ -104,7 +116,7 @@ function createObjectAccessGroup(
 
 // Sets the ACL policy to the object metadata.
 export async function setObjectAclPolicy(
-  objectFile: File,
+  objectFile: AclObjectFile,
   aclPolicy: ObjectAclPolicy,
 ): Promise<void> {
   const [exists] = await objectFile.exists();
@@ -121,7 +133,7 @@ export async function setObjectAclPolicy(
 
 // Gets the ACL policy from the object metadata.
 export async function getObjectAclPolicy(
-  objectFile: File,
+  objectFile: AclObjectFile,
 ): Promise<ObjectAclPolicy | null> {
   const [metadata] = await objectFile.getMetadata();
   const aclPolicy = metadata?.metadata?.[ACL_POLICY_METADATA_KEY];
@@ -138,7 +150,7 @@ export async function canAccessObject({
   requestedPermission,
 }: {
   userId?: string;
-  objectFile: File;
+  objectFile: AclObjectFile;
   requestedPermission: ObjectPermission;
 }): Promise<boolean> {
   // When this function is called, the acl policy is required.

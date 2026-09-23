@@ -19,6 +19,19 @@ import {
   isRetryableKieGeminiError,
 } from "./kie-gemini";
 import { routerCheapToolsRound, isRouterCheapConfigured, ROUTER_CHEAP_TOOLS_MAX_TOKENS } from "./anthropic";
+import {
+  LineIndex,
+  buildPatchDiagnostics,
+  catLines,
+  grepFiles,
+  maxB64Index,
+  validatePatchedHtml,
+  type CatResult,
+  type DomSnapshot,
+  type PatchValidation,
+} from "./site-code-tools";
+
+export { catLines, grepFiles, maxB64Index, validatePatchedHtml, buildPatchDiagnostics, domSnapshot } from "./site-code-tools";
 
 export const CRAFT_MD_FILENAME = "craft.md";
 
@@ -61,9 +74,15 @@ export function isValidAgentWriteFilename(filename: string): boolean {
   return /^(?:[a-z0-9][a-z0-9_-]*\/)*[a-z0-9][a-z0-9_-]*\.html$/.test(f);
 }
 
-export function stripBase64Images(code: string): { stripped: string; map: Map<string, string> } {
+/**
+ * `startIndex` exists because write_page merges its new map into the file's
+ * existing one. Without a seed the counter restarts at 0 and a rewritten page
+ * mints __B64_0__ again, overwriting the entry for an image that is still on
+ * the page elsewhere — the placeholder then restores to the wrong data URL.
+ */
+export function stripBase64Images(code: string, startIndex = 0): { stripped: string; map: Map<string, string> } {
   const map = new Map<string, string>();
-  let counter = 0;
+  let counter = startIndex;
   const stripped = code.replace(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]{100,}/g, (match) => {
     const placeholder = `__B64_${counter++}__`;
     map.set(placeholder, match);
@@ -485,6 +504,10 @@ export function buildSeoMultipageEditSystemPrompt(opts: {
 }): string {
   const manifest = buildSiteManifest(opts.pages, opts.craftMd);
   const { context } = buildSeoPagesContext(opts.pages, opts.activeFile);
+  // This builder has no injected budget (unlike the diff-mode one), so derive one
+  // from the site itself: a 12-page site must not dump 4k of shell per page.
+  const { chromePerPage } = resolveEditContextBudget(opts.pages);
+  const sharedChrome = buildSharedChromeContext(opts.pages, chromePerPage);
   const htmlCount = opts.pages.filter((p) => p.filename.toLowerCase().endsWith(".html")).length;
 
   let prompt = opts.baseSystem;
@@ -515,7 +538,7 @@ ${context}
 
   if (opts.useToolsHint) {
     prompt += `
-🔧 ИНСТРУМЕНТЫ: apply_patch, write_page, read_page, finish.
+🔧 ИНСТРУМЕНТЫ: ls, grep, cat, apply_patch, write_page, read_page, finish.
 Дизайн меню на всех страницах = один патч assets/style.css (.site-header, .cat-nav-link, article-page).
 `;
   }
@@ -525,9 +548,46 @@ ${context}
 
 export const SITE_AGENT_TOOLS = [
   {
-    name: "list_pages",
-    description: "Список всех HTML-страниц сайта с размерами, title и секциями.",
+    name: "ls",
+    description:
+      "Список всех HTML-страниц сайта с размерами, title и секциями. Дёшево — вызывай вместо чтения всего сайта.",
     input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "list_pages",
+    description: "Синоним ls. Список всех HTML-страниц сайта с размерами, title и секциями.",
+    input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "grep",
+    description:
+      "Найти строку или регулярное выражение в файлах сайта. Возвращает файл, номер строки и саму строку. Ищи так, вместо чтения целых страниц.",
+    input_schema: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "Подстрока или regex (без lookaround/backreference), до 200 знаков" },
+        path: { type: "string", description: "Файл или папка (category/), по умолчанию весь сайт" },
+        ignore_case: { type: "boolean", description: "Без учёта регистра, по умолчанию true" },
+        max_results: { type: "number", description: "Сколько совпадений вернуть, по умолчанию 40" },
+      },
+      required: ["pattern"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "cat",
+    description:
+      "Прочитать диапазон строк файла с номерами — для прицельного просмотра места правки или хвоста файла.",
+    input_schema: {
+      type: "object",
+      properties: {
+        filename: { type: "string", description: "Имя файла, например assets/style.css" },
+        start_line: { type: "number", description: "Первая строка, с 1 (по умолчанию 1)" },
+        end_line: { type: "number", description: "Последняя строка включительно" },
+      },
+      required: ["filename"],
+      additionalProperties: false,
+    },
   },
   {
     name: "read_page",
@@ -554,6 +614,11 @@ export const SITE_AGENT_TOOLS = [
         filename: { type: "string" },
         search: { type: "string", description: "Точный фрагмент существующего кода" },
         replace: { type: "string", description: "Новый код (пустая строка = удалить фрагмент)" },
+        force: {
+          type: "boolean",
+          description:
+            "Только если проверка структуры забраковала патч, а удаление тега было намеренным (пользователь просил убрать блок). По умолчанию false.",
+        },
       },
       required: ["filename", "search", "replace"],
       additionalProperties: false,
@@ -567,6 +632,11 @@ export const SITE_AGENT_TOOLS = [
       properties: {
         filename: { type: "string" },
         code: { type: "string", description: "Полный HTML документа" },
+        force: {
+          type: "boolean",
+          description:
+            "Только если проверка структуры забраковала перезапись, а потеря тега была намеренной. По умолчанию false.",
+        },
       },
       required: ["filename", "code"],
       additionalProperties: false,
@@ -608,7 +678,7 @@ export const SITE_AGENT_TOOLS = [
  * Full HTML is NOT preloaded into the system prompt — use read_page.
  */
 export const SITE_AGENT_EDIT_TOOLS = SITE_AGENT_TOOLS.filter((t) =>
-  ["list_pages", "read_page", "apply_patch", "write_page", "read_craft_md", "finish"].includes(t.name),
+  ["ls", "grep", "cat", "read_page", "apply_patch", "write_page", "read_craft_md", "finish"].includes(t.name),
 );
 
 /**
@@ -634,14 +704,24 @@ export const SITE_AGENT_ONESHOT_TOOLS = SITE_AGENT_TOOLS.filter((t) =>
       : t,
 );
 
-export function applySinglePatch(originalCode: string, searchBlock: string, replaceBlock: string): { code: string; ok: boolean; error?: string } {
+export function applySinglePatch(
+  originalCode: string,
+  searchBlock: string,
+  replaceBlock: string,
+): { code: string; ok: boolean; error?: string; hint?: string } {
   if (!searchBlock.trim()) return { code: originalCode, ok: false, error: "empty SEARCH" };
 
   const exactIdx = originalCode.indexOf(searchBlock);
   if (exactIdx !== -1) {
     const second = originalCode.indexOf(searchBlock, exactIdx + searchBlock.length);
     if (second !== -1) {
-      return { code: originalCode, ok: false, error: "SEARCH найден несколько раз — добавь больше контекста" };
+      const idx = new LineIndex(originalCode);
+      return {
+        code: originalCode,
+        ok: false,
+        error: "SEARCH найден несколько раз — добавь больше контекста",
+        hint: `Второе совпадение — строка ${idx.lineAt(second)}. Добавь в SEARCH соседнюю строку, которая есть только в нужном месте.`,
+      };
     }
     return {
       code: originalCode.slice(0, exactIdx) + replaceBlock + originalCode.slice(exactIdx + searchBlock.length),
@@ -664,19 +744,41 @@ export function applySinglePatch(originalCode: string, searchBlock: string, repl
       };
     }
     if (matches.length > 1) {
-      return { code: originalCode, ok: false, error: "SEARCH (fuzzy) найден несколько раз — добавь больше контекста" };
+      return {
+        code: originalCode,
+        ok: false,
+        error: "SEARCH (fuzzy) найден несколько раз — добавь больше контекста",
+        hint: "Пробелы в SEARCH не совпадают дословно — добавь уникальную соседнюю строку, а не переписывай отступы.",
+      };
     }
   } catch { /* ignore */ }
 
-  return { code: originalCode, ok: false, error: "SEARCH не найден" };
+  return {
+    code: originalCode,
+    ok: false,
+    error: "SEARCH не найден",
+    hint: buildPatchDiagnostics(originalCode, searchBlock, replaceBlock) ?? undefined,
+  };
+}
+
+/** A SEARCH block that did not land, with the diagnostics hint for the model. */
+export interface PatchFailure {
+  search: string;
+  error: string;
+  hint?: string;
+  file?: string;
 }
 
 /** Apply all ```diff SEARCH/REPLACE blocks in a response fragment to one file. */
-export function applyDiffPatchesToCode(originalCode: string, responseFragment: string): { code: string; applied: number; total: number } {
+export function applyDiffPatchesToCode(
+  originalCode: string,
+  responseFragment: string,
+): { code: string; applied: number; total: number; failures: PatchFailure[] } {
   const diffRegex = /```diff\s*\n([\s\S]*?)```/g;
   let patchedCode = originalCode;
   let applied = 0;
   let total = 0;
+  const failures: PatchFailure[] = [];
   let dm: RegExpExecArray | null;
   while ((dm = diffRegex.exec(responseFragment)) !== null) {
     const diffContent = dm[1];
@@ -690,6 +792,7 @@ export function applyDiffPatchesToCode(originalCode: string, responseFragment: s
         applied++;
       } else {
         console.warn("[AGENT] SEARCH not found. First 80 chars:", sr[1].substring(0, 80));
+        failures.push({ search: sr[1], error: result.error || "SEARCH не найден", hint: result.hint });
       }
     }
   }
@@ -703,10 +806,13 @@ export function applyDiffPatchesToCode(originalCode: string, responseFragment: s
       if (result.ok) {
         patchedCode = result.code;
         applied++;
+      } else {
+        console.warn("[AGENT] SEARCH not found (bare). First 80 chars:", sr[1].substring(0, 80));
+        failures.push({ search: sr[1], error: result.error || "SEARCH не найден", hint: result.hint });
       }
     }
   }
-  return { code: patchedCode, applied, total };
+  return { code: patchedCode, applied, total, failures };
 }
 
 /**
@@ -718,8 +824,9 @@ export function parseMultipageEditResponse(
   fullResponse: string,
   filesMap: Map<string, string>,
   fallbackFile: string,
-): { changed: Map<string, string>; applied: number; total: number; aiTextReply: string } {
+): { changed: Map<string, string>; applied: number; total: number; aiTextReply: string; failures: PatchFailure[] } {
   const changed = new Map<string, string>();
+  const failures: PatchFailure[] = [];
   let applied = 0;
   let total = 0;
 
@@ -749,8 +856,12 @@ export function parseMultipageEditResponse(
         const patch = applyDiffPatchesToCode(stripped, sec.body);
         total += patch.total;
         applied += patch.applied;
+        for (const f of patch.failures) failures.push({ ...f, file: sec.filename });
         if (patch.applied > 0) {
-          changed.set(sec.filename, restoreBase64Images(patch.code, map));
+          const next = restoreBase64Images(patch.code, map);
+          const check = validatePatchedHtml(original, next, { filename: sec.filename });
+          logValidation(sec.filename, check);
+          changed.set(sec.filename, next);
         }
       } else {
         const htmlMatch = sec.body.match(/```html\s*\n?([\s\S]*?)```/i);
@@ -772,12 +883,28 @@ export function parseMultipageEditResponse(
     const patch = applyDiffPatchesToCode(stripped, fullResponse);
     total = patch.total;
     applied = patch.applied;
+    for (const f of patch.failures) failures.push({ ...f, file: fallbackFile });
     if (patch.applied > 0) {
-      changed.set(fallbackFile, restoreBase64Images(patch.code, map));
+      const next = restoreBase64Images(patch.code, map);
+      logValidation(fallbackFile, validatePatchedHtml(original, next, { filename: fallbackFile }));
+      changed.set(fallbackFile, next);
     }
   }
 
-  return { changed, applied, total, aiTextReply };
+  return { changed, applied, total, aiTextReply, failures };
+}
+
+/**
+ * Text-protocol path has no way to feed anything back to the model mid-turn,
+ * so structural damage there is logged for the operator only. The tool path
+ * (apply_patch / write_page) returns the same findings to the model instead.
+ */
+function logValidation(filename: string, check: PatchValidation): void {
+  if (check.errors.length === 0 && check.warnings.length === 0) return;
+  const parts: string[] = [];
+  if (check.errors.length) parts.push(`errors: ${check.errors.join(" | ")}`);
+  if (check.warnings.length) parts.push(`warnings: ${check.warnings.join(" | ")}`);
+  console.warn(`[AGENT] patch validation ${filename}: ${parts.join(" ; ")}`);
 }
 
 export function buildMultipageEditSystemPrompt(opts: {
@@ -840,13 +967,17 @@ ${manifest}
   if (opts.useToolsHint) {
     prompt += `
 🔧 ИНСТРУМЕНТЫ (как у Replit Agent — все доступны всегда):
-list_pages · read_page · apply_patch · write_page · read_craft_md · finish
+ls · grep · cat · read_page · apply_patch · write_page · read_craft_md · finish
 
 Как выбирать:
+- Что вообще есть на сайте → ls
+- Где это в коде (класс, текст, ссылка, селектор) → grep, потом cat по найденным строкам
+- Хвост CSS или конкретный участок → cat filename start_line end_line
 - Точечная правка / выбранный элемент → apply_patch (+ finish в том же ответе, если хватает)
 - Крупный redesign / новая структура / Three.js / «переделай полностью» → read_page → write_page → finish
 - Несколько файлов → несколько tool_use в одном ответе
 
+Не читай страницу целиком, если хватает grep + cat: это дешевле и точнее.
 Не вызывай write_page для смены одного слова. Не лей огромный HTML в чат.
 Не удаляй контент, который не просили убирать.
 При дизайне/стиле/цветах/шрифтах сохраняй видимые тексты дословно.
@@ -887,7 +1018,9 @@ function toolStatusLabel(name: string, input: Record<string, unknown>): string {
   return name === "read_page" ? `Читаю ${input.filename || "страницу"}…`
     : name === "apply_patch" ? `Патчу ${input.filename || "файл"}…`
     : name === "write_page" ? `Записываю ${input.filename || "файл"}…`
-    : name === "list_pages" ? "Смотрю все страницы…"
+    : name === "list_pages" || name === "ls" ? "Смотрю все страницы…"
+    : name === "grep" ? "Ищу в коде…"
+    : name === "cat" ? `Читаю ${input.filename || "файл"}:${input.start_line || 1}-${input.end_line || "…"}…`
     : name === "update_craft_md" ? "Обновляю craft.md…"
     : name === "read_craft_md" ? "Читаю craft.md…"
     : name === "finish" ? "Завершаю…"
@@ -1123,6 +1256,38 @@ class SiteWorkspace {
   /** Replit-style: file must be read in this turn before patching. */
   private readFiles = new Set<string>();
   private base64Maps = new Map<string, Map<string, string>>();
+  /** Structural warnings from the last accepted mutation, drained per file. */
+  private pendingWarnings = new Map<string, string[]>();
+
+  /**
+   * Gate every mutation on the synchronous structural check (~2 ms on a 150 KB
+   * page, ~6 ms on 360 KB). The DOM half of validatePatchedHtml is skipped on
+   * purpose: reading it is async, and a rejected promise here would surface as
+   * an unhandled rejection rather than as a tool result. The tokenizer already
+   * covers what hurts — lost placeholders, unbalanced tags, dead script src.
+   *
+   * Returns a tool result to send back instead of mutating, or null to proceed.
+   */
+  private validateChange(filename: string, before: string, after: string, force: boolean): { ok: false; error: string; hint?: string } | null {
+    const check = validatePatchedHtml(before, after, { filename, skipDom: true });
+    if (check.errors.length === 0) {
+      if (check.warnings.length > 0) this.pendingWarnings.set(filename, check.warnings);
+      return null;
+    }
+    if (force) return null;
+    return {
+      ok: false,
+      error: `Патч сломал структуру ${filename}: ${check.errors.join(" | ")}. Файл НЕ изменён — исправь фрагмент и повтори. Если удаление тега было намеренным (пользователь просил убрать блок), вызови тот же патч с force: true.`,
+    };
+  }
+
+  /** Warnings to attach to a success result; reading them clears them. */
+  private takeWarnings(filename: string): { warnings?: string[] } {
+    const w = this.pendingWarnings.get(filename);
+    if (!w || w.length === 0) return {};
+    this.pendingWarnings.delete(filename);
+    return { warnings: w };
+  }
 
   constructor(pages: SitePage[], craftMd: string, preReadFiles: string[] = []) {
     this.files = new Map();
@@ -1151,7 +1316,8 @@ class SiteWorkspace {
 
   execute(name: string, input: Record<string, unknown>): { result: unknown; finished?: string } {
     switch (name) {
-      case "list_pages": {
+      case "list_pages":
+      case "ls": {
         const list = [...this.files.entries()].map(([filename, code]) => ({
           filename,
           chars: code.length,
@@ -1159,6 +1325,52 @@ class SiteWorkspace {
           sections: extractSections(code),
         }));
         return { result: { pages: list } };
+      }
+      case "grep": {
+        const pattern = String(input.pattern ?? "");
+        if (!pattern.trim()) return { result: { ok: false, error: "pattern пустой" } };
+        const scope = String(input.path ?? "").trim().toLowerCase();
+        const scoped = new Map<string, string>();
+        for (const [name, body] of this.files) {
+          if (!scope || name === scope || name.startsWith(scope.endsWith("/") ? scope : `${scope}/`)) {
+            scoped.set(name, body);
+          }
+        }
+        if (scoped.size === 0) {
+          return {
+            result: {
+              ok: false,
+              error: `Ничего не подходит под path="${scope}". Файлы: ${[...this.files.keys()].slice(0, 30).join(", ")}`,
+            },
+          };
+        }
+        // Navigation only: grep must not lift the read-before-write gate.
+        const rawLimit = Number(input.max_results) > 0 ? Number(input.max_results) : Number(input.max_hits);
+        return {
+          result: grepFiles(scoped, {
+            pattern,
+            ignore_case: input.ignore_case !== false,
+            max_results: rawLimit > 0 ? rawLimit : 40,
+          }),
+        };
+      }
+      case "cat": {
+        const filename = String(input.filename || "").trim().toLowerCase();
+        const code = this.files.get(filename);
+        if (code === undefined) {
+          return {
+            result: {
+              ok: false,
+              error: `Файл не найден: ${filename}. Доступно: ${[...this.files.keys()].slice(0, 30).join(", ")}`,
+            },
+          };
+        }
+        const start = Number(input.start_line) > 0 ? Math.floor(Number(input.start_line)) : 1;
+        const end = Number(input.end_line) > 0 ? Math.floor(Number(input.end_line)) : undefined;
+        const out: CatResult = catLines(code, { filename, start_line: start, end_line: end });
+        // cat is a real read: it satisfies the read-before-write gate, like read_page.
+        this.readFiles.add(filename);
+        return { result: out };
       }
       case "read_page": {
         const filename = String(input.filename || "").trim().toLowerCase();
@@ -1184,6 +1396,7 @@ class SiteWorkspace {
         const filename = String(input.filename || "").trim().toLowerCase();
         const search = String(input.search ?? "");
         const replace = String(input.replace ?? "");
+        const force = input.force === true;
         if (!this.files.has(filename)) {
           return { result: { ok: false, error: `Файл не найден: ${filename}` } };
         }
@@ -1196,19 +1409,30 @@ class SiteWorkspace {
           };
         }
         const current = this.files.get(filename)!;
-        const { code, ok } = applySinglePatch(current, search, replace);
-        if (!ok) return { result: { ok: false, error: "SEARCH не найден или неоднозначен. Перечитай read_page и уточни уникальный фрагмент." } };
+        const { code, ok, error, hint } = applySinglePatch(current, search, replace);
+        if (!ok) {
+          return {
+            result: {
+              ok: false,
+              error: `${error || "SEARCH не найден или неоднозначен"}. Перечитай read_page и уточни уникальный фрагмент.`,
+              ...(hint ? { hint } : {}),
+            },
+          };
+        }
         if (code === current) {
           return { result: { ok: false, error: "Патч ничего не меняет — SEARCH и REPLACE дают тот же код. Уточни фрагмент." } };
         }
+        const rollback = this.validateChange(filename, current, code, force);
+        if (rollback) return { result: rollback };
         this.files.set(filename, code);
         this.changedFiles.add(filename);
         this.patchCount += 1;
-        return { result: { ok: true, filename, newChars: code.length } };
+        return { result: { ok: true, filename, newChars: code.length, ...this.takeWarnings(filename) } };
       }
       case "write_page": {
         const filename = String(input.filename || "").trim().toLowerCase();
         let code = String(input.code ?? "");
+        const force = input.force === true;
         if (!isValidAgentWriteFilename(filename)) {
           return { result: { ok: false, error: "Имя файла: name.html, category/slug/index.html или assets/style.css" } };
         }
@@ -1225,19 +1449,25 @@ class SiteWorkspace {
         } else if (!code.includes("<") || code.length < 50) {
           return { result: { ok: false, error: "code слишком короткий или не HTML" } };
         }
-        if (!this.base64Maps.has(filename)) this.base64Maps.set(filename, new Map());
-        const { stripped, map } = stripBase64Images(code);
-        const existing = this.base64Maps.get(filename)!;
-        for (const [k, v] of map) existing.set(k, v);
         const prev = this.files.get(filename);
+        if (!this.base64Maps.has(filename)) this.base64Maps.set(filename, new Map());
+        const existing = this.base64Maps.get(filename)!;
+        // Seed past any placeholder still present in the file, so a rewrite
+        // cannot mint __B64_0__ and clobber an image it did not touch.
+        const { stripped, map } = stripBase64Images(code, Math.max(maxB64Index(code), maxB64Index(prev ?? "")) + 1);
+        for (const [k, v] of map) existing.set(k, v);
         if (prev !== undefined && prev === stripped) {
           return { result: { ok: false, error: "write_page не меняет файл — код совпадает с текущим." } };
+        }
+        if (prev !== undefined) {
+          const rollback = this.validateChange(filename, prev, stripped, force);
+          if (rollback) return { result: rollback };
         }
         this.files.set(filename, stripped);
         this.readFiles.add(filename);
         this.changedFiles.add(filename);
         this.patchCount += 1;
-        return { result: { ok: true, filename, chars: stripped.length } };
+        return { result: { ok: true, filename, chars: stripped.length, ...this.takeWarnings(filename) } };
       }
       case "read_craft_md":
         return { result: { craft_md: this.craftMd } };

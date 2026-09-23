@@ -305,7 +305,7 @@ export default function Landing() {
       `;
       document.head.appendChild(pricingStyle);
 
-      function makeCard(tokens, price, badge, delay, description, title) {
+      function makeCard(tokens: string, price: string, badge: boolean, delay: string, description: string, title: string): HTMLAnchorElement {
         const wrap = document.createElement("a");
         wrap.href = "/auth";
         wrap.className = "m2card";

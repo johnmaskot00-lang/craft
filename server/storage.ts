@@ -21,6 +21,21 @@ export function publicUser<T extends { password?: string | null }>(user: T): Omi
   return rest;
 }
 
+/**
+ * The list projection of a project: every column except `generated_code` (which is
+ * multi-MB HTML — selecting it hung /api/projects), plus the derived `hasPreview`.
+ *
+ * This is deliberately *not* `Project`. It drops the three flags that only the
+ * single-project status poll reads (`getProjectGenerationMeta`), because the list
+ * queries never select them. Typing the result as `Project` used to paper over that
+ * with an `as` cast, which promised callers a `boolean` where the runtime value was
+ * `undefined`. Anything that needs those flags must go through the status path.
+ */
+export type ProjectListRow = Omit<
+  Project,
+  "generatedCode" | "generatingPlaceholder" | "animPending" | "animReady"
+> & { generatedCode: ""; hasPreview: boolean };
+
 export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
@@ -38,7 +53,7 @@ export interface IStorage {
   settlePaymentOrder(orderId: number, userId: number, amount: number, tokens: number, paymentProviderId: string, note: string): Promise<{ already: boolean; credited: boolean; newBalance: number }>;
 
   getProject(id: number): Promise<Project | undefined>;
-  getProjectsByUser(userId: number): Promise<Project[]>;
+  getProjectsByUser(userId: number): Promise<ProjectListRow[]>;
   /** Status poll — never loads generatedCode / full message bodies. */
   getProjectGenerationMeta(id: number): Promise<{
     id: number;
@@ -92,7 +107,8 @@ export interface IStorage {
 
   getLead(id: number): Promise<Lead | undefined>;
   getLeadsByProject(projectId: number): Promise<Lead[]>;
-  getLeadsByUser(userId: number): Promise<(Lead & { projectTitle: string })[]>;
+  /** `fingerprint` is write-only (de-dup on insert) and is never selected back out. */
+  getLeadsByUser(userId: number): Promise<(Omit<Lead, "fingerprint"> & { projectTitle: string })[]>;
   findRecentDuplicateLead(
     lead: InsertLead,
     withinMs: number,
@@ -115,7 +131,7 @@ export interface IStorage {
   adminGetUserTransactions(userId: number): Promise<import("@shared/schema").CreditTransaction[]>;
   getUserTransactionsPage(userId: number, limit: number, offset: number): Promise<{ items: import("@shared/schema").CreditTransaction[]; total: number }>;
   adminAdjustCredits(userId: number, amount: number, type: "credit" | "debit", operation: string, note: string): Promise<Omit<User, "password"> | undefined>;
-  adminGetUserProjects(userId: number): Promise<Array<Omit<Project, "generatedCode"> & { generatedCode: ""; codeBytes: number }>>;
+  adminGetUserProjects(userId: number): Promise<Array<Omit<ProjectListRow, "hasPreview">>>;
   adminGetStats(): Promise<{ totalUsers: number; totalProjects: number; totalTokensSpent: number; totalTokensAdded: number }>;
 
   createPaymentOrder(data: { userId: number; amount: number; tokens: number; orderId?: string; paymentUrl?: string }): Promise<PaymentOrder>;
@@ -476,7 +492,7 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
-  async getProjectsByUser(userId: number): Promise<Project[]> {
+  async getProjectsByUser(userId: number): Promise<ProjectListRow[]> {
     // Never select / measure generated_code here — octet_length detoasts multi-MB HTML
     // and is what hung /api/projects + starved session lookups (infinite spinner).
     const rows = await db
@@ -506,7 +522,7 @@ export class DatabaseStorage implements IStorage {
       generatedCode: "",
       hasPreview: Boolean(r.previewImage) || Number(r.codeBytes || 0) > 80 || r.publishStatus === "published",
       codeBytes: Number(r.codeBytes || 0),
-    })) as Project[];
+    }));
   }
 
   async createProject(insertProject: InsertProject): Promise<Project> {
@@ -972,7 +988,7 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(leads).where(eq(leads.projectId, projectId)).orderBy(desc(leads.createdAt));
   }
 
-  async getLeadsByUser(userId: number): Promise<(Lead & { projectTitle: string })[]> {
+  async getLeadsByUser(userId: number): Promise<(Omit<Lead, "fingerprint"> & { projectTitle: string })[]> {
     // One join instead of a query per project — and never selecting generated_code,
     // which the previous full-row project fetch pulled into the heap.
     return db
@@ -1143,7 +1159,7 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-  async adminGetUserProjects(userId: number): Promise<Array<Omit<Project, "generatedCode"> & { generatedCode: ""; codeBytes: number }>> {
+  async adminGetUserProjects(userId: number): Promise<Array<Omit<ProjectListRow, "hasPreview">>> {
     const rows = await db
       .select({
         id: projects.id,

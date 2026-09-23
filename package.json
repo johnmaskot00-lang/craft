@@ -71,6 +71,7 @@
     "input-otp": "^1.4.2",
     "ioredis": "^6.0.0",
     "jszip": "^3.10.1",
+    "linkedom": "^0.18.13",
     "lucide-react": "^0.453.0",
     "mammoth": "^1.11.0",
     "memorystore": "^1.6.7",

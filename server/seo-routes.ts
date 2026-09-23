@@ -1,6 +1,7 @@
 import { type Express } from "express";
 import type { IStorage } from "./storage";
 import { deployToYandex, type DeployFile } from "./yandex-deploy";
+import { intParam, idParam } from "./route-params";
 import { isInternalAgentFile } from "@shared/project-files";
 import type {
   SeoConfig,
@@ -1854,6 +1855,7 @@ async function designSeoMagazineSite(
 
   if (!parsed.css || !parsed.html || parsed.html.length < 400 || parsed.css.length < 200) {
     console.warn("[SEO] magazine design parse incomplete — using fallback shell");
+
     const fallbackCfg: SeoConfig = {
       ...cfg,
       architectureVersion: 6,
@@ -1878,6 +1880,13 @@ async function designSeoMagazineSite(
     return fallbackCfg;
   }
 
+  // Pin the guarded design out of `parsed`: the closures below capture it, and TS
+  // drops narrowing for a mutable binding read from a closure (it cannot prove the
+  // `let` still holds the guarded value by the time the call runs). These consts
+  // carry the check across that boundary instead of re-asserting it with `!`.
+  const designCss = parsed.css;
+  const designHtml = parsed.html;
+
   // Second pass: the article/category shells and the writer kit, designed
   // against the stylesheet the first pass produced.
   onStatus?.("Арт-директор: рисую страницу статьи…");
@@ -1896,8 +1905,8 @@ async function designSeoMagazineSite(
             content: buildArticleTemplatePrompt({
               cfg,
               dna,
-              css: parsed.css,
-              homeHtml: parsed.html,
+              css: designCss,
+              homeHtml: designHtml,
               critique,
             }),
           },
@@ -1926,14 +1935,14 @@ async function designSeoMagazineSite(
   const categoryShell = isUsableCategoryShell(templates.categoryShell) ? String(templates.categoryShell) : undefined;
   const writerKit = articleShell ? (templates.writerKit || "").slice(0, 8000) : "";
 
-  let css = parsed.css;
+  let css = designCss;
   if (articleShell && templates.extraCss) {
     css = `${css}\n/* art-directed article components */\n${templates.extraCss}`;
   }
   if (!/magazine-art-v[67]/i.test(css)) css = `/* magazine-art-v7 */\n${css}`;
   css = ensureSoftMagazineGuardCss(css, { shellOwned: !!articleShell });
 
-  let html = parsed.html;
+  let html = designHtml;
   if (!/^<!DOCTYPE/i.test(html) && !/^<html/i.test(html)) {
     html = `<!DOCTYPE html>\n${html}`;
   }
@@ -3904,7 +3913,7 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
     async (req, res) => {
     const userId = requireAuth(req, res);
     if (!userId) return;
-    const projectId = parseInt(req.params.id);
+    const projectId = intParam(req.params.id);
     const proj = await storage.getProject(projectId);
     if (!proj || proj.userId !== userId) return res.status(404).json({ message: "Not found" });
 
