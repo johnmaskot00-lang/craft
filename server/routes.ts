@@ -490,8 +490,8 @@ function resolveScrollAnimLayout(style?: string | null): ScrollAnimLayout {
 /**
  * Parallax / split / action / site3d scrub ONE Kling MP4 (no ffmpeg JPEG frames).
  * NOTE: «Тригер» does NOT use MP4 — it scrubs JPEG frames on canvas (mouse look).
- * Immersion uses Blob-loaded MP4 (scroll-world). Classic heroes must match immersion:
- * fetch→Blob→objectURL so seeking never depends on HTTP Range / moov position.
+ * Classic heroes stream the MP4 natively and only seek inside the buffered range until the
+ * whole clip is local (see buildMp4ScrubClientJs); a Blob copy is the fallback if buffering stalls.
  */
 function usesMp4Scrub(layout: ScrollAnimLayout): boolean {
   // «Арт Директор» plays the raw MP4 (autoplay loop) instead of scrubbing it, but
@@ -513,8 +513,13 @@ function usesMp4Scrub(layout: ScrollAnimLayout): boolean {
 const CRAFT_STICKY_OVERFLOW_FIX_JS = `function craftFixStickyOverflow(){var s=document.querySelectorAll('[data-craft-scrollanim]');if(!s.length)return;var needsSticky=false;for(var i=0;i<s.length;i++){if(s[i].getAttribute('data-layout')!=='artdirector'){needsSticky=true;break;}}if(!needsSticky)return;for(var i=0;i<s.length;i++){var root=s[i];if(root.getAttribute('data-layout')==='artdirector')continue;var el=root.parentElement;while(el&&el.nodeType===1&&el!==document.documentElement&&el!==document.body){var cs=getComputedStyle(el);if(cs.overflow==='hidden'||(cs.overflowX==='hidden'&&cs.overflowY==='hidden')){el.style.setProperty('overflow','clip');}else if(cs.overflowY==='hidden'&&cs.overflowX!=='hidden'&&cs.overflowX!=='scroll'&&cs.overflowX!=='auto'){el.style.setProperty('overflow-y','clip');}el=el.parentElement;}}try{document.documentElement.style.setProperty('scrollbar-gutter','stable');}catch(e){}[document.documentElement,document.body].forEach(function(n){if(!n)return;var c=getComputedStyle(n);var ox=c.overflowX,oy=c.overflowY;if(ox==='hidden'||ox==='auto'||ox==='scroll'){n.style.setProperty('overflow-x','clip');if(oy==='visible'||oy==='hidden'){n.style.setProperty('overflow-y','auto');}}else if(oy==='hidden'){n.style.setProperty('overflow-y','clip');}});}`;
 
 /**
- * Client scrub engine shared by parallax/split/action (and mirrored in site3d).
- * Loads the clip as a Blob (always seekable) — same approach as immersion's scroll-world.
+ * Client scrub engine shared by parallax/split/action.
+ * Plays the MP4 natively so frames appear while it downloads, but never seeks
+ * outside the buffered range until the whole clip is local: a seek past the
+ * buffer makes the browser drop its linear download and issue a fresh Range
+ * request per scroll step, which stuttered the first half of the scroll.
+ * If the native buffer stalls (iOS ignores preload, a paused video can be
+ * suspended) or errors, the clip is pulled as a Blob, which is always seekable.
  */
 function buildMp4ScrubClientJs(cid: string, opts: { splitText: boolean }): string {
   const textTransform = opts.splitText
@@ -530,34 +535,51 @@ function buildMp4ScrubClientJs(cid: string, opts: { splitText: boolean }): strin
     if(!video)return;
     var srcUrl=(root.getAttribute('data-video')||video.getAttribute('src')||'').trim();
     if(!srcUrl)return;
-    // Keep src attached so native preload and HTTP Range start immediately.
     video.muted=true;video.playsInline=true;video.preload='auto';
     try{video.setAttribute('playsinline','');video.setAttribute('webkit-playsinline','');video.setAttribute('muted','');}catch(e){}
-    var ready=false,seeking=false,want=0,blobUrl='',reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    var seekTimer=0;
+    var ready=false,seeking=false,want=0,blobUrl='',blobLoading=false,reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var seekTimer=0,watch=0,lastBuf=-1,lastBufAt=Date.now();
     function progress(){
       var r=root.getBoundingClientRect();
       var total=Math.max(1,root.offsetHeight-window.innerHeight);
       return Math.max(0,Math.min(1,(-r.top)/total));
     }
+    function isFull(){
+      if(blobUrl)return true;
+      var d=video.duration,b=video.buffered;
+      if(!isFinite(d)||d<=0)return false;
+      for(var i=0;i<b.length;i++){if(b.start(i)<=0.1&&b.end(i)>=d-0.15)return true;}
+      return false;
+    }
+    // Until the clip is fully local, stay inside the buffered range around the
+    // current frame; the scrub catches up as 'progress' extends the buffer.
+    function clampToBuffer(t){
+      if(isFull())return t;
+      var b=video.buffered,c=video.currentTime;
+      for(var i=0;i<b.length;i++){
+        var s=b.start(i),e=b.end(i);
+        if(c>=s-0.05&&c<=e+0.05)return Math.max(s,Math.min(t,e-0.05));
+      }
+      return c;
+    }
     function applySeek(){
       if(!ready||seeking||!isFinite(video.duration)||video.duration<=0)return;
-      var t=want*Math.max(0.05,video.duration-0.08);
+      var t=clampToBuffer(want*Math.max(0.05,video.duration-0.08));
       if(Math.abs(video.currentTime-t)<0.04)return;
       seeking=true;
       try{video.currentTime=t;}catch(e){seeking=false;return;}
       clearTimeout(seekTimer);
-      seekTimer=setTimeout(function(){if(seeking){seeking=false;applySeek();}},90);
+      seekTimer=setTimeout(function(){if(seeking){seeking=false;applySeek();}},250);
     }
     video.addEventListener('seeked',function(){seeking=false;clearTimeout(seekTimer);applySeek();});
-    video.addEventListener('error',function(){seeking=false;});
+    video.addEventListener('progress',applySeek);
     function signalReady(){try{window.__craftAnimReady=true;window.dispatchEvent(new Event('craft:anim-ready'));window.dispatchEvent(new Event('craft:frames-ready'));}catch(e){}}
     function markReady(){
       if(ready)return;
       if(!isFinite(video.duration)||video.duration<=0)return;
       ready=true;
       // iOS often stays on a blank frame until a muted play→pause primes the decoder.
-      try{var p=video.play();if(p&&p.then)p.then(function(){try{video.pause();}catch(e){}}).catch(function(){});}catch(e){}
+      try{var p=video.play();if(p&&p.then)p.then(function(){try{video.pause();}catch(e){}applySeek();}).catch(function(){});}catch(e){}
       applySeek();signalReady();
     }
     video.addEventListener('loadedmetadata',markReady);
@@ -569,22 +591,32 @@ function buildMp4ScrubClientJs(cid: string, opts: { splitText: boolean }): strin
       try{video.load();}catch(e){}
       if(video.readyState>=1)markReady();
     }
-    // Native path first: preload/decode starts during HTML load. Blob is only a fallback.
-    attachSrc(srcUrl);
-    video.addEventListener('error',function(){
-      if(blobUrl)return;
-      var fallbackCtl=new AbortController();
-      var fallbackTimer=setTimeout(function(){fallbackCtl.abort();},45000);
-      fetch(srcUrl,{credentials:'same-origin',mode:'cors',signal:fallbackCtl.signal})
+    function loadBlob(){
+      if(blobUrl||blobLoading)return;
+      blobLoading=true;clearInterval(watch);
+      var ctl=typeof AbortController!=='undefined'?new AbortController():null;
+      var timer=setTimeout(function(){if(ctl)ctl.abort();},45000);
+      fetch(srcUrl,{credentials:'same-origin',mode:'cors',signal:ctl?ctl.signal:undefined})
         .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.blob();})
-        .finally(function(){clearTimeout(fallbackTimer);})
         .then(function(blob){
+          clearTimeout(timer);
           if(!blob||!blob.size)throw new Error('empty blob');
+          if(isFull()){blobLoading=false;return;}
           blobUrl=URL.createObjectURL(blob);
+          ready=false;seeking=false;clearTimeout(seekTimer);
           attachSrc(blobUrl);
         })
-        .catch(function(err){console.warn('[craft-scrub] video fallback failed:',err&&err.message?err.message:err);});
-    },{once:true});
+        .catch(function(err){clearTimeout(timer);blobLoading=false;console.warn('[craft-scrub] video blob load failed:',err&&err.message?err.message:err);});
+    }
+    video.addEventListener('error',function(){seeking=false;if(!blobUrl)loadBlob();});
+    // Native buffer stopped growing before the clip is complete → switch to Blob.
+    watch=setInterval(function(){
+      if(blobUrl||blobLoading||isFull()){clearInterval(watch);return;}
+      var b=video.buffered,end=b.length?b.end(b.length-1):0,now=Date.now();
+      if(end>lastBuf+0.01){lastBuf=end;lastBufAt=now;return;}
+      if(now-lastBufAt>3000)loadBlob();
+    },500);
+    attachSrc(srcUrl);
     function setP(p){
       p=Math.max(0,Math.min(1,p));
       want=reduce?0:p;
@@ -2480,10 +2512,10 @@ function buildScrollAnimHtml(
 
   // ── MP4 scrub (parallax / split / action) ─────────────────────────────────
   // «Тригер» scrubs JPEG frames on canvas. Immersion loads MP4 as Blob.
-  // Classic heroes must use the Blob path too — raw <video src> seek looks static.
+  // Classic heroes seek within the buffered range (no Range-request storm), Blob on stall.
   if (vidEsc) {
-    // The MP4 is fetched as a Blob before it can be scrubbed, so without a poster the
-    // hero stays blank for the whole download. The still is the video's own first
+    // The MP4 needs to buffer before it can be scrubbed, so without a poster the
+    // hero stays blank until the first frames arrive. The still is the video's own first
     // frame, which makes the swap invisible.
     const mediaTag = `<video class="${cid}-video" muted playsinline preload="auto" aria-hidden="true"${posterEsc ? ` poster="${posterEsc}"` : ""}></video>`;
     const posterCss = posterEsc
