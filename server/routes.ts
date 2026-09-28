@@ -18,6 +18,20 @@ import {
 } from "./motion-reveal";
 import { buildTriggerLookHtml, normalizeTriggerLookFrames } from "./trigger-look";
 import {
+  type SiteTheme,
+  detectSiteTheme,
+  themeOrDefault,
+  themeImport,
+  themeHeadingCss,
+  themeSize,
+  themeVeil,
+  themeTextShadow,
+  themeSubShadow,
+  themePanel,
+  themePanelMobile,
+  alpha,
+} from "./site-theme";
+import {
   ART_DIRECTOR_MAX_VIDEOS,
   ART_DIRECTOR_MAX_IMAGES,
   ART_DIRECTOR_IMAGE_PHASE_MS,
@@ -57,6 +71,7 @@ import {
 import { setupAuth } from "./auth";
 import { gemini } from "./gemini";
 import { deployToYandex, addCustomDomain, removeCustomDomain, checkDomainStatus, unpublishFromYandex, deleteProjectFromYandex, getDomainProxyIp } from "./yandex-deploy";
+import { selfHostPageFonts } from "./fonts-selfhost";
 import { registerSeoRoutes } from "./seo-routes";
 import { ObjectStorageService, ObjectNotFoundError } from "./replit_integrations/object_storage";
 import { registerObjectStorageRoutes } from "./replit_integrations/object_storage";
@@ -2294,18 +2309,24 @@ async function healHollowCraftScrollAnimFromVersions(
   return html;
 }
 
-function scrollAnimPendingHtml(texts: Array<{ title: string; sub: string }>, videoPrompt?: string, style?: string): string {
+function scrollAnimPendingHtml(
+  texts: Array<{ title: string; sub: string }>,
+  videoPrompt?: string,
+  style?: string,
+  theme?: SiteTheme,
+): string {
+  const th = themeOrDefault(theme, texts, videoPrompt);
   if (style === "immersion") {
-    return buildImmersionPendingHtml(videoPrompt || "", texts);
+    return buildImmersionPendingHtml(videoPrompt || "", texts, th);
   }
   if (style === "animational") {
     const brandHint = texts[0]?.title || undefined;
-    return buildAnimationalPendingHtml(brandHint, videoPrompt);
+    return buildAnimationalPendingHtml(brandHint, videoPrompt, th);
   }
   // Art Director markers sit inside the agent's own hero — fill that box instead
   // of stacking a second full-height section on top of it.
   if (style === "artdirector") {
-    return artDirectorPendingHtml(videoPrompt, texts);
+    return artDirectorPendingHtml(videoPrompt, texts, th);
   }
   const isMotion = style === "motion";
   const isTrigger = style === "trigger";
@@ -2323,27 +2344,29 @@ function scrollAnimPendingHtml(texts: Array<{ title: string; sub: string }>, vid
     ? "Видео Kling 6с / 1080p: обычно 3–12 минут"
     : "Обычно 3–12 минут (видео Kling)";
   const barSecs = isMotion ? 45 : 180;
-  return `<section data-scroll-anim-pending="1"${_pa}${_sa}${_ta} style="position:relative;height:100vh;min-height:600px;background:linear-gradient(135deg,#0a0a0a 0%,#16213e 50%,#0a0a0a 100%);display:flex;align-items:center;justify-content:center;overflow:hidden;">
+  const ink = th.ink;
+  return `<section data-scroll-anim-pending="1"${_pa}${_sa}${_ta} style="position:relative;height:100vh;min-height:600px;background:radial-gradient(ellipse at 50% 38%,${alpha(th.accent, th.dark ? 0.2 : 0.12)} 0%,${alpha(th.accent, 0)} 62%),${th.bg};display:flex;align-items:center;justify-content:center;overflow:hidden;">
 <style>
+${themeImport(th)}
 @keyframes ${tid}-spin{to{transform:rotate(360deg)}}
 @keyframes ${tid}-pulse{0%,100%{opacity:.5}50%{opacity:1}}
 @keyframes ${tid}-bar{0%{width:0%}100%{width:85%}}
 @keyframes ${tid}-fade{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 </style>
-<div style="text-align:center;color:#fff;z-index:2;padding:40px;max-width:560px;animation:${tid}-fade .6s ease both;">
-  ${first.title ? `<div style="font-size:clamp(1.6rem,4vw,2.8rem);font-weight:800;margin:0 0 .3em;opacity:.9;letter-spacing:-0.02em;line-height:1.1;">${csaEsc(first.title)}</div>` : ""}
-  ${first.sub ? `<div style="font-size:clamp(.95rem,2vw,1.15rem);color:rgba(255,255,255,.5);margin:0 0 2.5rem;line-height:1.5;">${csaEsc(first.sub)}</div>` : ""}
-  <div style="display:inline-flex;align-items:center;gap:14px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:18px 28px;margin-bottom:1.5rem;">
-    <div style="width:36px;height:36px;border:2.5px solid rgba(255,255,255,.1);border-top-color:#a78bfa;border-radius:50%;flex-shrink:0;animation:${tid}-spin .9s linear infinite;"></div>
+<div style="text-align:center;color:${ink};font-family:${th.body};z-index:2;padding:40px;max-width:560px;animation:${tid}-fade .6s ease both;">
+  ${first.title ? `<div style="${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(1.6rem,4vw,2.8rem)")};margin:0 0 .3em;opacity:.92;line-height:1.1;">${csaEsc(first.title)}</div>` : ""}
+  ${first.sub ? `<div style="font-size:clamp(.95rem,2vw,1.15rem);color:${alpha(ink, 0.6)};margin:0 0 2.5rem;line-height:1.5;">${csaEsc(first.sub)}</div>` : ""}
+  <div style="display:inline-flex;align-items:center;gap:14px;background:${alpha(ink, 0.06)};border:1px solid ${alpha(ink, 0.12)};border-radius:16px;padding:18px 28px;margin-bottom:1.5rem;">
+    <div style="width:36px;height:36px;border:2.5px solid ${alpha(ink, 0.12)};border-top-color:${th.accent};border-radius:50%;flex-shrink:0;animation:${tid}-spin .9s linear infinite;"></div>
     <div style="text-align:left;">
-      <div style="font-size:.95rem;font-weight:600;color:#fff;margin-bottom:2px;">${pendingTitle}</div>
-      <div style="font-size:.8rem;color:rgba(255,255,255,.5);">${pendingSub}</div>
+      <div style="font-size:.95rem;font-weight:600;color:${ink};margin-bottom:2px;">${pendingTitle}</div>
+      <div style="font-size:.8rem;color:${alpha(ink, 0.55)};">${pendingSub}</div>
     </div>
   </div>
-  <div style="width:220px;height:3px;background:rgba(255,255,255,.08);border-radius:99px;margin:0 auto 1.5rem;overflow:hidden;">
-    <div style="height:100%;background:linear-gradient(90deg,#a78bfa,#60a5fa);border-radius:99px;animation:${tid}-bar ${barSecs}s cubic-bezier(.4,0,.2,1) forwards;"></div>
+  <div style="width:220px;height:3px;background:${alpha(ink, 0.1)};border-radius:99px;margin:0 auto 1.5rem;overflow:hidden;">
+    <div style="height:100%;background:linear-gradient(90deg,${th.accent},${th.accent2});border-radius:99px;animation:${tid}-bar ${barSecs}s cubic-bezier(.4,0,.2,1) forwards;"></div>
   </div>
-  <div style="font-size:.78rem;color:rgba(255,255,255,.3);line-height:1.6;animation:${tid}-pulse 2.5s ease-in-out infinite;">Страница обновится автоматически.<br>Остальные секции сайта уже готовы — прокрутите вниз ↓</div>
+  <div style="font-size:.78rem;color:${alpha(ink, 0.4)};line-height:1.6;animation:${tid}-pulse 2.5s ease-in-out infinite;">Страница обновится автоматически.<br>Остальные секции сайта уже готовы — прокрутите вниз ↓</div>
 </div>
 </section>`;
 }
@@ -2353,11 +2376,13 @@ function scrollAnimFallbackHtml(
   videoPrompt?: string,
   style?: string,
   taskId?: string,
+  theme?: SiteTheme,
 ): string {
+  const th = themeOrDefault(theme, texts, videoPrompt);
   const blocks = texts.map(t => `
       <div style="max-width:680px;margin:0 auto 3.5rem;">
-        ${t.title ? `<h2 style="font-size:clamp(2rem,5vw,3.5rem);font-weight:800;letter-spacing:-0.03em;color:#0a0a0a;margin:0 0 .5em;line-height:1.1;">${csaEsc(t.title)}</h2>` : ""}
-        ${t.sub ? `<p style="font-size:clamp(1rem,2vw,1.25rem);line-height:1.7;color:#444;margin:0;">${csaEsc(t.sub)}</p>` : ""}
+        ${t.title ? `<h2 style="${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(2rem,5vw,3.5rem)")};color:${th.ink};margin:0 0 .5em;line-height:1.1;">${csaEsc(t.title)}</h2>` : ""}
+        ${t.sub ? `<p style="font-family:${th.body};font-size:clamp(1rem,2vw,1.25rem);line-height:1.7;color:${th.muted};margin:0;">${csaEsc(t.sub)}</p>` : ""}
       </div>`).join("");
   // Embed the original video prompt + style + task ID so the retry endpoint can reconstruct
   // the marker and — if the video already completed on KIE — skip re-generation entirely.
@@ -2367,8 +2392,12 @@ function scrollAnimFallbackHtml(
   const taskAttr = taskId ? ` data-scroll-anim-task-id="${encodeURIComponent(taskId)}"` : "";
   // Art Director markers live inside the agent's own hero container — a white
   // full-width section there would break the layout, so fill the slot instead.
-  if (style === "artdirector") return artDirectorVideoFallbackHtml(videoPrompt, taskId);
-  return `<section data-scroll-anim-fallback="1"${promptAttr}${taskAttr} style="background:#fff;padding:clamp(60px,12vw,160px) 6%;text-align:center;">${blocks}</section>`;
+  if (style === "artdirector") return artDirectorVideoFallbackHtml(videoPrompt, taskId, th);
+  // Animational markers carry the whole site brief — use the dedicated fallback so
+  // «Восстановить анимацию» regenerates the same brief with the same theme.
+  if (style === "animational" && videoPrompt && videoPrompt.includes("|")) return buildAnimationalFallbackHtml(videoPrompt, th);
+  const fontCss = themeImport(th);
+  return `<section data-scroll-anim-fallback="1"${promptAttr}${taskAttr} style="background:${th.bg};padding:clamp(60px,12vw,160px) 6%;text-align:center;">${fontCss ? `<style>${fontCss}</style>` : ""}${blocks}</section>`;
 }
 
 async function prepareScrollAnimFrames(
@@ -2386,17 +2415,6 @@ async function prepareScrollAnimFrames(
 
 // Build a self-contained scroll-bound Canvas animation block (section + style + script).
 // layout: "parallax" — full-screen text; "split" — text left; "site3d" — stacked 3D cards over video.
-type HeroTypography = { heading: string; body: string; importUrl: string };
-
-function chooseHeroTypography(texts: Array<{ title: string; sub: string }>): HeroTypography {
-  const copy = texts.map((t) => `${t.title} ${t.sub}`).join(" ").toLowerCase();
-  if (/(?:ювелир|бриллиант|часы|мода|ателье|парфюм|luxury|premium)/i.test(copy)) return { heading: "'Cormorant Garamond', Georgia, serif", body: "'Manrope', system-ui, sans-serif", importUrl: "https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=Manrope:wght@400;500;600&display=swap" };
-  if (/(?:ресторан|шеф|кухн|кофе|кафе|еда|вино|restaurant|coffee|food|wine)/i.test(copy)) return { heading: "'Playfair Display', Georgia, serif", body: "'Manrope', system-ui, sans-serif", importUrl: "https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600&family=Playfair+Display:wght@600;700;800&display=swap" };
-  if (/(?:строй|ремонт|авто|механ|спорт|фитнес|ai|tech|digital|startup|code)/i.test(copy)) return { heading: "'Onest', system-ui, sans-serif", body: "'Golos Text', system-ui, sans-serif", importUrl: "https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Onest:wght@600;700;800&display=swap" };
-  if (/(?:клиник|врач|стомат|здоров|космет|уход|clinic|health|beauty)/i.test(copy)) return { heading: "'Golos Text', system-ui, sans-serif", body: "'Onest', system-ui, sans-serif", importUrl: "https://fonts.googleapis.com/css2?family=Golos+Text:wght@500;600;700&family=Onest:wght@400;500;600&display=swap" };
-  return { heading: "'Onest', system-ui, sans-serif", body: "'Manrope', system-ui, sans-serif", importUrl: "https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600&family=Onest:wght@600;700;800&display=swap" };
-}
-
 function buildScrollAnimHtml(
   frames: string[],
   texts: Array<{ title: string; sub: string }>,
@@ -2404,9 +2422,13 @@ function buildScrollAnimHtml(
   videoUrl?: string,
   /** Still used as the first frame — shown instantly while the MP4 downloads. */
   posterUrl?: string,
+  theme?: SiteTheme,
 ): string {
   const cid = "csa" + Math.random().toString(36).slice(2, 8);
-  const typography = chooseHeroTypography(texts);
+  const th = themeOrDefault(theme, texts);
+  const textHalo = th.dark
+    ? "radial-gradient(ellipse at 20% 80%,rgba(0,0,0,0.48) 0%,rgba(0,0,0,0.18) 55%,rgba(0,0,0,0) 78%)"
+    : `radial-gradient(ellipse at 20% 80%,${alpha(th.bg, 0.6)} 0%,${alpha(th.bg, 0.22)} 55%,${alpha(th.bg, 0)} 78%)`;
   const posterEsc = posterUrl ? csaEsc(posterUrl) : "";
   const framesJson = JSON.stringify(frames).replace(/'/g, "&#39;");
   const isSplit = layout === "split";
@@ -2441,15 +2463,15 @@ function buildScrollAnimHtml(
   // «Арт Директор»: no server-built hero. Drop the marker's slot into whatever
   // container the agent designed and let its own CSS own the composition.
   if (layout === "artdirector") {
-    return videoUrl ? buildArtDirectorVideoHtml(videoUrl) : artDirectorVideoFallbackHtml();
+    return videoUrl ? buildArtDirectorVideoHtml(videoUrl, th) : artDirectorVideoFallbackHtml(undefined, undefined, th);
   }
 
   if (layout === "trigger") {
-    return buildTriggerLookHtml(frames, texts, navCtl, csaEsc);
+    return buildTriggerLookHtml(frames, texts, navCtl, csaEsc, th);
   }
 
   if (layout === "site3d") {
-    return buildSite3dAnimHtml(frames, texts, navCtl, csaEsc, videoUrl);
+    return buildSite3dAnimHtml(frames, texts, navCtl, csaEsc, videoUrl, th);
   }
   // motion layout is built via buildMotionRevealHtml (image pair), not video frames.
 
@@ -2481,17 +2503,17 @@ ${layers}
   </div>
 </section>
 <style>
-  @import url('${typography.importUrl}');
+  ${themeImport(th)}
   .${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;}
-  .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#0a0a0a;${posterCss}}
+  .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:${th.bg};${posterCss}}
   .${cid}-video{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;min-width:100%;min-height:100%;display:block;object-fit:cover;object-position:center center;background:transparent;transform:none;max-width:none;}
-  .${cid}-veil{position:absolute;inset:0;pointer-events:none;background:linear-gradient(to top,rgba(0,0,0,0.62) 0%,rgba(0,0,0,0.18) 38%,rgba(0,0,0,0) 65%);}
+  .${cid}-veil{position:absolute;inset:0;pointer-events:none;background:${themeVeil(th)};}
   .${cid}-overlays{position:absolute;inset:0;pointer-events:none;}
   .${cid}-text{position:absolute;left:clamp(36px,5.5vw,96px);bottom:clamp(56px,8vh,108px);top:auto;transform:none;width:min(680px,86vw);text-align:left;opacity:0;will-change:opacity,transform;}
   .${cid}-text:first-child{opacity:1;}
-  .${cid}-text::before{content:"";position:absolute;inset:-60% -30% -30% -20%;z-index:-1;background:radial-gradient(ellipse at 20% 80%,rgba(0,0,0,0.48) 0%,rgba(0,0,0,0.18) 55%,rgba(0,0,0,0) 78%);filter:blur(18px);}
-  .${cid}-text h2{margin:0 0 .25em;font-family:${typography.heading};font-size:clamp(1.6rem,3.8vw,3.8rem);font-weight:800;letter-spacing:-0.02em;line-height:1.05;color:#fff;text-shadow:0 2px 24px rgba(0,0,0,0.6);}
-  .${cid}-text p{margin:.18em 0 0;max-width:520px;font-family:${typography.body};font-size:clamp(0.9rem,1.7vw,1.25rem);font-weight:500;line-height:1.55;color:rgba(255,255,255,0.88);text-shadow:0 1px 14px rgba(0,0,0,0.5);}
+  .${cid}-text::before{content:"";position:absolute;inset:-60% -30% -30% -20%;z-index:-1;background:${textHalo};filter:blur(18px);}
+  .${cid}-text h2{margin:0 0 .25em;${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(1.6rem,3.8vw,3.8rem)")};line-height:1.05;color:${th.ink};text-shadow:${themeTextShadow(th)};}
+  .${cid}-text p{margin:.18em 0 0;max-width:520px;font-family:${th.body};font-size:clamp(0.9rem,1.7vw,1.25rem);font-weight:500;line-height:1.55;color:${alpha(th.ink, 0.88)};text-shadow:${themeSubShadow(th)};}
 </style>
 <script>${scrubJs}
 </script>${navCtl}`;
@@ -2507,16 +2529,16 @@ ${layers}
   </div>
 </section>
 <style>
-  @import url('${typography.importUrl}');
+  ${themeImport(th)}
   .${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;}
-  .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#f8f7f4;${posterCss}}
+  .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:${th.bg};${posterCss}}
   .${cid}-video{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;min-width:100%;min-height:100%;display:block;object-fit:cover;object-position:center center;background:transparent;transform:none;max-width:none;}
-  .${cid}-panel{position:absolute;top:0;left:0;width:52%;height:100%;pointer-events:none;display:flex;align-items:center;padding:0 clamp(32px,5.5vw,96px);background:linear-gradient(to right,rgba(248,247,244,0.9) 0%,rgba(248,247,244,0.74) 42%,rgba(248,247,244,0) 100%);}
+  .${cid}-panel{position:absolute;top:0;left:0;width:52%;height:100%;pointer-events:none;display:flex;align-items:center;padding:0 clamp(32px,5.5vw,96px);background:${themePanel(th)};}
   .${cid}-text{position:absolute;left:clamp(32px,5.5vw,96px);top:50%;transform:translateY(-50%);width:min(50vw,640px);text-align:left;opacity:0;will-change:opacity,transform;}
   .${cid}-text:first-child{opacity:1;}
-  .${cid}-text h2{margin:0 0 .35em;font-family:${typography.heading};font-size:clamp(2.2rem,5.5vw,5.4rem);font-weight:800;letter-spacing:-0.03em;line-height:1.0;color:#15151A;}
-  .${cid}-text p{margin:0;max-width:540px;font-family:${typography.body};font-size:clamp(1rem,2vw,1.45rem);font-weight:500;line-height:1.6;color:#4a4a4f;}
-  @media(max-width:700px){.${cid}-panel{width:100%;background:linear-gradient(to top,rgba(248,247,244,0.96) 60%,rgba(248,247,244,0) 100%);bottom:0;top:auto;height:46%;align-items:flex-start;padding:18px 22px;} .${cid}-text{position:relative;top:auto;left:auto;transform:none;width:100%;text-align:center;} .${cid}-text h2{font-size:clamp(1.7rem,7vw,2.4rem);} .${cid}-text p{font-size:0.92rem;}}
+  .${cid}-text h2{margin:0 0 .35em;${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(2.2rem,5.5vw,5.4rem)")};line-height:1.0;color:${th.ink};}
+  .${cid}-text p{margin:0;max-width:540px;font-family:${th.body};font-size:clamp(1rem,2vw,1.45rem);font-weight:500;line-height:1.6;color:${th.muted};}
+  @media(max-width:700px){.${cid}-panel{width:100%;background:linear-gradient(to top,${themePanelMobile(th)} 60%,${alpha(th.bg, 0)} 100%);bottom:0;top:auto;height:46%;align-items:flex-start;padding:18px 22px;} .${cid}-text{position:relative;top:auto;left:auto;transform:none;width:100%;text-align:center;} .${cid}-text h2{font-size:${themeSize(th, "clamp(1.7rem,7vw,2.4rem)")};} .${cid}-text p{font-size:0.92rem;}}
 </style>
 <script>${scrubJs}
 </script>${navCtl}`;
@@ -2536,16 +2558,16 @@ ${layers}
   </div>
 </section>
 <style>
-  @import url('${typography.importUrl}');
+  ${themeImport(th)}
   .${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;}
-  .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#000;}
+  .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:${th.bg};}
   .${cid}-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
-  .${cid}-veil{position:absolute;inset:0;pointer-events:none;background:linear-gradient(to top,rgba(0,0,0,0.62) 0%,rgba(0,0,0,0.18) 38%,rgba(0,0,0,0) 65%);}
+  .${cid}-veil{position:absolute;inset:0;pointer-events:none;background:${themeVeil(th)};}
   .${cid}-overlays{position:absolute;inset:0;pointer-events:none;}
   .${cid}-text{position:absolute;left:clamp(36px,5.5vw,96px);bottom:clamp(56px,8vh,108px);top:auto;transform:none;width:min(680px,86vw);text-align:left;opacity:0;will-change:opacity,transform;}
-  .${cid}-text::before{content:"";position:absolute;inset:-60% -30% -30% -20%;z-index:-1;background:radial-gradient(ellipse at 20% 80%,rgba(0,0,0,0.48) 0%,rgba(0,0,0,0.18) 55%,rgba(0,0,0,0) 78%);filter:blur(18px);}
-  .${cid}-text h2{margin:0 0 .25em;font-family:${typography.heading};font-size:clamp(1.6rem,3.8vw,3.8rem);font-weight:800;letter-spacing:-0.02em;line-height:1.05;color:#fff;text-shadow:0 2px 24px rgba(0,0,0,0.6);}
-  .${cid}-text p{margin:.18em 0 0;max-width:520px;font-family:${typography.body};font-size:clamp(0.9rem,1.7vw,1.25rem);font-weight:500;line-height:1.55;color:rgba(255,255,255,0.88);text-shadow:0 1px 14px rgba(0,0,0,0.5);}
+  .${cid}-text::before{content:"";position:absolute;inset:-60% -30% -30% -20%;z-index:-1;background:${textHalo};filter:blur(18px);}
+  .${cid}-text h2{margin:0 0 .25em;${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(1.6rem,3.8vw,3.8rem)")};line-height:1.05;color:${th.ink};text-shadow:${themeTextShadow(th)};}
+  .${cid}-text p{margin:.18em 0 0;max-width:520px;font-family:${th.body};font-size:clamp(0.9rem,1.7vw,1.25rem);font-weight:500;line-height:1.55;color:${alpha(th.ink, 0.88)};text-shadow:${themeSubShadow(th)};}
 </style>
 <script>
 (function(){
@@ -2597,15 +2619,15 @@ ${layers}
   </div>
 </section>
 <style>
-  @import url('${typography.importUrl}');
+  ${themeImport(th)}
   .${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;}
-  .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#f8f7f4;}
+  .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:${th.bg};}
   .${cid}-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
-  .${cid}-panel{position:absolute;top:0;left:0;width:52%;height:100%;pointer-events:none;display:flex;align-items:center;padding:0 clamp(32px,5.5vw,96px);background:linear-gradient(to right,rgba(248,247,244,0.9) 0%,rgba(248,247,244,0.74) 42%,rgba(248,247,244,0) 100%);}
+  .${cid}-panel{position:absolute;top:0;left:0;width:52%;height:100%;pointer-events:none;display:flex;align-items:center;padding:0 clamp(32px,5.5vw,96px);background:${themePanel(th)};}
   .${cid}-text{position:absolute;left:clamp(32px,5.5vw,96px);top:50%;transform:translateY(-50%);width:min(50vw,640px);text-align:left;opacity:0;will-change:opacity,transform;}
-  .${cid}-text h2{margin:0 0 .35em;font-family:${typography.heading};font-size:clamp(2.2rem,5.5vw,5.4rem);font-weight:800;letter-spacing:-0.03em;line-height:1.0;color:#15151A;}
-  .${cid}-text p{margin:0;max-width:540px;font-family:${typography.body};font-size:clamp(1rem,2vw,1.45rem);font-weight:500;line-height:1.6;color:#4a4a4f;}
-  @media(max-width:700px){.${cid}-panel{width:100%;background:linear-gradient(to top,rgba(248,247,244,0.96) 60%,rgba(248,247,244,0) 100%);bottom:0;top:auto;height:46%;align-items:flex-start;padding:18px 22px;} .${cid}-text{position:relative;top:auto;left:auto;transform:none;width:100%;text-align:center;} .${cid}-text h2{font-size:clamp(1.7rem,7vw,2.4rem);} .${cid}-text p{font-size:0.92rem;}}
+  .${cid}-text h2{margin:0 0 .35em;${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(2.2rem,5.5vw,5.4rem)")};line-height:1.0;color:${th.ink};}
+  .${cid}-text p{margin:0;max-width:540px;font-family:${th.body};font-size:clamp(1rem,2vw,1.45rem);font-weight:500;line-height:1.6;color:${th.muted};}
+  @media(max-width:700px){.${cid}-panel{width:100%;background:linear-gradient(to top,${themePanelMobile(th)} 60%,${alpha(th.bg, 0)} 100%);bottom:0;top:auto;height:46%;align-items:flex-start;padding:18px 22px;} .${cid}-text{position:relative;top:auto;left:auto;transform:none;width:100%;text-align:center;} .${cid}-text h2{font-size:${themeSize(th, "clamp(1.7rem,7vw,2.4rem)")};} .${cid}-text p{font-size:0.92rem;}}
 </style>
 <script>
 (function(){
@@ -2728,6 +2750,17 @@ async function resolveAnimationalMarkers(
   }
   if (markers.size === 0) return { generated: 0, creditsUsed: 0 };
 
+  const aniSiteHtml = Array.from(filesMap.values()).join("\n");
+  const aniThemeCache = new Map<string, SiteTheme>();
+  const aniTheme = (k: string): SiteTheme => {
+    let t = aniThemeCache.get(k);
+    if (!t) {
+      t = detectSiteTheme({ brief: k, html: aniSiteHtml });
+      aniThemeCache.set(k, t);
+    }
+    return t;
+  };
+
   const replaceMap = new Map<string, string>();
   let generated = 0;
   let creditsUsed = 0;
@@ -2762,6 +2795,7 @@ async function resolveAnimationalMarkers(
       try {
         site = await generateAnimationalSite({
           markerInner: raw,
+          theme: aniTheme(raw),
           deps: buildAnimationalDeps({
             shouldStop: () => isAborted() || Date.now() >= phaseDeadline,
             onStatus: (msg) => {
@@ -2800,7 +2834,7 @@ async function resolveAnimationalMarkers(
   for (const [filename, code] of Array.from(filesMap.entries())) {
     const newCode = code.replace(/\{\{ANIMATIONAL:([\s\S]+?)\}\}/g, (_full, inner) => {
       const key = String(inner).trim();
-      return replaceMap.get(key) ?? buildAnimationalFallbackHtml(key);
+      return replaceMap.get(key) ?? buildAnimationalFallbackHtml(key, aniTheme(key));
     });
     filesMap.set(filename, newCode);
   }
@@ -2836,6 +2870,18 @@ async function resolveScrollAnimMarkers(
     }
   }
 
+  const saSiteHtml = Array.from(filesMap.values()).join("\n");
+  const saThemeCache = new Map<string, SiteTheme>();
+  const themeFor = (key: string): SiteTheme => {
+    let t = saThemeCache.get(key);
+    if (!t) {
+      const p = markers.get(key);
+      t = detectSiteTheme({ texts: p?.texts, brief: p?.videoPrompt, html: saSiteHtml });
+      saThemeCache.set(key, t);
+    }
+    return t;
+  };
+
   const replaceMap = new Map<string, string>();
   let generated = 0;
   let creditsUsed = 0;
@@ -2844,7 +2890,7 @@ async function resolveScrollAnimMarkers(
     for (const [filename, code] of Array.from(filesMap.entries())) {
       const newCode = code.replace(/\{\{SCROLLANIM:([\s\S]+?)\}\}/g, (_full, inner) => {
         const key = String(inner).trim();
-        return replaceMap.get(key) ?? scrollAnimFallbackHtml(markers.get(key)?.texts || [], markers.get(key)?.videoPrompt, layout);
+        return replaceMap.get(key) ?? scrollAnimFallbackHtml(markers.get(key)?.texts || [], markers.get(key)?.videoPrompt, layout, undefined, themeFor(key));
       });
       filesMap.set(filename, newCode);
     }
@@ -2911,6 +2957,7 @@ async function resolveScrollAnimMarkers(
         world = await generateScrollWorld({
           videoPrompt: parsed.videoPrompt,
           texts: parsed.texts,
+          theme: themeFor(raw),
           deps: buildScrollWorldDeps({
             shouldStop: () => isAborted() || Date.now() >= phaseDeadline,
             onStatus: (msg) => {
@@ -2960,7 +3007,7 @@ async function resolveScrollAnimMarkers(
           buildMotionRevealHtml(pair.baseUrl, pair.revealUrl, parsed.texts, navCtl, csaEsc, {
             baseUrl: pair.baseMobileUrl,
             revealUrl: pair.revealMobileUrl,
-          }),
+          }, themeFor(raw)),
         );
         generated++;
         if (billed) creditsUsed += blockCost;
@@ -3064,7 +3111,7 @@ async function resolveScrollAnimMarkers(
 
     if (isScrollAnimReady(layout, frames, videoUrl)) {
       const bakedFrames = await prepareScrollAnimFrames(frames, layout);
-      replaceMap.set(raw, buildScrollAnimHtml(bakedFrames, parsed.texts, layout, videoUrl, posterUrl));
+      replaceMap.set(raw, buildScrollAnimHtml(bakedFrames, parsed.texts, layout, videoUrl, posterUrl, themeFor(raw)));
       generated++;
       if (billed) creditsUsed += blockCost;
       try {
@@ -7970,7 +8017,7 @@ ${designAnalysis}
         }
         if (interactiveMode && isNewSite && interactiveStyle === "animational" && !code0.includes("{{ANIMATIONAL:")) {
           const brandGuess = (project.title || "Studio").replace(/[|{}]/g, "").slice(0, 40);
-          const markerAuto = `\n{{ANIMATIONAL:${brandGuess}|Создаём впечатления|#E8FF47|#0B0B0C|#F5F2EC|cinematic premium brand hero scene, dramatic monochrome editorial /// same composition vivid color metamorphosis reveal|atmospheric brand still one,atmospheric brand still two,atmospheric brand still three,atmospheric brand still four,atmospheric brand still five,atmospheric brand still six|Атмосфера::Почувствуйте характер бренда::cinematic brand atmosphere chapter||Детали::Сила в каждой детали::editorial detail close-up||Результат::Когда вау становится нормой::hero result scene||Ваш ход::Начните прямо сейчас::premium call to action scene|Обсудить проект}}\n`;
+          const markerAuto = `\n{{ANIMATIONAL:3d|${brandGuess}|Создаём впечатления|dark|cinematic premium brand hero scene, slow orbit and push-in, dramatic editorial lighting, photorealistic, no text no watermark|Атмосфера::Почувствуйте характер бренда||Детали::Сила в каждой детали||Результат::Когда вау становится нормой|Обсудить проект}}\n`;
           if (code0.includes("</header>")) code0 = code0.replace("</header>", `</header>${markerAuto}`);
           else if (/<body[^>]*>/i.test(code0)) code0 = code0.replace(/<body[^>]*>/i, (m) => `${m}${markerAuto}`);
           else code0 = markerAuto + code0;
@@ -8202,13 +8249,16 @@ ${designAnalysis}
       // ── Scroll / Animational: fire-and-forget approach ───────────────────────
       // Replace markers with pending placeholders and deliver immediately.
       // Background pipeline bakes the final experience into the DB.
+      // One site-HTML string, built exactly like bgFilesMap below, so the pending
+      // placeholder, the fallback and the finished hero all detect the same theme.
+      const _themeSiteHtml = [mainHtmlCode, ...secondaryForGen.filter((f) => f.filename !== "index.html").map((f) => f.code)].join("\n");
       const hasAniMarkers = mainHtmlCode.includes("{{ANIMATIONAL:");
       const hasScrollMarkers = mainHtmlCode.includes("{{SCROLLANIM:") || hasAniMarkers;
       let immediateHtml = mainHtmlCode;
       if (hasAniMarkers) {
         immediateHtml = mainHtmlCode.replace(/\{\{ANIMATIONAL:([\s\S]+?)\}\}/g, (_full, inner) => {
           const brief = parseAnimationalMarker(String(inner));
-          return buildAnimationalPendingHtml(brief.brand, String(inner).trim());
+          return buildAnimationalPendingHtml(brief.brand, String(inner).trim(), detectSiteTheme({ brief: String(inner).trim(), html: _themeSiteHtml }));
         });
       } else if (mainHtmlCode.includes("{{SCROLLANIM:")) {
         immediateHtml = mainHtmlCode.replace(/\{\{SCROLLANIM:([\s\S]+?)\}\}/g, (_full, inner) => {
@@ -8219,7 +8269,8 @@ ${designAnalysis}
             return { title: (title || "").trim(), sub: (sub || "").trim() };
           }).filter((t: { title: string; sub: string }) => t.title || t.sub);
           const videoPromptRaw = pipe === -1 ? (inner as string).trim() : (inner as string).slice(0, pipe).trim();
-          return scrollAnimPendingHtml(texts.length ? texts : [{ title: "", sub: "" }], videoPromptRaw || undefined, interactiveStyle || undefined);
+          const pendTexts = texts.length ? texts : [{ title: "", sub: "" }];
+          return scrollAnimPendingHtml(pendTexts, videoPromptRaw || undefined, interactiveStyle || undefined, detectSiteTheme({ texts: pendTexts, brief: videoPromptRaw, html: _themeSiteHtml }));
         });
       }
 
@@ -8227,7 +8278,7 @@ ${designAnalysis}
       // model prompt and is an implementation detail, not user-facing HTML.
       if (immediateHtml.includes("{{SCROLLANIM:") || immediateHtml.includes("{{ANIMATIONAL:")) {
         console.warn(`[GENERATE] raw animation marker survived replacement for project ${project.id}; forcing pending placeholder`);
-        immediateHtml = scrollAnimPendingHtml([{ title: "", sub: "" }], undefined, interactiveStyle || "parallax");
+        immediateHtml = scrollAnimPendingHtml([{ title: "", sub: "" }], undefined, interactiveStyle || "parallax", detectSiteTheme({ html: _themeSiteHtml }));
       }
 
       // Version history (save previous code before overwrite)
@@ -8361,6 +8412,8 @@ ${designAnalysis}
         const _animTexts = _animTextPart.split("||").map((seg: string) => { const [t, s] = seg.split("::"); return { title: (t||"").trim(), sub: (s||"").trim() }; }).filter((x: { title: string; sub: string }) => x.title || x.sub);
         if (_animTexts.length === 0) _animTexts.push({ title: "", sub: "" });
         const _animStyle = interactiveStyle || (hasAniMarkers ? "animational" : "parallax");
+        const _aniFbTheme = () => detectSiteTheme({ brief: _aniInner, html: _themeSiteHtml });
+        const _scrollFbTheme = () => detectSiteTheme({ texts: _animTexts, brief: _animVideoPrompt, html: _themeSiteHtml });
 
         const mergeFinishedAnim = async (
           animatedCodeIn: string,
@@ -8378,13 +8431,13 @@ ${designAnalysis}
             if (finishedBlocks.length === 0) {
               console.warn(`[BG ANIM] generated>0 but no craft-scrollanim block found — writing fallback`);
               const fb = styleHasAni
-                ? buildAnimationalFallbackHtml(_aniInner)
+                ? buildAnimationalFallbackHtml(_aniInner, _aniFbTheme())
                 : (() => {
                     const pendingTagM = curHtml.match(/<section[^>]*data-scroll-anim-pending="1"[^>]*>/);
                     const pendingTag = pendingTagM ? pendingTagM[0] : "";
                     const savedTaskIdEnc = pendingTag.match(/data-scroll-anim-task-id="([^"]*)"/)?.[1] || "";
                     const savedTaskId = savedTaskIdEnc ? decodeURIComponent(savedTaskIdEnc) : undefined;
-                    return scrollAnimFallbackHtml(_animTexts, _animVideoPrompt, _animStyle, savedTaskId);
+                    return scrollAnimFallbackHtml(_animTexts, _animVideoPrompt, _animStyle, savedTaskId, _scrollFbTheme());
                   })();
               mergedHtml = safeReplaceScrollAnimPending(curHtml, fb);
             } else {
@@ -8504,10 +8557,10 @@ ${designAnalysis}
                 const savedTaskIdEnc = pendingTag.match(/data-scroll-anim-task-id="([^"]*)"/)?.[1] || "";
                 const savedTaskId    = savedTaskIdEnc ? decodeURIComponent(savedTaskIdEnc) : undefined;
                 const fallbackCode = hasAniMarkers
-                  ? safeReplaceScrollAnimPending(curHtml, buildAnimationalFallbackHtml(_aniInner))
+                  ? safeReplaceScrollAnimPending(curHtml, buildAnimationalFallbackHtml(_aniInner, _aniFbTheme()))
                   : safeReplaceScrollAnimPending(
                       curHtml,
-                      scrollAnimFallbackHtml(_animTexts, _animVideoPrompt, _animStyle, savedTaskId),
+                      scrollAnimFallbackHtml(_animTexts, _animVideoPrompt, _animStyle, savedTaskId, _scrollFbTheme()),
                     );
                 await storage.updateProject(project.id, { generatedCode: fallbackCode });
                 await saveChatResultVersion(project.id, fallbackCode, prompt, undefined, modelMessage.id);
@@ -8721,43 +8774,72 @@ ${designAnalysis}
 
       const textsStr = animTexts.map(t => `${t.title}::${t.sub}`).join("||");
       const isAniRegen = animStyle === "animational" || html.includes('data-animational') || html.includes('data-animational-pending');
+      // Animational marker in the current parseAnimationalMarker layout:
+      // 3d|BRAND|TAGLINE|AESTHETIC|VIDEO_PROMPT|B::S||B::S||B::S|CTA[|F::D||...]
+      const _rgClean = (v: string) => String(v || "").replace(/[|{}]/g, " ").replace(/\s+/g, " ").trim();
+      const _rgPairs = (arr: Array<{title: string; sub: string}>) =>
+        arr.map((t) => `${_rgClean(t.title).replace(/::/g, " ")}::${_rgClean(t.sub).replace(/::/g, " ")}`).join("||");
+      const aniInnerRegen = videoPrompt.includes("|")
+        ? videoPrompt.trim()
+        : [
+            "3d",
+            _rgClean(project.title || "").slice(0, 40) || _rgClean(animTexts[0]?.title || "") || "Studio",
+            _rgClean(animTexts[0]?.sub || "") || "Создаём впечатления",
+            "dark",
+            _rgClean(videoPrompt),
+            _rgPairs(animTexts.slice(0, 3)),
+            "Обсудить проект",
+            ...(animTexts.length > 3 ? [_rgPairs(animTexts.slice(3, 7))] : []),
+          ].join("|");
       const marker = isAniRegen
-        ? `\n{{ANIMATIONAL:${videoPrompt.includes("|") ? videoPrompt : `${animTexts[0]?.title || "Studio"}|${animTexts[0]?.sub || "Создаём впечатления"}|#E8FF47|#0B0B0C|#F5F2EC|${videoPrompt}|atmospheric one,atmospheric two,atmospheric three,atmospheric four,atmospheric five,atmospheric six|${textsStr}|Обсудить проект`}}}\n`
+        ? `\n{{ANIMATIONAL:${aniInnerRegen}}}\n`
         : `\n{{SCROLLANIM:${videoPrompt}|${textsStr}}}\n`;
-      const pendingBlock = scrollAnimPendingHtml(animTexts, isAniRegen ? (videoPrompt.includes("|") ? videoPrompt : undefined) : videoPrompt, isAniRegen ? "animational" : animStyle)
-        .replace(
-          /(<section[^>]*data-scroll-anim-pending="1")/,
-          existingTaskId && !isAniRegen
-            ? `$1 data-scroll-anim-task-id="${encodeURIComponent(existingTaskId)}"`
-            : "$1",
-        );
+      // The pending block is themed from markerHtml (old hero removed), so it is
+      // built after the branches below; they insert this token in its place.
+      const PEND_TOKEN = `<!--craft-regen-pending-${crypto.randomBytes(4).toString("hex")}-->`;
 
       // Normalize HTML → pending placeholder + marker HTML for BG pipeline
       let pendingHtml = html;
       let markerHtml = html;
       if (isFallback) {
-        pendingHtml = html.replace(/<section[^>]*data-scroll-anim-fallback="1"[\s\S]*?<\/section>/, pendingBlock);
-        markerHtml = html.replace(/<section[^>]*data-scroll-anim-fallback="1"[\s\S]*?<\/section>/, marker);
+        pendingHtml = html.replace(/<section[^>]*data-scroll-anim-fallback="1"[\s\S]*?<\/section>/, () => PEND_TOKEN);
+        markerHtml = html.replace(/<section[^>]*data-scroll-anim-fallback="1"[\s\S]*?<\/section>/, () => marker);
       } else if (isPending) {
-        pendingHtml = safeReplaceScrollAnimPending(html, pendingBlock);
+        pendingHtml = safeReplaceScrollAnimPending(html, PEND_TOKEN);
         markerHtml = safeReplaceScrollAnimPending(html, marker);
       } else if (isHollow || mediaBroken) {
         // Hollow (no engine) OR intact HTML whose /objects media 404s → re-bake.
-        pendingHtml = replaceHollowCraftScrollAnim(html, [pendingBlock]);
+        pendingHtml = replaceHollowCraftScrollAnim(html, [PEND_TOKEN]);
         markerHtml = replaceHollowCraftScrollAnim(html, [marker]);
       } else {
         // Missing hero — inject after header
         if (html.includes("</header>")) {
-          pendingHtml = html.replace("</header>", `</header>\n${pendingBlock}`);
-          markerHtml = html.replace("</header>", `</header>\n${marker}`);
+          pendingHtml = html.replace("</header>", () => `</header>\n${PEND_TOKEN}`);
+          markerHtml = html.replace("</header>", () => `</header>\n${marker}`);
         } else if (/<body[^>]*>/i.test(html)) {
-          pendingHtml = html.replace(/<body[^>]*>/i, (m) => `${m}\n${pendingBlock}`);
+          pendingHtml = html.replace(/<body[^>]*>/i, (m) => `${m}\n${PEND_TOKEN}`);
           markerHtml = html.replace(/<body[^>]*>/i, (m) => `${m}\n${marker}`);
         } else {
-          pendingHtml = pendingBlock + html;
+          pendingHtml = PEND_TOKEN + html;
           markerHtml = marker + html;
         }
       }
+
+      const regenTheme = isAniRegen
+        ? detectSiteTheme({ brief: aniInnerRegen, html: markerHtml })
+        : detectSiteTheme({ texts: animTexts, brief: videoPrompt, html: markerHtml });
+      const pendingBlock = scrollAnimPendingHtml(
+        animTexts,
+        isAniRegen ? aniInnerRegen : videoPrompt,
+        isAniRegen ? "animational" : animStyle,
+        regenTheme,
+      ).replace(
+        /(<section[^>]*data-scroll-anim-pending="1")/,
+        existingTaskId && !isAniRegen
+          ? `$1 data-scroll-anim-task-id="${encodeURIComponent(existingTaskId)}"`
+          : "$1",
+      );
+      pendingHtml = pendingHtml.split(PEND_TOKEN).join(pendingBlock);
 
       await storage.updateProject(projectId, { generatedCode: pendingHtml });
       res.json({ animPending: true, resumedTaskId: existingTaskId || null, style: animStyle });
@@ -8783,7 +8865,7 @@ ${designAnalysis}
             const videoUrl = scrollOutcome.videoUrl;
             const ready = isScrollAnimReady(layout, frames, videoUrl);
             if (ready) {
-              const canvasHtml = buildScrollAnimHtml(await prepareScrollAnimFrames(frames, layout), animTexts, layout, videoUrl);
+              const canvasHtml = buildScrollAnimHtml(await prepareScrollAnimFrames(frames, layout), animTexts, layout, videoUrl, undefined, regenTheme);
               let finalCode = safeReplaceScrollAnimPending(pendingHtml, canvasHtml);
               if (isHollowCraftScrollAnim(finalCode)) {
                 finalCode = replaceHollowCraftScrollAnim(finalCode, [canvasHtml]);
@@ -8852,7 +8934,7 @@ ${designAnalysis}
           try {
             const fallback = safeReplaceScrollAnimPending(
               pendingHtml,
-              scrollAnimFallbackHtml(animTexts, videoPrompt, animStyle, existingTaskId),
+              scrollAnimFallbackHtml(animTexts, isAniRegen ? aniInnerRegen : videoPrompt, animStyle, existingTaskId, regenTheme),
             );
             await storage.updateProject(projectId, { generatedCode: fallback });
             console.warn(`[REGEN ANIM] All attempts failed for project ${projectId} — fallback written`);
@@ -9398,12 +9480,13 @@ ${designAnalysis}
         const overlayTexts: Array<{ title: string; sub: string }> = (texts && texts.length > 0)
           ? texts
           : extractHeroTexts(heroHtml);
-        const animHtml = buildScrollAnimHtml(frames, overlayTexts.length ? overlayTexts : [{ title: "", sub: "" }], "parallax");
+        const injTexts = overlayTexts.length ? overlayTexts : [{ title: "", sub: "" }];
+        const animHtml = buildScrollAnimHtml(frames, injTexts, "parallax", undefined, undefined, detectSiteTheme({ texts: injTexts, html }));
         // Replace hero section with animation
         newHtml = working.slice(0, hero.start) + animHtml + working.slice(hero.end);
       } else {
         // No sections at all — prepend animation before </body>
-        const animHtml = buildScrollAnimHtml(frames, texts.length ? texts : [], "parallax");
+        const animHtml = buildScrollAnimHtml(frames, texts.length ? texts : [], "parallax", undefined, undefined, detectSiteTheme({ texts, html }));
         const bodyClose = working.lastIndexOf("</body>");
         newHtml = bodyClose >= 0
           ? working.slice(0, bodyClose) + "\n" + animHtml + "\n" + working.slice(bodyClose)
@@ -9416,7 +9499,7 @@ ${designAnalysis}
       let em;
       while ((em = endRe.exec(html)) !== null) sectionEnds.push(em.index + em[0].length);
 
-      const animHtml = buildScrollAnimHtml(frames, texts, "parallax");
+      const animHtml = buildScrollAnimHtml(frames, texts, "parallax", undefined, undefined, detectSiteTheme({ texts, html }));
       let insertPos: number;
       if (sectionEnds.length === 0) {
         const bodyClose = html.lastIndexOf("</body>");
@@ -10258,6 +10341,19 @@ ${designAnalysis}
             f.content = f.content.split(relPath).join(localPath);
           }
         }
+      }
+
+      // Self-host Google Fonts: CSS + woff2 go into the site's own bucket
+      // under /fonts/, so visitors never hit Google (152-ФЗ). Fail-soft:
+      // anything that can't be fetched keeps its Google link.
+      try {
+        const fontsRes = await selfHostPageFonts(files);
+        for (const ff of fontsRes.files) files.push(ff);
+        if (fontsRes.hosted || fontsRes.kept) {
+          console.log(`[Publish] fonts self-host for project ${projectId}: ${fontsRes.hosted} hosted, ${fontsRes.kept} kept on Google, ${fontsRes.files.length} file(s)`);
+        }
+      } catch (err) {
+        console.warn(`[Publish] fonts self-host skipped for project ${projectId}:`, err);
       }
 
       // Deploys to the project bucket AND (if a custom domain is attached)
@@ -11547,7 +11643,7 @@ ${fullHtml}`;
           // resume also fails the "Создать видео" retry button can re-use the completed video.
           const fallback = safeReplaceScrollAnimPending(
             html,
-            scrollAnimFallbackHtml(savedTexts, savedPrompt, savedStyle, savedTaskId || undefined)
+            scrollAnimFallbackHtml(savedTexts, savedPrompt, savedStyle, savedTaskId || undefined, detectSiteTheme({ texts: savedTexts, brief: savedPrompt, html }))
           );
           if (fallback !== html) {
             await storage.updateProject(proj.id, { generatedCode: fallback });
@@ -11609,9 +11705,11 @@ ${fullHtml}`;
                   const stableVideo = relUrl;
                   const cur = await storage.getProject(_projId);
                   if (!cur || !(cur.generatedCode || "").includes('data-scroll-anim-fallback="1"')) return;
+                  const resumeHtml = buildScrollAnimHtml([], _texts, _layout, stableVideo, undefined,
+                    detectSiteTheme({ texts: _texts, brief: savedPrompt, html: cur.generatedCode || "" }));
                   let finalCode = (cur.generatedCode || "").replace(
                     /<section[^>]*data-scroll-anim-fallback="1"[\s\S]*?<\/section>/,
-                    buildScrollAnimHtml([], _texts, _layout, stableVideo),
+                    () => resumeHtml,
                   );
                   finalCode = injectLoadingOverlay(finalCode);
                   await storage.updateProject(_projId, { generatedCode: finalCode });
@@ -11762,17 +11860,21 @@ ${fullHtml}`;
                 continue;
               }
 
-              const canvasHtml = buildScrollAnimHtml([], texts, layout, stableVideo);
+              const _ktPromptEnc = sectionTag.match(/data-scroll-anim-prompt="([^"]*)"/)?.[1] || "";
+              let _ktPrompt: string | undefined;
+              try { _ktPrompt = _ktPromptEnc ? decodeURIComponent(_ktPromptEnc) : undefined; } catch { _ktPrompt = undefined; }
+              const canvasHtml = buildScrollAnimHtml([], texts, layout, stableVideo, undefined,
+                detectSiteTheme({ texts, brief: _ktPrompt, html: latestHtml }));
               let finalCode = latestHtml;
               if (stillPending) {
                 finalCode = safeReplaceScrollAnimPending(finalCode, canvasHtml);
               } else if (stillFallback) {
-                finalCode = finalCode.replace(/<section[^>]*data-scroll-anim-fallback="1"[\s\S]*?<\/section>/, canvasHtml);
+                finalCode = finalCode.replace(/<section[^>]*data-scroll-anim-fallback="1"[\s\S]*?<\/section>/, () => canvasHtml);
               } else if (stillHollow) {
                 finalCode = replaceHollowCraftScrollAnim(finalCode, [canvasHtml]);
               } else if (stillMissing) {
                 if (finalCode.includes("</header>")) {
-                  finalCode = finalCode.replace("</header>", `</header>\n${canvasHtml}`);
+                  finalCode = finalCode.replace("</header>", () => `</header>\n${canvasHtml}`);
                 } else if (/<body[^>]*>/i.test(finalCode)) {
                   finalCode = finalCode.replace(/<body[^>]*>/i, (m) => `${m}\n${canvasHtml}`);
                 } else {

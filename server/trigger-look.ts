@@ -5,6 +5,7 @@
  */
 
 import { gemini } from "./gemini";
+import { type SiteTheme, themeOrDefault, themeImport, themeSize, themeHeadingCss, alpha } from "./site-theme";
 
 async function downloadFrameBase64(
   url: string,
@@ -96,8 +97,22 @@ export function buildTriggerLookHtml(
   texts: Array<{ title: string; sub: string }>,
   navCtl: string,
   esc: (s: string) => string,
+  theme?: SiteTheme,
 ): string {
   const cid = "trg" + Math.random().toString(36).slice(2, 8);
+  const th = themeOrDefault(theme, texts);
+  // Text sits over a photo/video frame: on dark themes darken the left side and
+  // use the theme ink; on light themes wash it with the page background instead.
+  const ink = th.ink;
+  const veil = th.dark
+    ? `linear-gradient(90deg,rgba(0,0,0,.62) 0%,rgba(0,0,0,.28) 38%,rgba(0,0,0,.08) 58%,rgba(0,0,0,.2) 100%),
+  radial-gradient(ellipse 55% 70% at 22% 50%,rgba(0,0,0,.35) 0%,transparent 70%)`
+    : `linear-gradient(90deg,${alpha(th.bg, 0.9)} 0%,${alpha(th.bg, 0.55)} 38%,${alpha(th.bg, 0.1)} 58%,${alpha(th.bg, 0)} 100%)`;
+  const veilMobile = th.dark
+    ? "linear-gradient(180deg,rgba(0,0,0,.2) 0%,rgba(0,0,0,.15) 40%,rgba(0,0,0,.72) 100%)"
+    : `linear-gradient(180deg,${alpha(th.bg, 0)} 0%,${alpha(th.bg, 0.2)} 40%,${alpha(th.bg, 0.92)} 100%)`;
+  const shadow = th.dark ? "0 10px 40px rgba(0,0,0,.55)" : `0 6px 30px ${alpha(th.bg, 0.7)}`;
+  const subShadow = th.dark ? "0 2px 16px rgba(0,0,0,.4)" : `0 2px 14px ${alpha(th.bg, 0.6)}`;
   const framesJson = JSON.stringify(frames || []).replace(/</g, "\\u003c");
   const hero = texts[0] || { title: "", sub: "" };
   const title = hero.title ? esc(hero.title) : "";
@@ -117,26 +132,25 @@ export function buildTriggerLookHtml(
   </div>
 </section>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Manrope:wght@400;500;600&display=swap');
-.${cid}-hero{position:relative;min-height:100vh;margin:0;padding:0;background:#07080c;overflow:hidden;}
+${themeImport(th)}
+.${cid}-hero{position:relative;min-height:100vh;margin:0;padding:0;background:${th.bg};overflow:hidden;}
 .${cid}-stage{position:relative;min-height:100vh;width:100%;}
 .${cid}-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
 .${cid}-veil{position:absolute;inset:0;pointer-events:none;background:
-  linear-gradient(90deg,rgba(0,0,0,.62) 0%,rgba(0,0,0,.28) 38%,rgba(0,0,0,.08) 58%,rgba(0,0,0,.2) 100%),
-  radial-gradient(ellipse 55% 70% at 22% 50%,rgba(0,0,0,.35) 0%,transparent 70%);}
+  ${veil};}
 .${cid}-copy{position:relative;z-index:2;min-height:100vh;display:flex;flex-direction:column;justify-content:center;
-  padding:clamp(88px,12vh,140px) clamp(18px,5vw,64px);max-width:min(520px,52vw);box-sizing:border-box;color:#fff;
+  padding:clamp(88px,12vh,140px) clamp(18px,5vw,64px);max-width:min(520px,52vw);box-sizing:border-box;color:${ink};
   pointer-events:none;}
-.${cid}-title{margin:0;font-family:'Syne',system-ui,sans-serif;font-weight:800;font-size:clamp(1.85rem,4.6vw,3.6rem);
-  letter-spacing:-.035em;line-height:1.02;text-shadow:0 10px 40px rgba(0,0,0,.55);}
-.${cid}-sub{margin:.85rem 0 0;max-width:34ch;font-family:'Manrope',system-ui,sans-serif;font-size:clamp(.95rem,1.5vw,1.15rem);
-  line-height:1.5;color:rgba(255,255,255,.88);text-shadow:0 2px 16px rgba(0,0,0,.4);}
-.${cid}-hint{margin-top:1.4rem;font-family:'Manrope',system-ui,sans-serif;font-size:.66rem;letter-spacing:.14em;
-  text-transform:uppercase;color:rgba(255,255,255,.45);transition:opacity .45s ease;}
+.${cid}-title{margin:0;${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(1.85rem,4.6vw,3.6rem)")};
+  line-height:1.04;color:${ink};text-shadow:${shadow};}
+.${cid}-sub{margin:.85rem 0 0;max-width:34ch;font-family:${th.body};font-size:clamp(.95rem,1.5vw,1.15rem);
+  line-height:1.5;color:${alpha(ink, 0.88)};text-shadow:${subShadow};}
+.${cid}-hint{margin-top:1.4rem;font-family:${th.body};font-size:.66rem;letter-spacing:.14em;
+  text-transform:uppercase;color:${alpha(th.accent, 0.8)};transition:opacity .45s ease;}
 @media (max-width:780px){
   .${cid}-copy{max-width:92vw;justify-content:flex-end;padding-bottom:clamp(28px,8vh,64px);text-align:left;}
   .${cid}-veil{background:
-    linear-gradient(180deg,rgba(0,0,0,.2) 0%,rgba(0,0,0,.15) 40%,rgba(0,0,0,.72) 100%);}
+    ${veilMobile};}
 }
 @media (prefers-reduced-motion:reduce){
   .${cid}-hint{display:none;}
@@ -170,7 +184,7 @@ export function buildTriggerLookHtml(
         canvas.width=Math.floor(w*dpr); canvas.height=Math.floor(h*dpr);
       }
       ctx.setTransform(dpr,0,0,dpr,0,0);
-      ctx.fillStyle='#07080c';
+      ctx.fillStyle='${th.bg}';
       ctx.fillRect(0,0,w,h);
       var s=Math.max(w/img.naturalWidth, h/img.naturalHeight);
       var dw=img.naturalWidth*s, dh=img.naturalHeight*s;

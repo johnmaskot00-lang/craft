@@ -34,7 +34,7 @@ MUST:
 - Motion via CSS + IntersectionObserver / scroll — purposeful (no noisy infinite loops).
 - Images ONLY as {{GENIMG:english prompt}} or {{GENIMG:prompt|REFN}} markers.
 - Full production HTML. Complete every section. No skeletons / lorem / "// ...".
-- Prefer premium Google Fonts stand-ins for Geist/Clash/PP Editorial (e.g. Syne, Unbounded, Fraunces, Instrument Serif, Manrope, DM Sans).
+- Pick the font pair FOR THIS NICHE and mood — do not reuse one default display face across sites. Directions, not a fixed list: dance/nightlife → condensed or bold grotesk display; luxury/beauty/spa → refined serif; food/cafe → warm expressive display; tech/SaaS → precise geometric or mono accents; kids → rounded friendly; law/finance → sober serif. The palette must follow the same niche logic.
 
 MUST NOT:
 - Import Tailwind / Bootstrap / shadcn / Radix / GSAP CDN / npm packages (blocked or unavailable).

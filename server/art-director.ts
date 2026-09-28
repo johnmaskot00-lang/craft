@@ -15,6 +15,8 @@ export const ART_DIRECTOR_IMAGE_PHASE_MS = 900_000;
 /** Up to two Kling clips are rendered sequentially — give the phase room for both. */
 export const ART_DIRECTOR_VIDEO_PHASE_MS = 3_600_000;
 
+import { type SiteTheme, themeOrDefault, themeImport, alpha } from "./site-theme";
+
 const VIDEO_CLASS = "craft-adv";
 
 /** Absolutely fills the container the agent designed, without touching its layout. */
@@ -29,12 +31,13 @@ const SLOT_STYLE = "position:absolute;inset:0;overflow:hidden;z-index:0;margin:0
  * inside whatever hero the agent invented. No server-built hero skeleton and no
  * forced header transparency override.
  */
-export function buildArtDirectorVideoHtml(videoUrl: string): string {
+export function buildArtDirectorVideoHtml(videoUrl: string, theme?: SiteTheme): string {
   const src = String(videoUrl).replace(/"/g, "&quot;");
+  const bg = theme ? theme.bg : "#0a0a0a";
   return `<section data-craft-scrollanim="1" data-layout="artdirector" data-video="${src}" aria-hidden="true" style="${SLOT_STYLE}">
   <video class="${VIDEO_CLASS}" src="${src}" autoplay muted loop playsinline preload="auto" disablepictureinpicture></video>
 </section>
-<style>section[data-layout="artdirector"]{${SLOT_STYLE}}video.${VIDEO_CLASS}{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;min-width:100%;min-height:100%;object-fit:cover;object-position:center center;display:block;border:0;background:#0a0a0a;z-index:0;transform:none;max-width:none;}</style>
+<style>section[data-layout="artdirector"]{${SLOT_STYLE}}video.${VIDEO_CLASS}{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;min-width:100%;min-height:100%;object-fit:cover;object-position:center center;display:block;border:0;background:${bg};z-index:0;transform:none;max-width:none;}</style>
 <script>(function(){if(window.__craftAdVideo)return;window.__craftAdVideo=1;
 function ready(){try{window.__craftAnimReady=true;window.dispatchEvent(new Event('craft:anim-ready'));window.dispatchEvent(new Event('craft:frames-ready'));}catch(e){}}
 function init(){var v=document.querySelectorAll('video.${VIDEO_CLASS}');if(!v.length){ready();return;}
@@ -53,29 +56,32 @@ if(document.readyState!=='loading')init();else document.addEventListener('DOMCon
  * retry attributes the /retry-scroll-anim endpoint looks for, but stays visually
  * neutral so the agent's own hero typography still reads on top of it.
  */
-export function artDirectorVideoFallbackHtml(videoPrompt?: string, taskId?: string): string {
+export function artDirectorVideoFallbackHtml(videoPrompt?: string, taskId?: string, theme?: SiteTheme): string {
+  const th = themeOrDefault(theme, undefined, videoPrompt);
   const promptAttr = videoPrompt
     ? ` data-scroll-anim-prompt="${encodeURIComponent(videoPrompt)}" data-scroll-anim-style="artdirector"`
     : ` data-scroll-anim-style="artdirector"`;
   const taskAttr = taskId ? ` data-scroll-anim-task-id="${encodeURIComponent(taskId)}"` : "";
-  return `<section data-scroll-anim-fallback="1"${promptAttr}${taskAttr} aria-hidden="true" style="${SLOT_STYLE}background:radial-gradient(120% 90% at 30% 20%,#2a2a32 0%,#131316 55%,#0a0a0c 100%);"></section>`;
+  return `<section data-scroll-anim-fallback="1"${promptAttr}${taskAttr} aria-hidden="true" style="${SLOT_STYLE}background:radial-gradient(120% 90% at 30% 20%,${th.card} 0%,${th.bg} 70%);"></section>`;
 }
 
 /** Spinner shown inside the agent's hero while Kling renders the clip. */
-export function artDirectorPendingHtml(videoPrompt?: string, texts?: Array<{ title: string; sub: string }>): string {
+export function artDirectorPendingHtml(videoPrompt?: string, texts?: Array<{ title: string; sub: string }>, theme?: SiteTheme): string {
+  const th = themeOrDefault(theme, texts, videoPrompt);
+  const ink = th.ink;
   const tid = "adp" + Math.random().toString(36).slice(2, 8);
   const promptAttr = videoPrompt ? ` data-scroll-anim-prompt="${encodeURIComponent(videoPrompt)}"` : "";
   const textsAttr = texts?.length
     ? ` data-scroll-anim-texts="${encodeURIComponent(texts.map((t) => `${t.title}::${t.sub}`).join("||"))}"`
     : "";
-  return `<section data-scroll-anim-pending="1" data-scroll-anim-style="artdirector"${promptAttr}${textsAttr} aria-hidden="true" style="${SLOT_STYLE}display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#0a0a0a 0%,#16213e 50%,#0a0a0a 100%);">
-<style>@keyframes ${tid}-spin{to{transform:rotate(360deg)}}@keyframes ${tid}-bar{0%{width:0%}100%{width:85%}}</style>
-<div style="text-align:center;color:#fff;padding:32px;font-family:system-ui,sans-serif;">
-  <div style="width:34px;height:34px;margin:0 auto 14px;border:2.5px solid rgba(255,255,255,.12);border-top-color:#a78bfa;border-radius:50%;animation:${tid}-spin .9s linear infinite;"></div>
-  <div style="font-size:.9rem;font-weight:600;margin-bottom:4px;">Рендерю видео для hero</div>
-  <div style="font-size:.78rem;color:rgba(255,255,255,.45);">Обычно 3–12 минут · страница обновится сама</div>
-  <div style="width:200px;height:3px;background:rgba(255,255,255,.08);border-radius:99px;margin:16px auto 0;overflow:hidden;">
-    <div style="height:100%;background:linear-gradient(90deg,#a78bfa,#60a5fa);border-radius:99px;animation:${tid}-bar 180s cubic-bezier(.4,0,.2,1) forwards;"></div>
+  return `<section data-scroll-anim-pending="1" data-scroll-anim-style="artdirector"${promptAttr}${textsAttr} aria-hidden="true" style="${SLOT_STYLE}display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at 50% 40%,${alpha(th.accent, th.dark ? 0.2 : 0.12)} 0%,${alpha(th.accent, 0)} 62%),${th.bg};">
+<style>${themeImport(th)}@keyframes ${tid}-spin{to{transform:rotate(360deg)}}@keyframes ${tid}-bar{0%{width:0%}100%{width:85%}}</style>
+<div style="text-align:center;color:${ink};padding:32px;font-family:${th.body};">
+  <div style="width:34px;height:34px;margin:0 auto 14px;border:2.5px solid ${alpha(ink, 0.12)};border-top-color:${th.accent};border-radius:50%;animation:${tid}-spin .9s linear infinite;"></div>
+  <div style="font-family:${th.display};font-size:.9rem;font-weight:600;margin-bottom:4px;">Рендерю видео для hero</div>
+  <div style="font-size:.78rem;color:${alpha(ink, 0.5)};">Обычно 3–12 минут · страница обновится сама</div>
+  <div style="width:200px;height:3px;background:${alpha(ink, 0.1)};border-radius:99px;margin:16px auto 0;overflow:hidden;">
+    <div style="height:100%;background:linear-gradient(90deg,${th.accent},${th.accent2});border-radius:99px;animation:${tid}-bar 180s cubic-bezier(.4,0,.2,1) forwards;"></div>
   </div>
 </div>
 </section>`;
@@ -159,10 +165,10 @@ export const ART_DIRECTOR_SYSTEM_PROMPT = `Ты — АРТ-ДИРЕКТОР и f
 - Всегда тёмный фон + cyan/neon акцент «AI tech»
 
 ОБЯЗАТЕЛЬНО для КАЖДОГО сайта:
-1. Выбери УНИКАЛЬНУЮ пару Google Fonts под нишу (display + body). Примеры направлений:
-   - кино/продакшн → драматичный serif или condensed display (Fraunces, Bebas Neue, Playfair Display) + нейтральный body
-   - спа/beauty → мягкий serif + лёгкий sans (Cormorant Garamond + Manrope)
-   - еда → жирный display + тёплый body (Syne / DM Serif Display + Source Sans 3)
+1. Сам пойми тему сайта и выбери УНИКАЛЬНУЮ пару Google Fonts под неё (display + body) — только с кириллицей. Направления, не готовый список:
+   - кино/продакшн → драматичный serif или condensed display + нейтральный body
+   - спа/beauty → мягкий контрастный serif + лёгкий sans
+   - еда → жирный тёплый display + дружелюбный body
    - юр/фин → строгий grotesk + editorial serif
    Подключи через fonts.googleapis.com. Все размеры — clamp().
 2. Hero-композиция — ВЫБЕРИ ОДНУ, разную от проекта к проекту:

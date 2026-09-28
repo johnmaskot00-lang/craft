@@ -1,3 +1,5 @@
+import { type SiteTheme, themeOrDefault, themeImport, themeSize, themeHeadingCss, themeTextShadow, alpha } from "./site-theme";
+
 /**
  * «3D сайт» scroll layout — cinematic scrubbed video background + stacked 3D cards.
  *
@@ -12,7 +14,22 @@ export function buildSite3dAnimHtml(
   navCtl: string,
   esc: (s: string) => string,
   videoUrl?: string,
+  theme?: SiteTheme,
 ): string {
+  const th = themeOrDefault(theme, texts);
+  const ink = th.ink;
+  const veil = th.dark
+    ? `radial-gradient(ellipse 70% 55% at 50% 40%,rgba(0,0,0,0.15) 0%,rgba(0,0,0,0.55) 70%,rgba(0,0,0,0.82) 100%),
+  linear-gradient(180deg,rgba(0,0,0,0.35) 0%,rgba(0,0,0,0.1) 35%,rgba(0,0,0,0.55) 100%)`
+    : `radial-gradient(ellipse 70% 55% at 50% 40%,${alpha(th.bg, 0.1)} 0%,${alpha(th.bg, 0.45)} 70%,${alpha(th.bg, 0.78)} 100%),
+  linear-gradient(180deg,${alpha(th.bg, 0.3)} 0%,${alpha(th.bg, 0.05)} 35%,${alpha(th.bg, 0.5)} 100%)`;
+  const cardBg = th.dark
+    ? "linear-gradient(155deg,rgba(255,255,255,0.16) 0%,rgba(255,255,255,0.06) 45%,rgba(255,255,255,0.03) 100%)"
+    : `linear-gradient(155deg,${alpha(th.bg, 0.86)} 0%,${alpha(th.bg, 0.72)} 45%,${alpha(th.bg, 0.62)} 100%)`;
+  const cardBorder = th.dark ? "rgba(255,255,255,0.22)" : alpha(th.ink, 0.12);
+  const cardShadow = th.dark
+    ? "0 30px 80px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.25)"
+    : `0 30px 80px ${alpha(th.ink, 0.16)}, inset 0 1px 0 rgba(255,255,255,0.6)`;
   const cid = "s3d" + Math.random().toString(36).slice(2, 8);
   const framesJson = JSON.stringify(frames || []).replace(/'/g, "&#39;");
   const vidEsc = videoUrl ? esc(videoUrl) : "";
@@ -48,30 +65,29 @@ ${cardsHtml}
   </div>
 </section>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Manrope:wght@400;500;600&display=swap');
-.${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;background:#050505;}
-.${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:#050505;perspective:1400px;perspective-origin:50% 42%;}
+${themeImport(th)}
+.${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;background:${th.bg};}
+.${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:${th.bg};perspective:1400px;perspective-origin:50% 42%;}
 .${cid}-canvas,.${cid}-video{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;transform:scale(1.06);object-fit:cover;}
 .${cid}-veil{position:absolute;inset:0;z-index:1;pointer-events:none;background:
-  radial-gradient(ellipse 70% 55% at 50% 40%,rgba(0,0,0,0.15) 0%,rgba(0,0,0,0.55) 70%,rgba(0,0,0,0.82) 100%),
-  linear-gradient(180deg,rgba(0,0,0,0.35) 0%,rgba(0,0,0,0.1) 35%,rgba(0,0,0,0.55) 100%);}
+  ${veil};}
 .${cid}-glow{position:absolute;inset:0;z-index:1;pointer-events:none;opacity:.55;background:
-  radial-gradient(circle at 20% 20%,rgba(120,160,255,0.18),transparent 42%),
-  radial-gradient(circle at 80% 70%,rgba(255,140,90,0.12),transparent 40%);}
+  radial-gradient(circle at 20% 20%,${alpha(th.accent, 0.18)},transparent 42%),
+  radial-gradient(circle at 80% 70%,${alpha(th.accent2, 0.12)},transparent 40%);}
 .${cid}-stage{position:absolute;inset:0;z-index:2;display:grid;place-items:center;transform-style:preserve-3d;pointer-events:none;}
 .${cid}-card{position:absolute;width:min(86vw,560px);transform-style:preserve-3d;will-change:transform,opacity;opacity:0;pointer-events:none;}
 .${cid}-card__inner{padding:clamp(28px,4.5vw,48px) clamp(26px,4vw,44px);border-radius:28px;
-  background:linear-gradient(155deg,rgba(255,255,255,0.16) 0%,rgba(255,255,255,0.06) 45%,rgba(255,255,255,0.03) 100%);
-  border:1px solid rgba(255,255,255,0.22);
-  box-shadow:0 30px 80px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.25);
+  background:${cardBg};
+  border:1px solid ${cardBorder};
+  box-shadow:${cardShadow};
   backdrop-filter:blur(18px) saturate(1.25);-webkit-backdrop-filter:blur(18px) saturate(1.25);
-  color:#fff;transform:translateZ(0);}
-.${cid}-card__num{display:block;font-family:ui-monospace,Menlo,monospace;font-size:.72rem;letter-spacing:.18em;opacity:.62;margin-bottom:1.1rem;}
-.${cid}-card__title{margin:0;font-family:'Syne',system-ui,sans-serif;font-weight:800;font-size:clamp(1.85rem,4.6vw,3.35rem);line-height:1.02;letter-spacing:-0.03em;text-shadow:0 8px 40px rgba(0,0,0,0.45);}
-.${cid}-card__body{margin:1rem 0 0;font-family:'Manrope',system-ui,sans-serif;font-size:clamp(.98rem,1.5vw,1.18rem);line-height:1.55;color:rgba(255,255,255,0.84);max-width:36ch;}
-.${cid}-hint{position:absolute;left:50%;bottom:max(22px,env(safe-area-inset-bottom));transform:translateX(-50%);z-index:3;display:flex;flex-direction:column;align-items:center;gap:8px;font-family:'Manrope',system-ui,sans-serif;font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:rgba(255,255,255,.55);transition:opacity .35s;pointer-events:none;}
-.${cid}-hint i{width:20px;height:32px;border:1.5px solid rgba(255,255,255,.35);border-radius:12px;position:relative;}
-.${cid}-hint i::after{content:"";position:absolute;left:50%;top:6px;width:3px;height:7px;border-radius:2px;background:#fff;transform:translateX(-50%);animation:${cid}-wheel 1.6s ease-in-out infinite;}
+  color:${ink};transform:translateZ(0);}
+.${cid}-card__num{display:block;font-family:ui-monospace,Menlo,monospace;color:${th.accent};font-size:.72rem;letter-spacing:.18em;opacity:.62;margin-bottom:1.1rem;}
+.${cid}-card__title{margin:0;${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(1.85rem,4.6vw,3.35rem)")};line-height:1.04;text-shadow:${themeTextShadow(th)};}
+.${cid}-card__body{margin:1rem 0 0;font-family:${th.body};font-size:clamp(.98rem,1.5vw,1.18rem);line-height:1.55;color:${alpha(ink, 0.84)};max-width:36ch;}
+.${cid}-hint{position:absolute;left:50%;bottom:max(22px,env(safe-area-inset-bottom));transform:translateX(-50%);z-index:3;display:flex;flex-direction:column;align-items:center;gap:8px;font-family:${th.body};font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:${alpha(ink, 0.6)};transition:opacity .35s;pointer-events:none;}
+.${cid}-hint i{width:20px;height:32px;border:1.5px solid ${alpha(ink, 0.38)};border-radius:12px;position:relative;}
+.${cid}-hint i::after{content:"";position:absolute;left:50%;top:6px;width:3px;height:7px;border-radius:2px;background:${ink};transform:translateX(-50%);animation:${cid}-wheel 1.6s ease-in-out infinite;}
 @keyframes ${cid}-wheel{0%{opacity:0;top:6px}35%{opacity:1}100%{opacity:0;top:16px}}
 @media (max-width:700px){
   .${cid}-card{width:min(92vw,420px);}

@@ -1,3 +1,4 @@
+import { type SiteTheme, themeOrDefault, themeImport, themeSize, themeHeadingCss, themeTextShadow, themeSubShadow, alpha } from "./site-theme";
 /**
  * «Погружение» — one Kling MP4 (15s) as fixed full-site background, scrubbed by
  * a dedicated 5-beat scroll track (≈3s of video per beat). Glass cards overlay
@@ -25,7 +26,9 @@ function padBeats(texts: Array<{ title: string; sub: string }>): Array<{ title: 
 export function buildImmersionGlassPendingHtml(
   videoPrompt: string,
   texts: Array<{ title: string; sub: string }>,
+  theme?: SiteTheme,
 ): string {
+  const th = themeOrDefault(theme, texts, videoPrompt);
   const tid = "igp" + Math.random().toString(36).slice(2, 8);
   const beats = padBeats(texts);
   const _pa = videoPrompt
@@ -36,25 +39,26 @@ export function buildImmersionGlassPendingHtml(
     beats.map((t) => `${t.title}::${t.sub}`).join("||"),
   )}"`;
 
-  return `<section id="craft-immersion-glass-pending" data-scroll-anim-pending="1" data-craft-scrollanim="1" data-layout="immersion"${_pa}${_sa}${_ta} style="position:relative;min-height:100vh;display:flex;align-items:center;justify-content:center;overflow:hidden;background:linear-gradient(145deg,#0a0c12 0%,#141820 45%,#0d1520 100%);">
+  return `<section id="craft-immersion-glass-pending" data-scroll-anim-pending="1" data-craft-scrollanim="1" data-layout="immersion"${_pa}${_sa}${_ta} style="position:relative;min-height:100vh;display:flex;align-items:center;justify-content:center;overflow:hidden;background:linear-gradient(145deg,${th.bg} 0%,${alpha(th.accent, th.dark ? 0.1 : 0.08)} 48%,${th.bg} 100%),${th.bg};">
 <style>
+${themeImport(th)}
 @keyframes ${tid}-spin{to{transform:rotate(360deg)}}
 @keyframes ${tid}-pulse{0%,100%{opacity:.4}50%{opacity:1}}
 @keyframes ${tid}-bar{0%{width:0%}100%{width:78%}}
 @keyframes ${tid}-fade{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 </style>
-<div style="text-align:center;color:#F4F0EA;z-index:2;padding:40px;max-width:560px;animation:${tid}-fade .65s ease both;">
-  <div style="display:inline-flex;align-items:center;gap:14px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:18px;padding:18px 26px;margin-bottom:1.3rem;backdrop-filter:blur(16px);">
-    <div style="width:34px;height:34px;border:2.5px solid rgba(255,255,255,.12);border-top-color:#7EB8FF;border-radius:50%;flex-shrink:0;animation:${tid}-spin .9s linear infinite;"></div>
+<div style="text-align:center;color:${th.ink};font-family:${th.body};z-index:2;padding:40px;max-width:560px;animation:${tid}-fade .65s ease both;">
+  <div style="display:inline-flex;align-items:center;gap:14px;background:${alpha(th.ink, 0.06)};border:1px solid ${alpha(th.ink, 0.12)};border-radius:18px;padding:18px 26px;margin-bottom:1.3rem;backdrop-filter:blur(16px);">
+    <div style="width:34px;height:34px;border:2.5px solid ${alpha(th.ink, 0.12)};border-top-color:${th.accent};border-radius:50%;flex-shrink:0;animation:${tid}-spin .9s linear infinite;"></div>
     <div style="text-align:left;">
-      <div style="font-size:.95rem;font-weight:600;margin-bottom:2px;">Рендерим кинематографичный фон…</div>
-      <div style="font-size:.8rem;color:rgba(244,240,234,.5);">Kling · 15 сек · 5 сцен × 3 сек · обычно 10–25 минут</div>
+      <div style="${themeHeadingCss(th)}font-size:${themeSize(th, ".95rem")};margin-bottom:2px;">Рендерим кинематографичный фон…</div>
+      <div style="font-size:.8rem;color:${alpha(th.ink, 0.55)};">Kling · 15 сек · 5 сцен × 3 сек · обычно 10–25 минут</div>
     </div>
   </div>
-  <div style="width:220px;height:3px;background:rgba(255,255,255,.08);border-radius:99px;margin:0 auto 1.2rem;overflow:hidden;">
-    <div style="height:100%;background:linear-gradient(90deg,#7EB8FF,#A78BFA);border-radius:99px;animation:${tid}-bar 16s cubic-bezier(.4,0,.2,1) forwards;"></div>
+  <div style="width:220px;height:3px;background:${alpha(th.ink, 0.08)};border-radius:99px;margin:0 auto 1.2rem;overflow:hidden;">
+    <div style="height:100%;background:linear-gradient(90deg,${th.accent},${th.accent2});border-radius:99px;animation:${tid}-bar 16s cubic-bezier(.4,0,.2,1) forwards;"></div>
   </div>
-  <div style="font-size:.78rem;color:rgba(244,240,234,.32);line-height:1.6;animation:${tid}-pulse 2.4s ease-in-out infinite;">Стекло-секции уже на странице — прокрутите вниз ↓</div>
+  <div style="font-size:.78rem;color:${alpha(th.ink, 0.4)};line-height:1.6;animation:${tid}-pulse 2.4s ease-in-out infinite;">Стекло-секции уже на странице — прокрутите вниз ↓</div>
 </div>
 </section>`;
 }
@@ -64,7 +68,22 @@ export function buildImmersionGlassHtml(
   texts: Array<{ title: string; sub: string }>,
   navCtl: string,
   esc: (s: string) => string,
+  theme?: SiteTheme,
 ): string {
+  const th = themeOrDefault(theme, texts);
+  // Текст поверх видео: на тёмной теме — белый под чёрной вуалью и белым стеклом, на светлой — чернила под вуалью и стеклом цвета фона.
+  const overInk = th.dark ? "#fff" : th.ink;
+  const veil = th.dark
+    ? "radial-gradient(ellipse 78% 62% at 50% 42%,rgba(0,0,0,.1) 0%,rgba(0,0,0,.42) 70%,rgba(0,0,0,.7) 100%),\n  linear-gradient(180deg,rgba(0,0,0,.32) 0%,rgba(0,0,0,.06) 42%,rgba(0,0,0,.58) 100%)"
+    : `radial-gradient(ellipse 78% 62% at 50% 42%,${alpha(th.bg, 0.08)} 0%,${alpha(th.bg, 0.38)} 70%,${alpha(th.bg, 0.66)} 100%),\n  linear-gradient(180deg,${alpha(th.bg, 0.3)} 0%,${alpha(th.bg, 0.06)} 42%,${alpha(th.bg, 0.55)} 100%)`;
+  const glass = th.dark
+    ? "linear-gradient(155deg,rgba(255,255,255,.14) 0%,rgba(255,255,255,.05) 55%,rgba(255,255,255,.03) 100%)"
+    : `linear-gradient(155deg,${alpha(th.bg, 0.82)} 0%,${alpha(th.bg, 0.66)} 55%,${alpha(th.bg, 0.58)} 100%)`;
+  const glassBorder = th.dark ? "rgba(255,255,255,.18)" : alpha(th.ink, 0.1);
+  const glassShadow = th.dark
+    ? "0 18px 50px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.22)"
+    : `0 18px 50px ${alpha(th.ink, 0.12)}, inset 0 1px 0 rgba(255,255,255,.5)`;
+  const pageShadow = th.dark ? "0 1px 14px rgba(0,0,0,.25)" : `0 1px 12px ${alpha(th.bg, 0.45)}`;
   const cid = "ig" + Math.random().toString(36).slice(2, 8);
   const vid = esc(videoUrl || "");
   const beats = padBeats(texts);
@@ -105,8 +124,8 @@ ${cardsHtml}
   </div>
 </section>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Manrope:wght@400;500;600&display=swap');
-html.craft-immersion-site,body.craft-immersion-site{background:#05070c!important;min-height:100%;}
+${themeImport(th)}
+html.craft-immersion-site,body.craft-immersion-site{background:${th.bg}!important;min-height:100%;}
 /* Force sticky top nav — must not scroll away with the page */
 body.craft-immersion-site header,
 html.craft-immersion-site header,
@@ -120,23 +139,22 @@ body.craft-immersion-site [data-site-header]{
   z-index:1000!important;
   transform:none!important;
 }
-.${cid}-bg{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;background:#05070c;}
+.${cid}-bg{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;background:${th.bg};}
 .${cid}-video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scale(1.03);will-change:transform;}
 .${cid}-veil{position:absolute;inset:0;background:
-  radial-gradient(ellipse 78% 62% at 50% 42%,rgba(0,0,0,.1) 0%,rgba(0,0,0,.42) 70%,rgba(0,0,0,.7) 100%),
-  linear-gradient(180deg,rgba(0,0,0,.32) 0%,rgba(0,0,0,.06) 42%,rgba(0,0,0,.58) 100%);
+  ${veil};
   pointer-events:none;}
-.${cid}-progress{position:fixed;top:0;left:0;right:0;height:2px;z-index:900;pointer-events:none;background:rgba(255,255,255,.06);}
-.${cid}-progress__bar{display:block;height:100%;width:0%;background:linear-gradient(90deg,#9ecbff,#fff);box-shadow:0 0 12px rgba(158,203,255,.45);}
+.${cid}-progress{position:fixed;top:0;left:0;right:0;height:2px;z-index:900;pointer-events:none;background:${alpha(overInk, 0.08)};}
+.${cid}-progress__bar{display:block;height:100%;width:0%;background:linear-gradient(90deg,${th.accent},${th.accent2});box-shadow:0 0 12px ${alpha(th.accent, 0.45)};}
 .${cid}-track{position:relative;z-index:1;height:500vh;margin:0;padding:0;}
 .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;box-sizing:border-box;
   display:grid;grid-template-rows:1fr auto;align-items:stretch;
   padding:clamp(72px,10vh,110px) clamp(16px,4vw,48px) clamp(28px,5vh,56px);}
-.${cid}-beat{align-self:end;justify-self:start;max-width:min(560px,92vw);color:#fff;z-index:3;
+.${cid}-beat{align-self:end;justify-self:start;max-width:min(560px,92vw);color:${overInk};z-index:3;
   transition:opacity .35s ease,transform .45s cubic-bezier(.22,1,.36,1);}
 .${cid}-beat.is-swap{opacity:0;transform:translateY(14px);}
-.${cid}-beat__title{margin:0;font-family:'Syne',system-ui,sans-serif;font-size:clamp(1.85rem,5vw,3.6rem);font-weight:800;letter-spacing:-.035em;line-height:1.02;text-shadow:0 10px 48px rgba(0,0,0,.55);}
-.${cid}-beat__sub{margin:.7rem 0 0;max-width:38ch;font-family:'Manrope',system-ui,sans-serif;font-size:clamp(.95rem,1.55vw,1.15rem);line-height:1.5;color:rgba(255,255,255,.88);text-shadow:0 2px 18px rgba(0,0,0,.45);}
+.${cid}-beat__title{margin:0;${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(1.85rem,5vw,3.6rem)")};line-height:1.02;text-shadow:${themeTextShadow(th)};}
+.${cid}-beat__sub{margin:.7rem 0 0;max-width:38ch;font-family:${th.body};font-size:clamp(.95rem,1.55vw,1.15rem);line-height:1.5;color:${alpha(overInk, 0.88)};text-shadow:${themeSubShadow(th)};}
 .${cid}-cards{position:absolute;inset:clamp(72px,10vh,110px) clamp(16px,4vw,48px) clamp(100px,14vh,140px);pointer-events:none;z-index:2;}
 .${cid}-card{
   position:absolute;top:50%;transform:translateY(-50%) translateY(18px);
@@ -144,22 +162,22 @@ body.craft-immersion-site [data-site-header]{
   max-height:35vh;overflow:hidden;
   padding:clamp(14px,2vw,22px) clamp(16px,2.2vw,26px);
   border-radius:22px;
-  background:linear-gradient(155deg,rgba(255,255,255,.14) 0%,rgba(255,255,255,.05) 55%,rgba(255,255,255,.03) 100%);
-  border:1px solid rgba(255,255,255,.18);
-  box-shadow:0 18px 50px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.22);
+  background:${glass};
+  border:1px solid ${glassBorder};
+  box-shadow:${glassShadow};
   backdrop-filter:blur(18px) saturate(1.3);-webkit-backdrop-filter:blur(18px) saturate(1.3);
-  color:#fff;opacity:0;pointer-events:none;
+  color:${overInk};opacity:0;pointer-events:none;
   transition:opacity .45s ease,transform .55s cubic-bezier(.22,1,.36,1);
 }
 .${cid}-card[data-side="left"]{left:0;right:auto;}
 .${cid}-card[data-side="right"]{right:0;left:auto;}
 .${cid}-card.is-on{opacity:1;transform:translateY(-50%) translateY(0);pointer-events:auto;}
-.${cid}-card__idx{display:block;font-family:'Manrope',system-ui,sans-serif;font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:rgba(255,255,255,.55);margin-bottom:.45rem;}
-.${cid}-card__title{margin:0;font-family:'Syne',system-ui,sans-serif;font-size:clamp(1.05rem,2vw,1.45rem);font-weight:700;letter-spacing:-.02em;line-height:1.15;}
-.${cid}-card__sub{margin:.45rem 0 0;font-family:'Manrope',system-ui,sans-serif;font-size:clamp(.82rem,1.2vw,.95rem);line-height:1.45;color:rgba(255,255,255,.82);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
-.${cid}-hint{justify-self:center;align-self:end;z-index:3;display:inline-flex;flex-direction:column;align-items:center;gap:8px;font-family:'Manrope',system-ui,sans-serif;font-size:.66rem;letter-spacing:.16em;text-transform:uppercase;color:rgba(255,255,255,.55);transition:opacity .35s ease;}
-.${cid}-hint i{width:20px;height:32px;border:1.5px solid rgba(255,255,255,.35);border-radius:12px;position:relative;}
-.${cid}-hint i::after{content:"";position:absolute;left:50%;top:6px;width:3px;height:7px;border-radius:2px;background:#fff;transform:translateX(-50%);animation:${cid}-wheel 1.6s ease-in-out infinite;}
+.${cid}-card__idx{display:block;font-family:${th.body};font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;color:${th.dark ? "rgba(255,255,255,.55)" : th.accent};margin-bottom:.45rem;}
+.${cid}-card__title{margin:0;${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(1.05rem,2vw,1.45rem)")};line-height:1.15;}
+.${cid}-card__sub{margin:.45rem 0 0;font-family:${th.body};font-size:clamp(.82rem,1.2vw,.95rem);line-height:1.45;color:${alpha(overInk, 0.82)};display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
+.${cid}-hint{justify-self:center;align-self:end;z-index:3;display:inline-flex;flex-direction:column;align-items:center;gap:8px;font-family:${th.body};font-size:.66rem;letter-spacing:.16em;text-transform:uppercase;color:${alpha(overInk, 0.6)};transition:opacity .35s ease;}
+.${cid}-hint i{width:20px;height:32px;border:1.5px solid ${alpha(overInk, 0.4)};border-radius:12px;position:relative;}
+.${cid}-hint i::after{content:"";position:absolute;left:50%;top:6px;width:3px;height:7px;border-radius:2px;background:${th.dark ? "#fff" : th.accent};transform:translateX(-50%);animation:${cid}-wheel 1.6s ease-in-out infinite;}
 @keyframes ${cid}-wheel{0%{opacity:0;top:6px}35%{opacity:1}100%{opacity:0;top:16px}}
 
 body.craft-immersion-site > *:not(#craft-immersion-bg):not(.${cid}-progress):not(#site-preloader){position:relative;z-index:1;}
@@ -183,12 +201,12 @@ body.craft-immersion-site .review,
 body.craft-immersion-site .testimonial,
 body.craft-immersion-site form,
 body.craft-immersion-site .glass{
-  background:linear-gradient(155deg,rgba(255,255,255,.13) 0%,rgba(255,255,255,.05) 55%,rgba(255,255,255,.03) 100%)!important;
-  border:1px solid rgba(255,255,255,.18)!important;
-  box-shadow:0 20px 60px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.2)!important;
+  background:${glass}!important;
+  border:1px solid ${glassBorder}!important;
+  box-shadow:${glassShadow}!important;
   backdrop-filter:blur(18px) saturate(1.3)!important;-webkit-backdrop-filter:blur(18px) saturate(1.3)!important;
   border-radius:22px;
-  color:#fff;
+  color:${overInk};
   max-height:none;
 }
 /* Keep post-track cards from covering the video too aggressively */
@@ -198,7 +216,7 @@ body.craft-immersion-site section:not(.${cid}-track) article:not(.${cid}-card){
 }
 body.craft-immersion-site h1,body.craft-immersion-site h2,body.craft-immersion-site h3,
 body.craft-immersion-site p,body.craft-immersion-site li,body.craft-immersion-site a,body.craft-immersion-site span,body.craft-immersion-site label{
-  text-shadow:0 1px 14px rgba(0,0,0,.25);
+  text-shadow:${pageShadow};
 }
 @media (max-width:720px){
   .${cid}-sticky{padding-top:clamp(78px,12vh,120px);}

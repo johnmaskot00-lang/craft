@@ -1,3 +1,4 @@
+import { type SiteTheme, themeOrDefault, themeImport, themeSize, themeHeadingCss, alpha } from "./site-theme";
 /**
  * Scroll-world immersion pipeline (architecture B: dive-in + aerial connectors).
  *
@@ -29,12 +30,6 @@ const STILL_DEADLINE_MS = 3 * 60 * 1000;
 const MAX_CLIP_ATTEMPTS = 3;
 const MAX_STILL_ATTEMPTS = 4;
 const PROMPT_MAX = 2500;
-
-/** Neutral luxury theme — matches scroll-world professional landing pages. */
-const SW_BG = "#F4F0EA";
-const SW_INK = "#1a1510";
-const SW_INK_SOFT = "#6a6258";
-const SW_ACCENT_DEFAULT = "#8B7355";
 
 const SECTION_ACCENTS = [
   "#8B7355", // warm gold
@@ -772,7 +767,9 @@ body:not(.craft-anim-passed) header{visibility:hidden!important;opacity:0!import
 export function buildImmersionPendingHtml(
   videoPrompt: string,
   texts: SwText[],
+  theme?: SiteTheme,
 ): string {
+  const th = themeOrDefault(theme, texts, videoPrompt);
   const tid = "swp" + Math.random().toString(36).slice(2, 8);
   const _pa = videoPrompt
     ? ` data-scroll-anim-prompt="${encodeURIComponent(videoPrompt)}"`
@@ -784,26 +781,27 @@ export function buildImmersionPendingHtml(
       )}"`
     : "";
 
-  return `<section id="craft-scroll-world-pending" data-scroll-anim-pending="1" data-craft-scrollanim="1" data-layout="immersion"${_pa}${_sa}${_ta} style="position:relative;height:100vh;min-height:600px;background:linear-gradient(145deg,#1a1510 0%,#2a2218 40%,#16213e 100%);display:flex;align-items:center;justify-content:center;overflow:hidden;">
+  return `<section id="craft-scroll-world-pending" data-scroll-anim-pending="1" data-craft-scrollanim="1" data-layout="immersion"${_pa}${_sa}${_ta} style="position:relative;height:100vh;min-height:600px;background:linear-gradient(145deg,${th.bg} 0%,${alpha(th.accent, th.dark ? 0.1 : 0.08)} 48%,${th.bg} 100%),${th.bg};display:flex;align-items:center;justify-content:center;overflow:hidden;">
 <style>
+${themeImport(th)}
 @keyframes ${tid}-spin{to{transform:rotate(360deg)}}
 @keyframes ${tid}-pulse{0%,100%{opacity:.45}50%{opacity:1}}
 @keyframes ${tid}-bar{0%{width:0%}100%{width:82%}}
 @keyframes ${tid}-fade{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
 @keyframes ${tid}-drift{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
 </style>
-<div style="text-align:center;color:#F4F0EA;z-index:2;padding:40px;max-width:580px;animation:${tid}-fade .7s ease both;">
-  <div style="display:inline-flex;align-items:center;gap:14px;background:rgba(244,240,234,.06);border:1px solid rgba(244,240,234,.12);border-radius:16px;padding:18px 28px;margin-bottom:1.4rem;animation:${tid}-drift 3.2s ease-in-out infinite;">
-    <div style="width:36px;height:36px;border:2.5px solid rgba(244,240,234,.12);border-top-color:#8B7355;border-radius:50%;flex-shrink:0;animation:${tid}-spin .95s linear infinite;"></div>
+<div style="text-align:center;color:${th.ink};font-family:${th.body};z-index:2;padding:40px;max-width:580px;animation:${tid}-fade .7s ease both;">
+  <div style="display:inline-flex;align-items:center;gap:14px;background:${alpha(th.ink, 0.06)};border:1px solid ${alpha(th.ink, 0.12)};border-radius:16px;padding:18px 28px;margin-bottom:1.4rem;animation:${tid}-drift 3.2s ease-in-out infinite;">
+    <div style="width:36px;height:36px;border:2.5px solid ${alpha(th.ink, 0.12)};border-top-color:${th.accent};border-radius:50%;flex-shrink:0;animation:${tid}-spin .95s linear infinite;"></div>
     <div style="text-align:left;">
-      <div style="font-size:.95rem;font-weight:600;color:#F4F0EA;margin-bottom:2px;">Собираем сцены…</div>
-      <div style="font-size:.8rem;color:rgba(244,240,234,.5);">Кинематографичные кадры и полёты — обычно 15–40 минут</div>
+      <div style="${themeHeadingCss(th)}font-size:${themeSize(th, ".95rem")};margin-bottom:2px;">Собираем сцены…</div>
+      <div style="font-size:.8rem;color:${alpha(th.ink, 0.55)};">Кинематографичные кадры и полёты — обычно 15–40 минут</div>
     </div>
   </div>
-  <div style="width:240px;height:3px;background:rgba(244,240,234,.08);border-radius:99px;margin:0 auto 1.4rem;overflow:hidden;">
-    <div style="height:100%;background:linear-gradient(90deg,#8B7355,#6B7C8F);border-radius:99px;animation:${tid}-bar 18s cubic-bezier(.4,0,.2,1) forwards;"></div>
+  <div style="width:240px;height:3px;background:${alpha(th.ink, 0.08)};border-radius:99px;margin:0 auto 1.4rem;overflow:hidden;">
+    <div style="height:100%;background:linear-gradient(90deg,${th.accent},${th.accent2});border-radius:99px;animation:${tid}-bar 18s cubic-bezier(.4,0,.2,1) forwards;"></div>
   </div>
-  <div style="font-size:.78rem;color:rgba(244,240,234,.32);line-height:1.6;animation:${tid}-pulse 2.6s ease-in-out infinite;">Страница обновится автоматически.<br>Остальные секции уже готовы — прокрутите вниз ↓</div>
+  <div style="font-size:.78rem;color:${alpha(th.ink, 0.4)};line-height:1.6;animation:${tid}-pulse 2.6s ease-in-out infinite;">Страница обновится автоматически.<br>Остальные секции уже готовы — прокрутите вниз ↓</div>
 </div>
 ${IMMERSION_NAV_CTL}
 </section>`;
@@ -814,8 +812,10 @@ function buildImmersionHtml(opts: {
   stillUrls: string[];
   diveUrls: string[];
   connectorUrls: Array<string | null>;
+  theme?: SiteTheme;
 }): string {
   const { scenes, stillUrls, diveUrls, connectorUrls } = opts;
+  const th = themeOrDefault(opts.theme, scenes.map((s) => ({ title: s.title, sub: s.body })));
 
   const sections = scenes.map((s, i) => ({
     id: s.id,
@@ -856,14 +856,15 @@ function buildImmersionHtml(opts: {
     .replace(/>/g, "\\u003e")
     .replace(/<\/script/gi, "<\\/script");
 
-  return `<section id="craft-scroll-world-root" data-craft-scrollanim="1" data-layout="immersion" style="position:relative;width:100%;isolation:isolate;--sw-bg:${SW_BG};--sw-ink:${SW_INK};--sw-ink-soft:${SW_INK_SOFT};--sw-accent:${SW_ACCENT_DEFAULT};background:${SW_BG};color:${SW_INK};">
+  return `<section id="craft-scroll-world-root" data-craft-scrollanim="1" data-layout="immersion" style="position:relative;width:100%;isolation:isolate;--sw-bg:${th.bg};--sw-ink:${th.ink};--sw-ink-soft:${th.muted};--sw-accent:${th.accent};background:${th.bg};color:${th.ink};font-family:${th.body};">
 <div id="craft-scroll-world" style="width:100%;"></div>
 <style>
+${themeImport(th)}
 #craft-scroll-world-root, #craft-scroll-world-root .sw-root {
-  --sw-bg: ${SW_BG};
-  --sw-ink: ${SW_INK};
-  --sw-ink-soft: ${SW_INK_SOFT};
-  --sw-accent: ${SW_ACCENT_DEFAULT};
+  --sw-bg: ${th.bg};
+  --sw-ink: ${th.ink};
+  --sw-ink-soft: ${th.muted};
+  --sw-accent: ${th.accent};
 }
 #craft-scroll-world-root .sw-root { background: var(--sw-bg); }
 #craft-scroll-world-root .sw-topbar { justify-content: center; }
@@ -895,6 +896,7 @@ export async function generateScrollWorld(opts: {
   videoPrompt: string;
   texts: SwText[];
   deps: GenerateScrollWorldDeps;
+  theme?: SiteTheme;
 }): Promise<{ html: string; mp4Urls: string[]; stillUrls: string[] } | null> {
   const { deps } = opts;
   const { shouldStop } = deps;
@@ -1073,6 +1075,7 @@ export async function generateScrollWorld(opts: {
       stillUrls,
       diveUrls,
       connectorUrls,
+      theme: opts.theme || themeOrDefault(undefined, opts.texts, opts.videoPrompt),
     });
 
     const mp4Urls = [

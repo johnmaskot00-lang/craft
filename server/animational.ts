@@ -1,3 +1,4 @@
+import { type SiteTheme, themeOrDefault, themeImport, themeSize, themeHeadingCss, themeTextShadow, themeOnAccent, alpha } from "./site-theme";
 /**
  * «Анимационный» mode — rebuilt from scratch.
  *
@@ -130,7 +131,8 @@ function aestheticOf(raw: string): AniAesthetic {
 }
 
 export function parseAnimationalMarker(inner: string): AnimationalBrief {
-  const parts = inner.split("|").map((p) => p.trim());
+  // "||" separates pairs inside a segment — split fields only on a lone "|".
+  const parts = inner.split(/(?<!\|)\|(?!\|)/).map((p) => p.trim());
   // Back-compat: old markers started with brand (no "3d"). Treat as 3d.
   let i = 0;
   let style: "3d" = "3d";
@@ -177,85 +179,61 @@ export function parseAnimationalMarker(inner: string): AnimationalBrief {
   };
 }
 
-function themeTokens(a: AniAesthetic): {
-  bg: string;
-  ink: string;
-  muted: string;
-  accent: string;
-  card: string;
-  fontDisplay: string;
-  fontBody: string;
-} {
-  if (a === "eco") {
-    return {
-      bg: "#F3EEE6",
-      ink: "#1C1915",
-      muted: "#6B6358",
-      accent: "#2F6B4F",
-      card: "rgba(28,25,21,0.05)",
-      fontDisplay: "Cormorant Garamond",
-      fontBody: "Manrope",
-    };
-  }
-  if (a === "industrial") {
-    return {
-      bg: "#0E1116",
-      ink: "#E8EDF2",
-      muted: "#8B95A3",
-      accent: "#D4FF4F",
-      card: "rgba(255,255,255,0.05)",
-      fontDisplay: "Syne",
-      fontBody: "Manrope",
-    };
-  }
-  return {
-    bg: "#0a0a0a",
-    ink: "#F5F5F5",
-    muted: "#9A9A9A",
-    accent: "#7DD3FC",
-    card: "rgba(255,255,255,0.05)",
-    fontDisplay: "Syne",
-    fontBody: "Manrope",
-  };
+/** Текст брифа для детекта темы, когда тему страницы не передали. */
+function animationalBriefText(b: AnimationalBrief): string {
+  const hint = b.aesthetic === "eco" ? "эко натуральный" : b.aesthetic === "industrial" ? "индустриальный техно" : "";
+  return [b.brand, b.tagline, b.videoPrompt, b.kinetic, hint].filter(Boolean).join(" ");
 }
 
-export function buildAnimationalPendingHtml(brandHint?: string, rawMarker?: string): string {
+export function buildAnimationalPendingHtml(brandHint?: string, rawMarker?: string, theme?: SiteTheme): string {
+  const th = themeOrDefault(theme, undefined, [brandHint, rawMarker].filter(Boolean).join(" "));
   const tid = "anip" + Math.random().toString(36).slice(2, 8);
   const styleAttr = ` data-scroll-anim-style="${encodeURIComponent("animational")}"`;
   const promptAttr = rawMarker
     ? ` data-scroll-anim-prompt="${encodeURIComponent(rawMarker)}"`
     : "";
   const label = brandHint ? esc(brandHint) : "3D Motion";
-  return `<section data-scroll-anim-pending="1" data-animational-pending="1" data-craft-scrollanim="1" data-layout="animational"${styleAttr}${promptAttr} style="min-height:100vh;display:grid;place-items:center;background:#0a0a0a;color:#F5F5F5;font-family:system-ui,sans-serif;text-align:center;padding:40px 24px">
-<style>@keyframes ${tid}-spin{to{transform:rotate(360deg)}}@keyframes ${tid}-bar{0%{width:0%}100%{width:78%}}</style>
+  return `<section data-scroll-anim-pending="1" data-animational-pending="1" data-craft-scrollanim="1" data-layout="animational"${styleAttr}${promptAttr} style="min-height:100vh;display:grid;place-items:center;background:${th.bg};color:${th.ink};font-family:${th.body};text-align:center;padding:40px 24px">
+<style>${themeImport(th)}@keyframes ${tid}-spin{to{transform:rotate(360deg)}}@keyframes ${tid}-bar{0%{width:0%}100%{width:78%}}</style>
 <div style="max-width:420px">
   <div style="font-size:.7rem;letter-spacing:.2em;text-transform:uppercase;opacity:.5;margin-bottom:12px">${label}</div>
-  <div style="width:36px;height:36px;margin:0 auto 18px;border:2px solid rgba(255,255,255,.12);border-top-color:#7DD3FC;border-radius:50%;animation:${tid}-spin .9s linear infinite"></div>
-  <div style="font-weight:700;font-size:1.05rem;margin-bottom:8px">Рендерим 3D canvas-scrub…</div>
+  <div style="width:36px;height:36px;margin:0 auto 18px;border:2px solid ${alpha(th.ink, 0.12)};border-top-color:${th.accent};border-radius:50%;animation:${tid}-spin .9s linear infinite"></div>
+  <div style="${themeHeadingCss(th)}font-size:${themeSize(th, "1.05rem")};margin-bottom:8px">Рендерим 3D canvas-scrub…</div>
   <div style="font-size:.82rem;opacity:.55;margin-bottom:18px">Kling → кадры → GSAP ScrollTrigger · обычно 10–25 мин</div>
-  <div style="width:220px;height:3px;margin:0 auto;background:rgba(255,255,255,.08);border-radius:99px;overflow:hidden">
-    <div style="height:100%;background:linear-gradient(90deg,#7DD3FC,#A78BFA);border-radius:99px;animation:${tid}-bar 18s cubic-bezier(.4,0,.2,1) forwards"></div>
+  <div style="width:220px;height:3px;margin:0 auto;background:${alpha(th.ink, 0.08)};border-radius:99px;overflow:hidden">
+    <div style="height:100%;background:linear-gradient(90deg,${th.accent},${th.accent2});border-radius:99px;animation:${tid}-bar 18s cubic-bezier(.4,0,.2,1) forwards"></div>
   </div>
 </div>
 </section>`;
 }
 
-export function buildAnimationalFallbackHtml(rawMarker: string): string {
+export function buildAnimationalFallbackHtml(rawMarker: string, theme?: SiteTheme): string {
   const brief = parseAnimationalMarker(rawMarker);
-  const t = themeTokens(brief.aesthetic);
-  return `<section data-craft-scrollanim="1" data-layout="animational" data-animational="1" style="min-height:100vh;background:${t.bg};color:${t.ink};font-family:system-ui,sans-serif;display:grid;place-items:center;text-align:center;padding:48px 24px">
+  const t = theme || themeOrDefault(undefined, brief.beats, animationalBriefText(brief));
+  return `<section data-scroll-anim-fallback="1" data-craft-scrollanim="1" data-layout="animational" data-animational="1" data-scroll-anim-style="animational" data-scroll-anim-prompt="${encodeURIComponent(rawMarker)}" style="min-height:100vh;background:${t.bg};color:${t.ink};font-family:${t.body};display:grid;place-items:center;text-align:center;padding:48px 24px">
+  <style>${themeImport(t)}</style>
   <div style="max-width:560px">
     <p style="letter-spacing:.2em;text-transform:uppercase;font-size:.7rem;opacity:.5;margin:0 0 12px">${esc(brief.brand)}</p>
-    <h1 style="margin:0 0 12px;font-size:clamp(1.8rem,5vw,3rem);letter-spacing:-.03em">${esc(brief.tagline)}</h1>
+    <h1 style="margin:0 0 12px;${themeHeadingCss(t)}font-size:${themeSize(t, "clamp(1.8rem,5vw,3rem)")};line-height:1.05">${esc(brief.tagline)}</h1>
     <p style="opacity:.65;line-height:1.5;margin:0">3D-анимация временно недоступна. Обновите страницу позже или пересоздайте сайт.</p>
   </div>
 </section>`;
 }
 
 /** Full baked site: canvas scrub hero + overlays + bento + kinetic + CTA. */
-export function buildAnimational3dHtml(frames: string[], brief: AnimationalBrief): string {
+export function buildAnimational3dHtml(frames: string[], brief: AnimationalBrief, theme?: SiteTheme): string {
   const cid = "a3d" + Math.random().toString(36).slice(2, 8);
-  const t = themeTokens(brief.aesthetic);
+  const th = theme || themeOrDefault(undefined, brief.beats, animationalBriefText(brief));
+  const t = { bg: th.bg, ink: th.ink, muted: th.muted, accent: th.accent, card: th.card };
+  const onAccent = themeOnAccent(th);
+  // Текст поверх кадров: на тёмной теме — белое стекло, на светлой — стекло цвета фона.
+  const overInk = th.dark ? "#fff" : th.ink;
+  const beatGlass = th.dark ? "rgba(0,0,0,.22)" : alpha(th.bg, 0.62);
+  const beatBorder = th.dark ? "rgba(255,255,255,.12)" : alpha(th.ink, 0.1);
+  const beatShadow = th.dark ? "0 18px 50px rgba(0,0,0,.28)" : `0 18px 50px ${alpha(th.ink, 0.12)}`;
+  const veil = th.dark
+    ? "radial-gradient(ellipse 70% 55% at 50% 45%,transparent 0%,rgba(0,0,0,.18) 62%,rgba(0,0,0,.55) 100%)"
+    : `radial-gradient(ellipse 70% 55% at 50% 45%,transparent 0%,${alpha(th.bg, 0.2)} 62%,${alpha(th.bg, 0.6)} 100%)`;
   const framesJson = JSON.stringify(frames).replace(/</g, "\\u003c");
   const brand = esc(brief.brand);
   const tagline = esc(brief.tagline);
@@ -275,11 +253,6 @@ export function buildAnimational3dHtml(frames: string[], brief: AnimationalBrief
     )
     .join("\n");
 
-  const fontLink =
-    brief.aesthetic === "eco"
-      ? "https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@600;700&family=Manrope:wght@400;500;600;700&display=swap"
-      : "https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Manrope:wght@400;500;600;700&display=swap";
-
   const beatHtml = beats
     .map(
       (b, i) => `<div class="${cid}-beat" data-beat="${i}" style="opacity:0">
@@ -293,7 +266,7 @@ export function buildAnimational3dHtml(frames: string[], brief: AnimationalBrief
 <!--craft-scrollanim-full-->
 <section id="${cid}-root" class="${cid}-root" data-craft-scrollanim="1" data-layout="animational" data-animational="1" data-ani-style="3d"
   data-frames='${framesJson}'
-  style="--bg:${t.bg};--ink:${t.ink};--muted:${t.muted};--accent:${t.accent};--card:${t.card};--font-d:'${t.fontDisplay}',serif;--font-b:'${t.fontBody}',system-ui,sans-serif">
+  style="--bg:${t.bg};--ink:${t.ink};--muted:${t.muted};--accent:${t.accent};--card:${t.card};--font-d:${th.display};--font-b:${th.body};--fw-d:${th.displayWeight};--ls-d:${th.displayTracking};--tt-d:${th.displayTransform}">
   <div class="${cid}-loader" id="${cid}-loader" aria-live="polite">
     <div class="${cid}-loader__inner">
       <div class="${cid}-loader__brand">${brand}</div>
@@ -333,13 +306,13 @@ ${feats}
   </footer>
 </section>
 <style>
-@import url('${fontLink}');
+${themeImport(th)}
 .${cid}-root{background:var(--bg);color:var(--ink);font-family:var(--font-b);overflow-x:clip;position:relative}
 .${cid}-root *{box-sizing:border-box}
 .${cid}-loader{position:fixed;inset:0;z-index:100;background:var(--bg);display:grid;place-items:center;transition:opacity .65s,visibility .65s}
 .${cid}-loader.is-done{opacity:0;visibility:hidden;pointer-events:none}
 .${cid}-loader__inner{width:min(280px,70vw);text-align:center}
-.${cid}-loader__brand{font-family:var(--font-d);font-weight:700;font-size:1.1rem;letter-spacing:-.02em;margin-bottom:1.2rem}
+.${cid}-loader__brand{font-family:var(--font-d);font-weight:var(--fw-d);font-size:1.1rem;letter-spacing:var(--ls-d);text-transform:var(--tt-d);margin-bottom:1.2rem}
 .${cid}-loader__bar{height:2px;background:color-mix(in srgb,var(--ink) 12%,transparent);border-radius:99px;overflow:hidden}
 .${cid}-loader__bar i{display:block;height:100%;width:0%;background:var(--accent)}
 .${cid}-loader__pct{margin-top:.7rem;font-size:.72rem;letter-spacing:.16em;opacity:.5}
@@ -347,20 +320,20 @@ ${feats}
 .${cid}-sticky{position:sticky;top:0;height:100vh;width:100%;overflow:hidden;background:var(--bg)}
 .${cid}-canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 .${cid}-veil{position:absolute;inset:0;pointer-events:none;background:
-  radial-gradient(ellipse 70% 55% at 50% 45%,transparent 0%,rgba(0,0,0,.18) 62%,rgba(0,0,0,.55) 100%)}
+  ${veil}}
 .${cid}-overlays{position:absolute;inset:0;z-index:2;pointer-events:none;display:grid;place-items:center;padding:clamp(72px,10vh,120px) clamp(16px,5vw,48px)}
-.${cid}-brand{position:absolute;top:clamp(72px,10vh,110px);left:50%;transform:translateX(-50%);margin:0;font-size:.68rem;letter-spacing:.28em;text-transform:uppercase;opacity:.55;color:#fff;text-shadow:0 2px 16px rgba(0,0,0,.45)}
-.${cid}-beat{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(640px,92vw);text-align:center;color:#fff;
+.${cid}-brand{position:absolute;top:clamp(72px,10vh,110px);left:50%;transform:translateX(-50%);margin:0;font-size:.68rem;letter-spacing:.28em;text-transform:uppercase;opacity:.7;color:${overInk};text-shadow:${themeTextShadow(th)}}
+.${cid}-beat{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(640px,92vw);text-align:center;color:${overInk};
   padding:1.1rem 1.25rem;border-radius:18px;
-  background:rgba(0,0,0,.22);border:1px solid rgba(255,255,255,.12);
+  background:${beatGlass};border:1px solid ${beatBorder};
   backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
-  box-shadow:0 18px 50px rgba(0,0,0,.28)}
-.${cid}-beat h2{margin:0;font-family:var(--font-d);font-weight:700;font-size:clamp(1.6rem,4.5vw,3.1rem);letter-spacing:-.035em;line-height:1.05;text-shadow:0 8px 40px rgba(0,0,0,.45)}
+  box-shadow:${beatShadow}}
+.${cid}-beat h2{margin:0;${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(1.6rem,4.5vw,3.1rem)")};line-height:1.05;text-shadow:${themeTextShadow(th)}}
 .${cid}-beat p{margin:.65rem auto 0;max-width:36ch;font-size:clamp(.92rem,1.5vw,1.1rem);line-height:1.5;opacity:.9}
-.${cid}-hint{position:absolute;bottom:clamp(28px,5vh,48px);left:50%;transform:translateX(-50%);font-size:.66rem;letter-spacing:.2em;text-transform:uppercase;color:rgba(255,255,255,.5);transition:opacity .35s}
+.${cid}-hint{position:absolute;bottom:clamp(28px,5vh,48px);left:50%;transform:translateX(-50%);font-size:.66rem;letter-spacing:.2em;text-transform:uppercase;color:${alpha(overInk, 0.55)};transition:opacity .35s}
 .${cid}-bento{padding:clamp(64px,12vh,140px) clamp(16px,5vw,64px);max-width:1120px;margin:0 auto}
 .${cid}-eyebrow{margin:0 0 .75rem;font-size:.68rem;letter-spacing:.22em;text-transform:uppercase;color:var(--muted)}
-.${cid}-section-h{margin:0 0 2rem;font-family:var(--font-d);font-weight:700;font-size:clamp(1.8rem,4vw,3rem);letter-spacing:-.03em;line-height:1.05;max-width:16ch}
+.${cid}-section-h{margin:0 0 2rem;${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(1.8rem,4vw,3rem)")};line-height:1.05;max-width:16ch}
 .${cid}-bento__grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}
 @media(min-width:900px){.${cid}-bento__grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:1.1rem}
 .${cid}-bento__card:first-child{grid-column:span 2}}
@@ -368,14 +341,14 @@ ${feats}
   backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
   transition:transform .45s cubic-bezier(.22,1,.36,1),border-color .35s,box-shadow .45s}
 .${cid}-bento__card:hover{transform:translateY(-4px) rotateX(2deg);border-color:color-mix(in srgb,var(--accent) 45%,transparent);box-shadow:0 18px 40px rgba(0,0,0,.18)}
-.${cid}-bento__card h3{margin:0 0 .45rem;font-family:var(--font-d);font-size:1.15rem;letter-spacing:-.02em}
+.${cid}-bento__card h3{margin:0 0 .45rem;font-family:var(--font-d);font-weight:var(--fw-d);font-size:1.15rem;letter-spacing:var(--ls-d)}
 .${cid}-bento__card p{margin:0;font-size:.9rem;line-height:1.5;color:var(--muted)}
 .${cid}-kinetic{overflow:hidden;border-block:1px solid color-mix(in srgb,var(--ink) 10%,transparent);padding:1.4rem 0;background:color-mix(in srgb,var(--ink) 3%,var(--bg))}
 .${cid}-kinetic__track{display:flex;width:max-content;gap:3rem;will-change:transform}
-.${cid}-kinetic__track span{font-family:var(--font-d);font-weight:800;font-size:clamp(2.2rem,8vw,5.5rem);letter-spacing:-.04em;text-transform:uppercase;white-space:nowrap;padding-inline:0.5rem}
+.${cid}-kinetic__track span{font-family:var(--font-d);font-weight:var(--fw-d);font-size:clamp(2.2rem,8vw,5.5rem);letter-spacing:var(--ls-d);text-transform:uppercase;white-space:nowrap;padding-inline:0.5rem}
 .${cid}-cta{padding:clamp(72px,14vh,160px) clamp(16px,5vw,64px);text-align:center}
-.${cid}-cta h2{margin:0 0 1.4rem;font-family:var(--font-d);font-weight:700;font-size:clamp(1.8rem,4.5vw,3.2rem);letter-spacing:-.03em}
-.${cid}-btn{display:inline-flex;align-items:center;justify-content:center;min-height:48px;padding:0 1.6rem;border-radius:999px;background:var(--accent);color:${brief.aesthetic === "eco" ? "#fff" : "#0a0a0a"};font-weight:700;text-decoration:none;font-size:.92rem;letter-spacing:-.01em;transition:transform .3s,filter .3s}
+.${cid}-cta h2{margin:0 0 1.4rem;${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(1.8rem,4.5vw,3.2rem)")}}
+.${cid}-btn{display:inline-flex;align-items:center;justify-content:center;min-height:48px;padding:0 1.6rem;border-radius:999px;background:var(--accent);color:${onAccent};font-weight:700;text-decoration:none;font-size:.92rem;letter-spacing:-.01em;transition:transform .3s,filter .3s}
 .${cid}-btn:hover{transform:translateY(-2px);filter:brightness(1.05)}
 .${cid}-cta p{margin:1.4rem 0 0;font-size:.72rem;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
 @media(max-width:700px){
@@ -419,7 +392,7 @@ ${feats}
       canvas.width=Math.floor(w*dpr); canvas.height=Math.floor(h*dpr);
     }
     ctx.setTransform(dpr,0,0,dpr,0,0);
-    ctx.fillStyle=getComputedStyle(root).getPropertyValue('--bg').trim()||'#0a0a0a';
+    ctx.fillStyle=getComputedStyle(root).getPropertyValue('--bg').trim()||'${th.bg}';
     ctx.fillRect(0,0,w,h);
     // contain
     var s=Math.min(w/img.naturalWidth, h/img.naturalHeight);
@@ -541,6 +514,7 @@ ${feats}
 export async function generateAnimationalSite(opts: {
   markerInner: string;
   deps: GenerateAnimationalDeps;
+  theme?: SiteTheme;
 }): Promise<{ html: string; frameCount: number } | null> {
   const { markerInner, deps } = opts;
   const brief = parseAnimationalMarker(markerInner);
@@ -556,6 +530,6 @@ export async function generateAnimationalSite(opts: {
     return null;
   }
   deps.onStatus?.(`Анимационный · 3D: собираем GSAP scrub (${outcome.frames.length} кадров)…`);
-  const html = buildAnimational3dHtml(outcome.frames, brief);
+  const html = buildAnimational3dHtml(outcome.frames, brief, opts.theme);
   return { html, frameCount: outcome.frames.length };
 }

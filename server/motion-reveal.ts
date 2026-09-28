@@ -1,3 +1,4 @@
+import { type SiteTheme, themeOrDefault, themeImport, themeSize, themeHeadingCss, themeTextShadow, themeSubShadow, alpha } from "./site-theme";
 /**
  * «Моушн» — WebGL mouse-trail image reveal (Lando Norris / Unicorn Studio style).
  *
@@ -390,7 +391,14 @@ export function buildMotionRevealHtml(
   navCtl: string,
   esc: (s: string) => string,
   mobile?: { baseUrl?: string; revealUrl?: string },
+  theme?: SiteTheme,
 ): string {
+  const th = themeOrDefault(theme, texts);
+  // Текст поверх кадров: на тёмной теме — белый под чёрной вуалью, на светлой — чернила под вуалью цвета фона.
+  const overInk = th.dark ? "#fff" : th.ink;
+  const veil = th.dark
+    ? "radial-gradient(ellipse 65% 55% at 50% 42%,rgba(0,0,0,0.08) 0%,rgba(0,0,0,0.45) 72%,rgba(0,0,0,0.72) 100%),\n  linear-gradient(180deg,rgba(0,0,0,0.28) 0%,rgba(0,0,0,0.05) 40%,rgba(0,0,0,0.55) 100%)"
+    : `radial-gradient(ellipse 65% 55% at 50% 42%,${alpha(th.bg, 0.06)} 0%,${alpha(th.bg, 0.4)} 72%,${alpha(th.bg, 0.68)} 100%),\n  linear-gradient(90deg,${alpha(th.bg, 0.55)} 0%,${alpha(th.bg, 0.12)} 50%,${alpha(th.bg, 0)} 100%)`;
   const cid = "mot" + Math.random().toString(36).slice(2, 8);
   const cards = (texts.length ? texts : [{ title: "", sub: "" }]).slice(0, 5);
   const n = Math.max(1, cards.length);
@@ -440,28 +448,28 @@ ${layers}
   </div>
 </section>
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Manrope:wght@400;500;600&display=swap');
-.${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;background:#050505;}
-.${cid}-sticky{position:sticky;top:0;height:100vh;height:100dvh;width:100%;overflow:hidden;background:#050505;cursor:none;}
+${themeImport(th)}
+.${cid}-scroll{position:relative;height:${scrollVh}vh;margin:0;padding:0;background:${th.bg};}
+.${cid}-sticky{position:sticky;top:0;height:100vh;height:100dvh;width:100%;overflow:hidden;background:${th.bg};cursor:none;}
 .${cid}-canvas{position:absolute;inset:0;width:100%;height:100%;display:block;z-index:0;touch-action:pan-y;}
 .${cid}-veil{position:absolute;inset:0;z-index:1;pointer-events:none;background:
-  radial-gradient(ellipse 65% 55% at 50% 42%,rgba(0,0,0,0.08) 0%,rgba(0,0,0,0.45) 72%,rgba(0,0,0,0.72) 100%),
-  linear-gradient(180deg,rgba(0,0,0,0.28) 0%,rgba(0,0,0,0.05) 40%,rgba(0,0,0,0.55) 100%);}
+  ${veil};}
 .${cid}-overlays{position:absolute;inset:0;z-index:2;pointer-events:none;}
-.${cid}-text{position:absolute;left:clamp(28px,5.5vw,96px);top:50%;transform:translateY(-50%);width:min(46vw,640px);text-align:left;opacity:0;color:#fff;will-change:opacity,transform;}
-.${cid}-text h2{margin:0;font-family:'Syne',system-ui,sans-serif;font-weight:800;font-size:clamp(2rem,5.2vw,4rem);line-height:1.02;letter-spacing:-0.03em;text-shadow:0 10px 48px rgba(0,0,0,0.55);}
-.${cid}-text p{margin:1rem 0 0;max-width:38ch;font-family:'Manrope',system-ui,sans-serif;font-size:clamp(1rem,1.6vw,1.22rem);line-height:1.55;color:rgba(255,255,255,0.82);text-shadow:0 4px 24px rgba(0,0,0,0.45);}
-.${cid}-hint{position:absolute;left:50%;bottom:max(22px,env(safe-area-inset-bottom));transform:translateX(-50%);z-index:3;display:flex;flex-direction:column;align-items:center;gap:8px;font-family:'Manrope',system-ui,sans-serif;font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:rgba(255,255,255,.55);transition:opacity .4s;pointer-events:none;}
+.${cid}-text{position:absolute;left:clamp(28px,5.5vw,96px);top:50%;transform:translateY(-50%);width:min(46vw,640px);text-align:left;opacity:0;color:${overInk};will-change:opacity,transform;}
+.${cid}-text h2{margin:0;${themeHeadingCss(th)}font-size:${themeSize(th, "clamp(2rem,5.2vw,4rem)")};line-height:1.02;text-shadow:${themeTextShadow(th)};}
+.${cid}-text h2::after{content:"";display:block;width:56px;height:3px;margin-top:16px;border-radius:2px;background:${th.accent};}
+.${cid}-text p{margin:1rem 0 0;max-width:38ch;font-family:${th.body};font-size:clamp(1rem,1.6vw,1.22rem);line-height:1.55;color:${alpha(overInk, 0.84)};text-shadow:${themeSubShadow(th)};}
+.${cid}-hint{position:absolute;left:50%;bottom:max(22px,env(safe-area-inset-bottom));transform:translateX(-50%);z-index:3;display:flex;flex-direction:column;align-items:center;gap:8px;font-family:${th.body};font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:${alpha(overInk, 0.6)};transition:opacity .4s;pointer-events:none;}
 .${cid}-hint-mob{display:none;}
-.${cid}-hint i{width:28px;height:28px;border:1.5px solid rgba(255,255,255,.35);border-radius:50%;position:relative;}
-.${cid}-hint i::after{content:"";position:absolute;left:50%;top:50%;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;background:#fff;animation:${cid}-pulse 1.4s ease-in-out infinite;}
+.${cid}-hint i{width:28px;height:28px;border:1.5px solid ${alpha(overInk, 0.4)};border-radius:50%;position:relative;}
+.${cid}-hint i::after{content:"";position:absolute;left:50%;top:50%;width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;background:${th.accent};animation:${cid}-pulse 1.4s ease-in-out infinite;}
 @keyframes ${cid}-pulse{0%,100%{transform:scale(.7);opacity:.35}50%{transform:scale(1.15);opacity:1}}
 @media (max-width:700px),(hover:none) and (pointer:coarse){
   .${cid}-scroll{height:${Math.max(180, Math.min(320, Math.round(n * 70 + 90)))}vh;}
   .${cid}-sticky{cursor:auto;touch-action:pan-y;}
   .${cid}-canvas{touch-action:pan-y;pointer-events:none;}
   .${cid}-text{left:20px;right:20px;top:18%;transform:none;width:auto;text-align:left;}
-  .${cid}-text h2{font-size:clamp(1.65rem,8vw,2.4rem);}
+  .${cid}-text h2{font-size:${themeSize(th, "clamp(1.65rem,8vw,2.4rem)")};}
   .${cid}-hint-desk{display:none;}
   .${cid}-hint-mob{display:inline;}
   .${cid}-hint i{width:18px;height:28px;border-radius:10px;}
