@@ -3379,9 +3379,9 @@ function getContentTypeInstructions(contentType: string | undefined, keyQuestion
 
   const structures: Record<string, string> = {
     guide: `CONTENT TYPE: Comprehensive Guide
-- Start with a strong lead paragraph, then go straight into 5-6 H2 sections (beginner-friendly first, advanced last)
-- Each section has practical examples, data points, or real-world scenarios
-- Add 1-2 <blockquote> with expert-sounding insights`,
+- Start with a lead that answers the query, then 4-7 H2 sections as the topic needs (beginner-friendly first, advanced last)
+- Each section has practical examples, concrete steps or real-world scenarios — never padding
+- A <blockquote> may hold the magazine's own conclusion; never attribute quotes to invented experts or people`,
 
     tutorial: `CONTENT TYPE: Step-by-Step Tutorial
 - Strong lead, then prerequisites (1-2 sentences)
@@ -3406,7 +3406,7 @@ function getContentTypeInstructions(contentType: string | undefined, keyQuestion
 - Verdict box: <div class="verdict-box"><h3>Итог</h3><p>…</p></div>`,
 
     listicle: `CONTENT TYPE: Listicle / Best-Of Article
-- Brief intro (2-3 sentences): methodology, what was tested, time/experience basis
+- Brief intro (2-3 sentences): the selection criteria used. Never claim personal testing, hours of use or experiments that did not happen
 - One H2 per list item (numbered: "1. …", "2. …")
 - Each item: 150-200 words + pros/cons mini list + "Кому подойдёт: …" sentence
 - Summary comparison table (class="comparison-table") after all items
@@ -3646,6 +3646,24 @@ async function generateArticleHtml(
   const hasReferral = !!safeUrl;
   const productName = hasReferral ? seoOfferProductName(offerNiche || cluster.name, offer.targetUrl) : "";
 
+  // Length follows intent: a glossary answer padded to 2500 words is exactly the
+  // "low-value" page search engines filter out.
+  const wordRange = ["glossary", "troubleshooting", "news", "checklist", "pricing"].includes(resolvedType)
+    ? "700-1400"
+    : ["tutorial", "explainer", "recipe", "place-guide", "profile", "opinion", "case-study"].includes(resolvedType)
+      ? "1200-2000"
+      : "1800-2800";
+  // Sibling queries in the same category — each gets its own page, so this one
+  // must not swallow them (cannibalisation splits rankings between both).
+  const siblings = cluster.keywords
+    .filter(k => k.slug !== kw.slug)
+    .slice(0, 15)
+    .map(k => `- ${k.keyword}`)
+    .join("\n");
+  const scopeRule = siblings
+    ? `SCOPE — these queries have their OWN pages on this site; do not cover them in depth here, mention in one sentence and link if a related link exists:\n${siblings}\n`
+    : "";
+
   const prompt = `You are a world-class editorial designer + SEO writer creating a PREMIUM WEB MAGAZINE article. Write ONLY the inner article HTML fragment — NO <!DOCTYPE>, NO <html>, NO <head>, NO <nav>, NO <footer>, NO <body>.
 
 KEYWORD: "${kw.keyword}"
@@ -3669,12 +3687,14 @@ You write the recommendation copy. Server only attaches the real link. Do not sp
 ${contentTypeBlock}
 
 CONTENT QUALITY (write in the same language as the keyword):
-- 2000-2800 genuinely informative words — no filler, every sentence adds real value
-- Hook from sentence one: surprising fact, bold statement, or relatable problem
-- Named tools, versions, companies, and dates. NEVER invent statistics — if you don't know a number, write a qualitative claim
-- Editorial stance: this magazine has a point of view. Do not write a generic AI overview that could sit on any blog
+- Target ${wordRange} words for this "${resolvedType}". Stop when the query is fully answered — shorter is better than padded. Every sentence must add a fact, a step, a criterion or a decision
+- Answer-first: the first two sentences answer the query directly. No warm-up, no history lesson, no "what is X" for readers who already searched for X
+- Named tools, versions, companies and dates. Numbers, prices and percentages ONLY if you are confident they are real; otherwise write a qualitative claim. Never invent studies, surveys, testimonials, experts or personal experiments
+- BANNED phrases and patterns: «в современном мире», «давайте разберёмся», «важно отметить», «стоит отметить», «не секрет», «в заключение», «таким образом», «играет ключевую роль», «в эпоху», «ни для кого не секрет», generic intros that restate the question, and closing sections that only summarise what was said
+- H2 headings read like the real sub-questions people type into search (what, how, how much, which to choose, why it fails), not vague labels like «Основные аспекты» or «Преимущества»
+- Editorial stance: this magazine has a point of view — give recommendations, trade-offs and who a choice is NOT for. Do not write a generic AI overview that could sit on any blog
 - Write with authority and warmth — expert talking to a smart friend
-- 5 FAQ pairs in collapsible structure. Each answer is 2–4 self-contained sentences that quote the entity/topic by name (so ChatGPT/Perplexity/YandexGPT can cite it)
+${scopeRule}- 3-6 FAQ pairs in collapsible structure, only questions NOT already answered in the body. Each answer is 2–4 self-contained sentences that name the entity/topic (so ChatGPT/Perplexity/YandexGPT can cite it)
 
 GEO / AI CITATION (ChatGPT, Perplexity, Gemini, Claude, YandexGPT, Alice):
 - Do NOT output «Короткий ответ», Key Takeaways, or «Содержание» / table of contents — they steal the top of the article. GEO is the lead paragraph + FAQ (schema.org FAQPage) + JSON-LD.
@@ -3695,11 +3715,11 @@ ${writerKit.slice(0, 5000)}
     : `VISUAL RHYTHM — RICH MAGAZINE LAYOUT WITHOUT SVG (CRITICAL):
 - The VERY FIRST paragraph MUST be <p class="lead">…</p> (bold larger intro with drop-cap).
 - After every 2-3 paragraphs, insert ONE rich visual element. Choose from:
-  • Pull quote: <blockquote class="pull-quote">Memorable insight in 10-18 words.</blockquote>
+  • Pull quote: <blockquote class="pull-quote">The article's own memorable conclusion in 10-18 words.</blockquote>
   • Callout box: <div class="callout"><div class="callout-title">💡 Совет</div><p>Actionable tip.</p></div> (also ⚠️ Важно / 📌 Запомните)
-  • Stat grid (2-4 cards): <div class="stat-grid"><div class="stat-card"><div class="stat-num">73%</div><div class="stat-label">short description</div></div>…</div>
+  • Stat grid (2-4 cards): <div class="stat-grid"><div class="stat-card"><div class="stat-num">NUMBER</div><div class="stat-label">short description</div></div>…</div> — ONLY with real, verifiable numbers; skip it otherwise
   • Numbered steps or pros/cons — when they genuinely help
-- Use these elements at least 4 times. Never put two of the same type back-to-back.
+- Use these elements 2-5 times, only where they genuinely help the reader. Never put two of the same type back-to-back.
 - NO SVG, NO CSS animations, NO decorative flourish lines, NO Lottie. Typography + photos + callouts only.`}
 - DO NOT output any <img> tags yourself. Cover is {{COVER}}. For in-article photos use ONLY markers:
   {{IMG:English photo prompt describing EXACTLY what this section needs}}
@@ -3714,7 +3734,7 @@ ${hasReferral ? `- OWNER OFFER uses the SAME marker idea as photos. Place EXACTL
   • Another example: section comparing two tools → show both products side by side in a clean studio scene relevant to the niche.
   • Prompts in English, concrete, no text/watermarks/logos in the image description.
   • Place the marker BETWEEN paragraphs where the photo would illustrate that section — never inside a heading.
-- 5-6 H2 sections; vary paragraph length; use <ul>/<ol> where helpful.
+- As many H2 sections as the topic needs (usually 3-7); vary paragraph length; use <ul>/<ol> where helpful.
 ${tableRule}
 - Keep text readable: never put body copy on busy photo backgrounds without a solid overlay block.
 
@@ -3748,7 +3768,7 @@ ${writerKit
 </div>
 {{COVER}}
 <div class="article-body">
-  <p class="lead">[opening lead paragraph — bold, sets the stakes, answers the query in 2 sentences]</p>
+  <p class="lead">[opening lead paragraph — answers the query in the first 2 sentences, then says what the reader gets from this page]</p>
   ${hasReferral ? `{{OFFER:native rec #1 about ${productName} for this keyword — FIRST thing after the lead}}` : ""}
   [h2 sections; visual elements; optional {{IMG:...}}; ${hasReferral ? `second {{OFFER:...}} later in the body` : "no referral"}]
 </div>
@@ -3757,7 +3777,7 @@ ${writerKit
     : `<div class="author-box"><div class="author-avatar">${esc((cfg.siteTitle || "R").slice(0, 1))}</div><div class="author-info"><div class="author-name">${esc(cfg.siteTitle)}</div><div class="author-bio">Редакция издания. Тема: ${esc(cfg.niche || cluster.name)}. Обновлено: ${today}.</div></div></div>`}
 <div class="faq-section">
   <h2>Часто задаваемые вопросы</h2>
-  [5 faq-items: <div class="faq-item"><div class="faq-question">Question<span>+</span></div><div class="faq-answer">Answer text</div></div>]
+  [3-6 faq-items: <div class="faq-item"><div class="faq-question">Question<span>+</span></div><div class="faq-answer">Answer text</div></div>]
 </div>
 
 Output ONLY the HTML fragment above — no markdown, no explanations, no page-level tags. Keep the literal text {{COVER}} exactly where shown — it will be replaced automatically. Do NOT invent a related-articles / "Читайте также" section — the server adds real links.`;
