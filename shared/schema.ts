@@ -167,6 +167,14 @@ export interface SeoConfig {
   publishUrl?: string;
   faviconDataUrl?: string;
   faviconMime?: string;
+  /** Yandex Webmaster verification code (meta content). */
+  yandexVerification?: string;
+  /** Google Search Console verification code (meta content). */
+  googleVerification?: string;
+  /** Yandex Metrika counter id (digits). */
+  yandexMetrikaId?: string;
+  /** IndexNow key, server-generated at publish. */
+  indexNowKey?: string;
 }
 
 /** Resolve which referral/CTA to use for an article (keyword → cluster → site). */

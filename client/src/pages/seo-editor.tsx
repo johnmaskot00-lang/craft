@@ -169,6 +169,8 @@ export default function SeoEditorPage() {
   const [yandexMetrika, setYandexMetrika] = useState("");
   const [yandexSaving, setYandexSaving] = useState(false);
   const [yandexOpen, setYandexOpen] = useState(false);
+  const [wmYandex, setWmYandex] = useState("");
+  const [wmGoogle, setWmGoogle] = useState("");
 
   /* ── single query, no polling — SSE provides live updates ── */
   const { data, isLoading, refetch } = useQuery<{
@@ -206,7 +208,11 @@ export default function SeoEditorPage() {
     if (cfg.niche) setNiche(cfg.niche);
     if (cfg.rawKeywords?.length) setKeywordsText(cfg.rawKeywords.join("\n"));
     if (cfg.targetUrl) setTargetUrl(cfg.targetUrl);
-    if ((cfg as any).yandexMetrika) setYandexMetrika(String((cfg as any).yandexMetrika));
+    const metrikaSaved = cfg.yandexMetrikaId || (cfg as any).yandexMetrika;
+    if (metrikaSaved) setYandexMetrika(String(metrikaSaved));
+    const yaSaved = cfg.yandexVerification || (cfg as any).yandexWebmaster;
+    if (yaSaved) setWmYandex(String(yaSaved));
+    if (cfg.googleVerification) setWmGoogle(String(cfg.googleVerification));
     if (cfg.ctaLabel) setCtaLabel(cfg.ctaLabel);
     if (cfg.clusters?.length > 0) setOpenClusters(new Set(cfg.clusters.slice(0, 2).map((c: any) => c.id)));
     setGenProgress({ done: cfg.pagesGenerated || 0, total: cfg.pagesTotal || 0 });
@@ -223,13 +229,13 @@ export default function SeoEditorPage() {
 
   /* ── analyze ── */
   async function saveSeoMetrika() {
-    if (!id || !yandexMetrika.trim()) return;
+    if (!id) return;
     setYandexSaving(true);
     try {
-      const res = await fetch(`/api/projects/${id}/yandex`, { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify({ metrika: yandexMetrika.trim() }) });
+      const res = await fetch(`/api/seo/${id}/webmaster`, { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify({ yandexVerification: wmYandex.trim(), googleVerification: wmGoogle.trim(), yandexMetrikaId: yandexMetrika.trim() }) });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message || "Не удалось сохранить Метрику." );
       await refetch();
-      toast({ title: "Счётчик сохранён", description: "Код Метрики добавлен на все HTML-страницы сайта." });
+      toast({ title: "Сохранено", description: "Коды добавлены на страницы. Нажмите «Обновить сайт», чтобы они появились на опубликованном сайте." });
     } catch (e: any) { toast({ title: "Ошибка сохранения", description: e?.message || "Попробуйте ещё раз", variant: "destructive" }); }
     finally { setYandexSaving(false); }
   }
@@ -939,7 +945,7 @@ export default function SeoEditorPage() {
               <button onClick={() => setAddKwOpen(true)} title="Добавить новый пак ключей" className={pillBtn}>
                 <PlusCircle className="w-4 h-4" /><span className="hidden lg:inline">Ключи</span>
               </button>
-              <button onClick={() => setYandexOpen(true)} title="Яндекс.Метрика" className={iconBtn} data-testid="button-yandex-metrika"><BarChart2 className="w-4 h-4" /></button>
+              <button onClick={() => setYandexOpen(true)} title="Вебмастер и Метрика" className={iconBtn} data-testid="button-yandex-metrika"><BarChart2 className="w-4 h-4" /></button>
               <input
                 ref={faviconInputRef}
                 type="file"
@@ -1275,11 +1281,19 @@ export default function SeoEditorPage() {
 
       {/* ═══ MODAL: Publish + custom domain ═══ */}
       {yandexOpen && (
-        <div className="fixed inset-0 z-[220] flex items-center justify-center bg-black/50 p-4" onClick={() => setYandexOpen(false)}>
+        <div className="fixed inset-0 z-[240] flex items-center justify-center bg-black/50 p-4" onClick={() => setYandexOpen(false)}>
           <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl" onClick={e => e.stopPropagation()}>
-            <div className="mb-4 flex items-center justify-between"><h2 className="text-base font-bold text-slate-800">Яндекс.Метрика</h2><button onClick={() => setYandexOpen(false)}><X className="h-5 w-5 text-slate-400" /></button></div>
-            <p className="mb-3 text-xs text-slate-500">Один счётчик будет добавлен на все HTML-страницы SEO-сайта.</p>
-            <div className="flex gap-2"><input value={yandexMetrika} onChange={e => setYandexMetrika(e.target.value.replace(/\D/g, ""))} placeholder="Например, 12345678" className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm" inputMode="numeric" /><button onClick={() => void saveSeoMetrika()} disabled={!yandexMetrika.trim() || yandexSaving} className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{yandexSaving ? "?" : "?????????"}</button></div>
+            <div className="mb-4 flex items-center justify-between"><h2 className="text-base font-bold text-slate-800">Яндекс Вебмастер / Google / Метрика</h2><button onClick={() => setYandexOpen(false)}><X className="h-5 w-5 text-slate-400" /></button></div>
+            <p className="mb-3 text-xs text-slate-500">Коды подтверждения и счётчик будут добавлены на все HTML-страницы SEO-сайта. Без подтверждения сайта в Вебмастере и Search Console поисковики индексируют его медленно.</p>
+            <label className="mb-1 block text-xs font-semibold text-slate-700">Яндекс Вебмастер — код подтверждения</label>
+            <input value={wmYandex} onChange={e => setWmYandex(e.target.value)} placeholder='Например, 1a2b3c4d5e6f7a8b или весь <meta ...>' className="mb-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+            <p className="mb-3 text-[11px] text-slate-400">webmaster.yandex.ru → Добавить сайт → «Мета-тег» → скопируйте значение content (или весь тег).</p>
+            <label className="mb-1 block text-xs font-semibold text-slate-700">Google Search Console — код подтверждения</label>
+            <input value={wmGoogle} onChange={e => setWmGoogle(e.target.value)} placeholder='Например, AbCdEf123... или весь <meta ...>' className="mb-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+            <p className="mb-3 text-[11px] text-slate-400">search.google.com/search-console → Префикс URL → «HTML-тег» → скопируйте content.</p>
+            <label className="mb-1 block text-xs font-semibold text-slate-700">Яндекс.Метрика — номер счётчика</label>
+            <input value={yandexMetrika} onChange={e => setYandexMetrika(e.target.value.replace(/\D/g, ""))} placeholder="Например, 12345678" className="mb-4 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" inputMode="numeric" />
+            <button onClick={() => void saveSeoMetrika()} disabled={yandexSaving} className="w-full rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{yandexSaving ? "Сохранение…" : "Сохранить"}</button>
           </div>
         </div>
       )}
@@ -1382,6 +1396,20 @@ export default function SeoEditorPage() {
                         testId="button-seo-check-domain"
                       />
                     )}
+                  </div>
+
+                  <div style={{ borderTop: "1px solid #e5e7eb", paddingTop: "1rem", marginBottom: "1rem" }}>
+                    <div style={{ fontSize: "0.8rem", fontWeight: 700, color: "#333", marginBottom: 6 }}>Чтобы сайт получал трафик из поиска</div>
+                    <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 8, lineHeight: 1.45 }}>
+                      Добавьте сайт в Яндекс Вебмастер и Google Search Console, вставьте коды подтверждения и номер Метрики, затем нажмите «Обновить сайт» и отправьте sitemap.xml в обе панели.
+                    </div>
+                    <button
+                      onClick={() => setYandexOpen(true)}
+                      data-testid="button-seo-open-webmaster"
+                      style={{ width: "100%", padding: "9px", borderRadius: 10, border: "none", background: "#4f46e5", color: "#fff", cursor: "pointer", fontWeight: 600 }}
+                    >
+                      Подключить Вебмастер / Метрику
+                    </button>
                   </div>
 
                   <div style={{ display: "flex", gap: "0.75rem" }}>

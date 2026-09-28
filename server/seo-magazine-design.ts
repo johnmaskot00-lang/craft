@@ -1401,25 +1401,76 @@ export function extractHomeShell(homeHtml: string | undefined): {
   return { header, nav, footer, bodyClass };
 }
 
+const RELATED_STOP_STEMS = new Set(
+  [
+    "чтобы", "можно", "какой", "какая", "какие", "каких", "этого", "который", "которые",
+    "своими", "руками", "лучше", "лучший", "лучшие", "почему", "зачем", "сколько", "стоит",
+    "после", "перед", "между", "через", "более", "менее", "нужно", "обзор", "советы",
+    "what", "with", "your", "from", "best",
+  ].map((w) => w.slice(0, 5)),
+);
+
+/** Crude Russian/English stemmer: enough to match «ремонт/ремонта/ремонтом». */
+export function relatedStems(...parts: Array<string | undefined>): Set<string> {
+  const out = new Set<string>();
+  for (const part of parts) {
+    for (const raw of String(part || "").toLowerCase().replace(/ё/g, "е").split(/[^a-zа-я]+/)) {
+      if (raw.length <= 3) continue;
+      const stem = raw.slice(0, 5);
+      if (!RELATED_STOP_STEMS.has(stem)) out.add(stem);
+    }
+  }
+  return out;
+}
+
+export function relatedOverlap(a: Set<string>, b: Set<string>): number {
+  let n = 0;
+  for (const t of Array.from(a)) if (b.has(t)) n++;
+  return n;
+}
+
 export function buildRelatedArticlesHtml(
-  kw: Pick<SeoKeyword, "slug" | "title">,
+  kw: Pick<SeoKeyword, "slug" | "title"> & Partial<Pick<SeoKeyword, "keyword">>,
   cluster: SeoCluster,
   cfg: Pick<SeoConfig, "clusters">,
 ): string {
+  const isLive = (k: SeoKeyword) => k.status === "done" || !!k.filename;
+  const base = relatedStems(kw.title, kw.keyword, kw.slug);
+  const selfIdx = cluster.keywords.findIndex((k) => k.slug === kw.slug);
+  const total = cluster.keywords.length || 1;
+  // Rank siblings by topical overlap; ties go to list neighbours (circular
+  // distance), so link equity spreads over the whole cluster instead of every
+  // article pointing at the same first three pages.
   const same = cluster.keywords
-    .filter((k) => k.slug !== kw.slug && (k.status === "done" || k.filename))
-    .slice(0, 3)
-    .map((k) => ({ title: k.title, href: `/${cluster.slug}/${k.slug}/`, cat: cluster.name }));
+    .map((k, i) => ({ k, i }))
+    .filter(({ k }) => k.slug !== kw.slug && isLive(k))
+    .map(({ k, i }) => {
+      const d = selfIdx < 0 ? i : Math.abs(i - selfIdx);
+      return { k, score: relatedOverlap(base, relatedStems(k.title, k.keyword, k.slug)), dist: Math.min(d, total - d) };
+    })
+    .sort((a, b) => b.score - a.score || a.dist - b.dist)
+    .slice(0, 4)
+    .map(({ k }) => ({ title: k.title, href: `/${cluster.slug}/${k.slug}/`, cat: cluster.name }));
   const others = (cfg.clusters || [])
     .filter((c) => c.slug !== cluster.slug)
     .flatMap((c) =>
       c.keywords
-        .filter((k) => k.status === "done" || k.filename)
-        .slice(0, 1)
-        .map((k) => ({ title: k.title, href: `/${c.slug}/${k.slug}/`, cat: c.name })),
+        .filter(isLive)
+        .map((k) => ({ k, c, score: relatedOverlap(base, relatedStems(k.title, k.keyword, k.slug)) })),
     )
-    .slice(0, 2);
-  const items = [...same, ...others].slice(0, 4);
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .reduce<Array<{ title: string; href: string; cat: string; cs: string }>>((acc, { k, c }) => {
+      // At most one pick per foreign cluster keeps the block varied.
+      if (acc.length < 2 && !acc.some((x) => x.cs === c.slug)) {
+        acc.push({ title: k.title, href: `/${c.slug}/${k.slug}/`, cat: c.name, cs: c.slug });
+      }
+      return acc;
+    }, []);
+  const items: Array<{ title: string; href: string; cat: string }> = [...same, ...others];
+  if (items.length && cluster.slug) {
+    items.push({ title: `Все статьи раздела «${cluster.name}»`, href: `/${cluster.slug}/`, cat: "Раздел" });
+  }
   if (!items.length) return "";
   const cards = items
     .map(

@@ -55,6 +55,8 @@ import {
   patchHomeArticleFeed,
   pickLayoutDna,
   relabelHeaderCategoryLinks,
+  relatedOverlap,
+  relatedStems,
   replaceStockImagesWithCovers,
   stripInlineAlsoParagraphs,
   uncommentBuriedArticle,
@@ -1314,9 +1316,147 @@ function htmlLang(sample: string): string {
   return /[а-яё]/i.test(sample || "") ? "ru" : "en";
 }
 
-function geoHead(cfg: SeoConfig): string {
+const SEO_HEAD_EXTRA_OPEN = "<!--seo-head-extra-->";
+const SEO_HEAD_EXTRA_CLOSE = "<!--/seo-head-extra-->";
+
+function cleanVerificationCode(value: unknown): string {
+  let raw = String(value || "").trim();
+  // Users often paste the whole <meta ... content="..."> tag — pull the content out.
+  const contentAt = raw.toLowerCase().indexOf("content=");
+  if (contentAt >= 0) {
+    raw = raw.slice(contentAt + 8).replace(/^["']/, "");
+    const end = raw.search(/["'\s>]/);
+    if (end >= 0) raw = raw.slice(0, end);
+  }
+  return raw.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 100);
+}
+
+function cleanMetrikaId(value: unknown): string {
+  return String(value || "").replace(/\D/g, "").slice(0, 12);
+}
+
+/** Effective codes, falling back to the legacy editor keys (yandexWebmaster / yandexMetrika). */
+function seoWebmasterCodes(cfg: SeoConfig): { ya: string; google: string; metrika: string } {
+  const legacy = cfg as any;
+  const legacyMetrika = String(legacy.yandexMetrika || "").trim();
+  return {
+    ya: cleanVerificationCode(cfg.yandexVerification || legacy.yandexWebmaster),
+    google: cleanVerificationCode(cfg.googleVerification),
+    metrika: cleanMetrikaId(cfg.yandexMetrikaId || (/^\d{4,12}$/.test(legacyMetrika) ? legacyMetrika : "")),
+  };
+}
+
+/** Cut every `startTag ... endTag` span (case-insensitive, indexOf-based). */
+function cutSpans(html: string, startTag: string, endTag: string, includeEnd: boolean): string {
+  let lower = html.toLowerCase();
+  const s = startTag.toLowerCase();
+  const e = endTag.toLowerCase();
+  let from = 0;
+  for (let guard = 0; guard < 50; guard++) {
+    const a = lower.indexOf(s, from);
+    if (a < 0) break;
+    const b = lower.indexOf(e, a + s.length);
+    if (b < 0) break;
+    const cutEnd = includeEnd ? b + e.length : b;
+    html = html.slice(0, a) + html.slice(cutEnd);
+    lower = lower.slice(0, a) + lower.slice(cutEnd);
+    from = a;
+  }
+  return html;
+}
+
+/** Search-engine head block: verification, robots directives, Yandex Metrika. */
+function seoHeadExtra(cfg: SeoConfig, opts: { noindex?: boolean } = {}): string {
+  const parts: string[] = [];
+  const { ya, google, metrika } = seoWebmasterCodes(cfg);
+  if (ya) parts.push(`<meta name="yandex-verification" content="${ya}">`);
+  if (google) parts.push(`<meta name="google-site-verification" content="${google}">`);
+  if (!opts.noindex) {
+    parts.push(`<meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1">`);
+  }
+  if (metrika) {
+    parts.push(`<script>(function(m,e,t,r,i,k,a){m[i]=m[i]||function(){(m[i].a=m[i].a||[]).push(arguments)};m[i].l=1*new Date();for(var j=0;j<document.scripts.length;j++){if(document.scripts[j].src===r){return;}}k=e.createElement(t),a=e.getElementsByTagName(t)[0],k.async=1,k.src=r,a.parentNode.insertBefore(k,a)})(window,document,"script","https://mc.yandex.ru/metrika/tag.js","ym");ym(${metrika},"init",{clickmap:true,trackLinks:true,accurateTrackBounce:true,webvisor:true});</script>`);
+  }
+  return `${SEO_HEAD_EXTRA_OPEN}${parts.join("\n")}${SEO_HEAD_EXTRA_CLOSE}`;
+}
+
+/** Remove every `<meta name="NAME" ...>` tag (indexOf-based, both quote styles). */
+function cutMetaByName(html: string, name: string): string {
+  for (const q of ['"', "'"]) {
+    html = cutSpans(html, `<meta name=${q}${name}${q}`, ">", true);
+  }
+  return html;
+}
+
+/** Refresh (or insert) the search-engine head block in already generated HTML. */
+function applySeoHeadExtra(html: string, cfg: SeoConfig): string {
+  const headEnd = html.indexOf("</head>");
+  if (headEnd < 0) return html;
+  const open = html.indexOf(SEO_HEAD_EXTRA_OPEN);
+  const close = open >= 0 ? html.indexOf(SEO_HEAD_EXTRA_CLOSE, open) : -1;
+  // Head without our own block.
+  let head = open >= 0 && close >= 0 && close < headEnd
+    ? html.slice(0, open) + html.slice(close + SEO_HEAD_EXTRA_CLOSE.length, headEnd)
+    : html.slice(0, headEnd);
+  // Drop counters/metas injected by the legacy editor flow so nothing is doubled.
+  const { ya, google, metrika } = seoWebmasterCodes(cfg);
+  if (metrika) {
+    head = cutSpans(head, "<!-- Yandex.Metrika counter -->", "<!-- /Yandex.Metrika counter -->", true);
+  }
+  if (ya) head = cutMetaByName(head, "yandex-verification");
+  if (google) head = cutMetaByName(head, "google-site-verification");
+  // Keep noindex pages noindex: look for a foreign robots meta outside our block.
+  const noindex = head.toLowerCase().includes("noindex");
+  const block = seoHeadExtra(cfg, { noindex });
+  return head.trimEnd() + "\n" + block + "\n" + html.slice(headEnd);
+}
+
+/** Submit all indexable pages to IndexNow (Yandex + Bing). Best-effort. */
+async function pingIndexNow(siteUrl: string, key: string, files: DeployFile[]): Promise<void> {
+  if (!siteUrl || !/^[a-f0-9]{32}$/.test(key)) return;
+  const base = siteUrl.replace(/\/+$/, "");
+  let host: string;
+  try { host = new URL(base).host; } catch { return; }
+  const urlList: string[] = [];
+  for (const f of files) {
+    if (!f.filename.endsWith(".html") || typeof f.content !== "string") continue;
+    if (/(^|\/)page\/\d+\//.test(f.filename) || f.filename === "404.html") continue;
+    const headEnd = f.content.indexOf("</head>");
+    const head = (headEnd >= 0 ? f.content.slice(0, headEnd) : f.content.slice(0, 4000)).toLowerCase();
+    if (head.includes("noindex")) continue;
+    const path = f.filename === "index.html"
+      ? "/"
+      : f.filename.endsWith("/index.html")
+        ? `/${f.filename.slice(0, -"index.html".length)}`
+        : `/${f.filename}`;
+    urlList.push(base + path);
+    if (urlList.length >= 10000) break;
+  }
+  if (urlList.length === 0) return;
+  const body = JSON.stringify({ host, key, keyLocation: `${base}/${key}.txt`, urlList });
+  await Promise.all(["https://yandex.com/indexnow", "https://api.indexnow.org/indexnow"].map(async (endpoint) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const r = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body,
+        signal: ctrl.signal,
+      });
+      console.log(`[indexnow] ${endpoint} ${host}: ${r.status} (${urlList.length} urls)`);
+    } catch (e: any) {
+      console.warn(`[indexnow] ${endpoint} ${host} failed: ${e?.message || e}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }));
+}
+
+function geoHead(cfg: SeoConfig, opts: { noindex?: boolean } = {}): string {
   const lang = htmlLang(`${cfg.siteTitle} ${cfg.niche} ${cfg.siteDescription}`);
-  return `${faviconTag(cfg)}
+  return `${seoHeadExtra(cfg, opts)}
+${faviconTag(cfg)}
 <meta name="author" content="${esc(cfg.siteTitle)}">
 <meta name="theme-color" content="${esc(themeOf(cfg).accent)}">
 <meta name="color-scheme" content="light">
@@ -1407,6 +1547,7 @@ function articleJsonLd(
       name: cfg.siteTitle,
       url: root,
       description: cfg.siteDescription,
+      publishingPrinciples: seoUrl(cfg, "/about/"),
       ...(cssUrl(cfg.logoUrl) ? { logo: { "@type": "ImageObject", url: seoAssetUrl(cfg, cfg.logoUrl) } } : {}),
     },
     {
@@ -1466,8 +1607,9 @@ Allow: /
 User-agent: anthropic-ai
 Allow: /
 
-User-agent: YandexBot
+User-agent: Yandex
 Allow: /
+Clean-param: utm_source&utm_medium&utm_campaign&utm_content&utm_term&yclid&gclid&fbclid&ysclid&from
 
 Sitemap: ${origin}/sitemap.xml
 `;
@@ -1508,6 +1650,76 @@ llms.txt: ${origin}/llms.txt
 `;
 }
 
+function hasAboutPage(cfg: SeoConfig): boolean {
+  return !(cfg.clusters || []).some((c) => c.slug === "about");
+}
+
+// E-E-A-T: страница «О проекте» — кто публикует, как готовятся материалы, контакты.
+function buildAboutPage(cfg: SeoConfig): string {
+  const art = isArtDirectedSeo(cfg);
+  const name = cfg.siteTitle || cfg.projectName || "Site";
+  const aboutUrl = seoUrl(cfg, "/about/");
+  const home = seoUrl(cfg, "/");
+  const lang = htmlLang(`${cfg.siteTitle} ${cfg.niche}`);
+  const title = `О проекте | ${name}`;
+  const desc = `О проекте ${name}: ${cfg.siteDescription || cfg.niche || ""}`.slice(0, 300);
+  const schema = JSON.stringify({
+    "@context": "https://schema.org",
+    "@graph": [
+      { "@type": "Organization", "@id": `${home}#publisher`, name, url: home, description: cfg.siteDescription, publishingPrinciples: aboutUrl },
+      { "@type": "AboutPage", "@id": `${aboutUrl}#about`, url: aboutUrl, name: title, description: desc, inLanguage: lang, isPartOf: { "@type": "WebSite", name, url: home }, mainEntity: { "@id": `${home}#publisher` } },
+      { "@type": "BreadcrumbList", itemListElement: [
+        { "@type": "ListItem", position: 1, name: "Главная", item: home },
+        { "@type": "ListItem", position: 2, name: "О проекте", item: aboutUrl },
+      ] },
+    ],
+  }).replace(/</g, "\u003c");
+  const nav = art
+    ? `<header class="site-header" data-seo-shell="1" aria-label="${esc(cfg.siteTitle || "Menu")}"></header>`
+    : buildNav(cfg);
+  const footer = art ? `<footer data-seo-shell="1"></footer>` : buildFooter(cfg);
+  const sections = (cfg.clusters || []).map((c) => `<li><a href="/${c.slug}/">${esc(c.name)}</a></li>`).join("\n");
+  const contact = safeHref(cfg.targetUrl);
+  const head = [
+    `<meta charset="UTF-8">`,
+    `<meta name="viewport" content="width=device-width,initial-scale=1">`,
+    `<title>${esc(title)}</title>`,
+    `<meta name="description" content="${esc(desc)}">`,
+    `<meta property="og:title" content="${esc(title)}">`,
+    `<meta property="og:description" content="${esc(desc)}">`,
+    `<meta property="og:type" content="website">`,
+    `<meta property="og:url" content="${esc(aboutUrl)}">`,
+    `<link rel="stylesheet" href="/assets/style.css">`,
+    geoHead(cfg),
+    `<link rel="canonical" href="${esc(aboutUrl)}">`,
+    `<script type="application/ld+json">${schema}</script>`,
+  ].join("\n");
+  return `<!DOCTYPE html>
+<html lang="${lang}">
+<head>
+${head}
+</head>
+<body class="${esc(bodyClass(cfg))}">
+${nav}
+<header class="cat-header"><div class="container">
+  <div class="breadcrumb"><a href="/">Главная</a><span class="sep">›</span><span class="cur">О проекте</span></div>
+  <h1>О проекте</h1>
+</div></header>
+<main class="container"><div class="article-body">
+  <p>${esc(cfg.siteDescription || `${name} — тематический проект о ${cfg.niche || "своей нише"}.`)}</p>
+  <h2>Как мы готовим материалы</h2>
+  <ul>
+    <li>Каждая статья начинается с разбора вопроса читателя и сбора фактов из открытых источников.</li>
+    <li>Цифры, сроки и рекомендации сверяются с официальными данными и практикой.</li>
+    <li>Материалы регулярно пересматриваются: дата обновления указана в каждой статье.</li>
+    <li>Если вы нашли неточность — сообщите нам, и мы исправим текст.</li>
+  </ul>
+${sections ? `  <h2>Разделы</h2>\n  <ul>\n${sections}\n  </ul>\n` : ""}${contact ? `  <h2>Контакты</h2>\n  <p>Связаться с нами: <a href="${esc(contact)}" rel="noopener">${esc(contact)}</a></p>\n` : ""}</div></main>
+${footer}
+</body>
+</html>`;
+}
+
 async function persistGeoSurfaces(
   storage: IStorage,
   projectId: number,
@@ -1517,6 +1729,24 @@ async function persistGeoSurfaces(
   await storage.upsertProjectFile({ projectId, filename: "robots.txt", code: buildRobotsTxt(origin) });
   await storage.upsertProjectFile({ projectId, filename: "sitemap.xml", code: buildSitemap(cfg, origin) });
   await storage.upsertProjectFile({ projectId, filename: "llms.txt", code: buildLlmsTxtForSite(cfg, origin) });
+  if (hasAboutPage(cfg)) {
+    try {
+      let html = buildAboutPage(cfg);
+      if (isArtDirectedSeo(cfg)) {
+        const files = await storage.getProjectFiles(projectId);
+        const shell = extractHomeShell(files.find((f) => f.filename === "index.html")?.code);
+        if (shell.header) {
+          const header = relabelHeaderCategoryLinks(demoteHeaderBrandH1(shell.header), cfg.clusters);
+          html = html.replace(/<header\b[^>]*\bsite-header\b[^>]*>[\s\S]*?<\/header>/i, () => header);
+        }
+        if (shell.footer) { const footer = shell.footer; html = html.replace(/<footer\b[\s\S]*?<\/footer>/i, () => footer); }
+        if (shell.bodyClass) { const cls = shell.bodyClass; html = html.replace(/<body[^>]*>/i, () => `<body class="${esc(cls)}">`); }
+      }
+      await storage.upsertProjectFile({ projectId, filename: "about/index.html", code: html });
+    } catch (e) {
+      console.warn("[seo] about page failed:", (e as Error)?.message);
+    }
+  }
 }
 
 function buildArticleSidebar(kw: SeoKeyword, cluster: SeoCluster, cfg: SeoConfig): string {
@@ -1698,6 +1928,7 @@ async function repairSeoSiteLayout(storage: IStorage, projectId: number, cfg: Se
     next = stripPageAds(next);
     next = replaceStockImagesWithCovers(next, briefs);
     next = uncommentBuriedArticle(next);
+    if (!/^page\/\d+/i.test(f.filename)) next = applySeoHeadExtra(next, cfg);
     if (next !== f.code) {
       await storage.upsertProjectFile({ projectId, filename: f.filename, code: next });
     }
@@ -2703,7 +2934,7 @@ function buildFooter(cfg: SeoConfig): string {
       <h4>Навигация</h4>
       <ul>
         <li><a href="/">Главная</a></li>
-        <li><a href="/sitemap.xml">Карта сайта</a></li>
+${hasAboutPage(cfg) ? `        <li><a href="/about/">О проекте</a></li>\n` : ""}        <li><a href="/sitemap.xml">Карта сайта</a></li>
         <li><a href="/llms.txt">llms.txt</a></li>
       </ul>
     </div>
@@ -2824,6 +3055,7 @@ function buildHomePage(cfg: SeoConfig): string {
         name: cfg.siteTitle,
         url: seoUrl(cfg, "/"),
         description: cfg.siteDescription,
+        publishingPrinciples: seoUrl(cfg, "/about/"),
         ...(cssUrl(cfg.logoUrl) ? { logo: { "@type": "ImageObject", url: seoAssetUrl(cfg, cfg.logoUrl) } } : {}),
       },
       {
@@ -3080,7 +3312,7 @@ function buildFallbackArticle(kw: SeoKeyword, cluster: SeoCluster, cfg: SeoConfi
 <meta name="description" content="${esc(`${kw.title} — ${cfg.siteTitle}`)}">
 <meta name="robots" content="noindex,follow">
 <link rel="stylesheet" href="/assets/style.css">
-${geoHead(cfg)}
+${geoHead(cfg, { noindex: true })}
 </head>
 <body class="${bodyClass(cfg)}">
 ${nav}
@@ -3116,6 +3348,7 @@ function buildSitemap(cfg: SeoConfig, baseUrl: string): string {
   const allDates = cfg.clusters.flatMap(c => c.keywords.map(k => k.updatedAt || k.publishedAt || "")).filter(Boolean).sort();
   const siteLastmod = allDates.at(-1)?.split("T")[0] || now;
   let urls = `  <url><loc>${baseUrl}/</loc><lastmod>${siteLastmod}</lastmod><changefreq>weekly</changefreq><priority>1.0</priority></url>\n`;
+  if (hasAboutPage(cfg)) urls += `  <url><loc>${baseUrl}/about/</loc><lastmod>${siteLastmod}</lastmod><changefreq>monthly</changefreq><priority>0.5</priority></url>\n`;
   for (const c of cfg.clusters) {
     const clusterDates = c.keywords.map(k => k.updatedAt || k.publishedAt || "").filter(Boolean).sort();
     const clusterLastmod = clusterDates.at(-1)?.split("T")[0] || siteLastmod;
@@ -3366,9 +3599,28 @@ async function generateArticleHtml(
   const cfgAll: SeoConfig = { ...cfg, clusters: allClusters };
 
   // ── Internal links for AI ──
-  const relatedLinks = allClusters
-    .flatMap(c => c.keywords.filter(k => k.slug !== kw.slug && (k.status === "done" || k.filename)).slice(0, 2).map(k => `/${c.slug}/${k.slug}/ → ${k.title}`))
-    .slice(0, 8).join("\n");
+  // Most relevant live pages first: same category by topic overlap, then a few
+  // strong matches from other categories, then the category hub itself.
+  const selfStems = relatedStems(kw.keyword, kw.title);
+  const isLive = (k: typeof kw) => k.slug !== kw.slug && (k.status === "done" || !!k.filename);
+  const scoreOf = (k: typeof kw) => relatedOverlap(selfStems, relatedStems(k.keyword, k.title));
+  const sameCluster = cluster.keywords.filter(isLive)
+    .map(k => ({ k, s: scoreOf(k) }))
+    .sort((a, b) => b.s - a.s)
+    .slice(0, 7)
+    .map(({ k }) => `/${cluster.slug}/${k.slug}/ → ${k.title}`);
+  const crossCluster = allClusters
+    .filter(c => c.slug !== cluster.slug)
+    .flatMap(c => c.keywords.filter(isLive).map(k => ({ c, k, s: scoreOf(k) })))
+    .filter(x => x.s > 0)
+    .sort((a, b) => b.s - a.s)
+    .slice(0, 3)
+    .map(({ c, k }) => `/${c.slug}/${k.slug}/ → ${k.title}`);
+  const relatedLinks = [
+    ...sameCluster,
+    ...crossCluster,
+    ...(sameCluster.length ? [`/${cluster.slug}/ → ${cluster.name} (раздел)`] : []),
+  ].join("\n");
 
   const contentTypeBlock = getContentTypeInstructions(
     kw.contentType || cluster.contentType,
@@ -3466,8 +3718,12 @@ ${hasReferral ? `- OWNER OFFER uses the SAME marker idea as photos. Place EXACTL
 ${tableRule}
 - Keep text readable: never put body copy on busy photo backgrounds without a solid overlay block.
 
-INTERNAL LINKS (use naturally in body text as real <a href="..."> — ONLY URLs from this list):
+INTERNAL LINKS (MANDATORY when the list is not empty — this is how search engines discover and rank the rest of the site):
 ${relatedLinks || "(none yet)"}
+- Weave 3-5 of these URLs into the BODY TEXT as real <a href="URL">descriptive anchor</a> inside sentences, spread across different H2 sections (not all in one paragraph, not in the lead, not in FAQ).
+- Anchor text = 2-6 natural words describing the target page topic (never "здесь", "тут", "по ссылке", never the bare URL). Do not repeat the same URL twice.
+- Prefer the first URLs in the list — they are the most relevant. Link only where the target genuinely continues the thought.
+- ONLY URLs from this list, copied exactly (relative, with trailing slash). If the list says "(none yet)", add no internal links.
 Never invent article titles or URLs. Do not add a "Читайте также" block with fake cards — the server injects real related links.
 ${hasReferral ? `
 NATIVE OFFER (MANDATORY — same seriousness as {{IMG}}):
@@ -4418,6 +4674,10 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
     const currentCfg = proj.seoConfig as SeoConfig;
     const origin = projectOrigin(proj);
     const cfg: SeoConfig = { ...currentCfg, publishUrl: origin };
+    // Stable per-site IndexNow key: Yandex/Bing verify it via /<key>.txt.
+    if (!cfg.indexNowKey || !/^[a-f0-9]{32}$/.test(cfg.indexNowKey)) {
+      cfg.indexNowKey = crypto.randomBytes(16).toString("hex");
+    }
     await storage.updateProject(proj.id, { seoConfig: cfg } as any);
     await finalizeSeoSite(storage, proj.id, cfg);
     await persistGeoSurfaces(storage, proj.id, cfg, origin);
@@ -4426,6 +4686,8 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
     let deployFiles: DeployFile[] = allFiles
       .filter((f) => !isInternalAgentFile(f.filename))
       .map(f => ({ filename: f.filename, content: f.code }));
+    deployFiles = deployFiles.filter((f) => f.filename !== `${cfg.indexNowKey}.txt`);
+    deployFiles.push({ filename: `${cfg.indexNowKey}.txt`, content: cfg.indexNowKey });
 
     for (const f of deployFiles) {
       if (f.filename !== "assets/style.css" || !f.content) continue;
@@ -4459,6 +4721,9 @@ export function registerSeoRoutes(app: Express, storage: IStorage) {
       } as any);
 
       res.json({ url: finalUrl });
+      // Fire-and-forget: tell Yandex/Bing about every indexable page so new
+      // articles get crawled in hours instead of weeks.
+      void pingIndexNow(finalUrl, cfg.indexNowKey!, deployFiles).catch(() => {});
     } catch (e: any) {
       res.status(500).json({ message: e?.message || "Publish failed" });
     }
@@ -4989,9 +5254,55 @@ ${offerBlock}
     const proj = await storage.getProject(parseInt(req.params.id));
     if (!proj || proj.userId !== userId) return res.status(404).json({ message: "Not found" });
     const { seoConfig } = req.body;
-    if (!seoConfig) return res.status(400).json({ message: "seoConfig required" });
-    await storage.updateProject(proj.id, { seoConfig } as any);
+    if (!seoConfig || typeof seoConfig !== "object") return res.status(400).json({ message: "seoConfig required" });
+    const prev = (proj.seoConfig || {}) as SeoConfig;
+    const next: SeoConfig = { ...(seoConfig as SeoConfig) };
+    // Webmaster fields: keep the stored value when the client didn't send one,
+    // sanitize when it did. The IndexNow key is server-owned.
+    for (const k of ["yandexVerification", "googleVerification"] as const) {
+      next[k] = k in seoConfig ? cleanVerificationCode(seoConfig[k]) || undefined : prev[k];
+    }
+    next.yandexMetrikaId = "yandexMetrikaId" in seoConfig
+      ? cleanMetrikaId(seoConfig.yandexMetrikaId) || undefined
+      : prev.yandexMetrikaId;
+    next.indexNowKey = prev.indexNowKey;
+    await storage.updateProject(proj.id, { seoConfig: next } as any);
     res.json({ ok: true });
+  });
+
+  // POST /api/seo/:id/webmaster — Yandex Webmaster / GSC verification + Metrika
+  app.post("/api/seo/:id/webmaster", async (req, res) => {
+    const userId = requireAuth(req, res);
+    if (!userId) return;
+    const proj = await storage.getProject(parseInt(req.params.id));
+    if (!proj || proj.userId !== userId) return res.status(404).json({ message: "Not found" });
+    const prev = (proj.seoConfig || {}) as SeoConfig;
+    const body = req.body || {};
+    const next = {
+      ...prev,
+      yandexVerification: cleanVerificationCode(body.yandexVerification) || undefined,
+      googleVerification: cleanVerificationCode(body.googleVerification) || undefined,
+      yandexMetrikaId: cleanMetrikaId(body.yandexMetrikaId) || undefined,
+    } as SeoConfig & Record<string, any>;
+    // Keep the legacy editor keys in sync, otherwise a cleared field would come back via the fallback.
+    next.yandexWebmaster = next.yandexVerification || undefined;
+    next.yandexMetrika = next.yandexMetrikaId || undefined;
+    await storage.updateProject(proj.id, { seoConfig: next } as any);
+    // Patch the stored pages right away so the preview and next publish carry the tags.
+    const files = await storage.getProjectFiles(proj.id);
+    for (const f of files) {
+      if (!f.filename.toLowerCase().endsWith(".html") || !f.code || /^page\/\d+/i.test(f.filename)) continue;
+      const code = applySeoHeadExtra(f.code, next);
+      if (code !== f.code) await storage.upsertProjectFile({ projectId: proj.id, filename: f.filename, code });
+    }
+    res.json({
+      ok: true,
+      webmaster: {
+        yandexVerification: next.yandexVerification || "",
+        googleVerification: next.googleVerification || "",
+        yandexMetrikaId: next.yandexMetrikaId || "",
+      },
+    });
   });
 
   // GET /api/seo/:id/preview-page — WYSIWYG preview (matches publish layout + images)
