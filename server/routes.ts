@@ -7077,7 +7077,12 @@ ${designAnalysis}
             provider: "gemini" | "claude",
             opts?: { escalate?: boolean; maxRounds?: number; extraNote?: string },
           ) => {
-            const note = opts?.extraNote || "";
+            const retryNote = /вс[её] ещ[её]|до сих пор|опять|снова не|не помогло|не работает|не применил|не изменил/i.test(String(prompt || ""))
+              ? "\n\n⚠️ ПОВТОРНАЯ ПРОСЬБА: прошлая правка не дала видимого результата. Не повторяй то же свойство с другим значением. " +
+                "Сначала найди настоящую причину: grep класс блока и его родителей (grid-template-columns, flex, width, max-width, @media, !important), " +
+                "исправь именно то правило и проверь, что его ничего не перебивает. В finish честно напиши, что именно было причиной."
+              : "";
+            const note = (opts?.extraNote || "") + retryNote;
             return runToolCallingAgent({
               systemPrompt: systemContent + note,
               userPrompt: buildEditUserPrompt(!!opts?.escalate, provider) + note,

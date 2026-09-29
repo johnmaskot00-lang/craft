@@ -960,6 +960,7 @@ ${preferQuick
 7. GEO: не выкидывай JSON-LD, FAQ, canonical, /llms.txt
 8. ТЕКСТ: не перефразируй копирайт без явной просьбы. «Смени дизайн» ≠ «перепиши текст»
 9. SEARCH копируй из ФОКУС/HTML_BEGIN или из результата read_page — не выдумывай
+10. ВЁРСТКА («вытянуто», «узко», «сжато», «пусто справа», «растянуто»): ширину блока обычно задаёт РОДИТЕЛЬ, а не p. grep класс блока и его контейнеров → смотри grid-template-columns, flex/flex-basis, width, max-width, columns, gap и @media. Правь то правило, которое реально ограничивает ширину, и проверь, что ниже в CSS / в @media / через !important его никто не перебивает. Если в ответе инструмента есть warnings про CSS — правка, скорее всего, не видна: исправь, а не завершай
 
 ${manifest}
 `;
@@ -981,6 +982,7 @@ ls · grep · cat · read_page · apply_patch · write_page · read_craft_md · 
 Не вызывай write_page для смены одного слова. Не лей огромный HTML в чат.
 Не удаляй контент, который не просили убирать.
 При дизайне/стиле/цветах/шрифтах сохраняй видимые тексты дословно.
+Если пользователь пишет «всё ещё» / «до сих пор» / «не помогло» — прошлая правка не сработала: не повторяй то же свойство с другим числом, найди настоящую причину (родительский grid/flex, @media, !important, опечатка в классе).
 `;
   } else {
     const { context } = buildPagesContext(opts.pages, opts.activeFile, budget.maxTotalChars, budget);
@@ -1258,6 +1260,9 @@ class SiteWorkspace {
   private base64Maps = new Map<string, Map<string, string>>();
   /** Structural warnings from the last accepted mutation, drained per file. */
   private pendingWarnings = new Map<string, string[]>();
+  /** Latest CSS-effectiveness issues per file; replaced on every mutation of that file. */
+  private cssIssues = new Map<string, string[]>();
+  private cssFinishNagged = false;
 
   /**
    * Gate every mutation on the synchronous structural check (~2 ms on a 150 KB
@@ -1279,6 +1284,34 @@ class SiteWorkspace {
       ok: false,
       error: `Патч сломал структуру ${filename}: ${check.errors.join(" | ")}. Файл НЕ изменён — исправь фрагмент и повтори. Если удаление тега было намеренным (пользователь просил убрать блок), вызови тот же патч с force: true.`,
     };
+  }
+
+  /** Append warnings for a file without dropping the structural ones. */
+  private addWarnings(filename: string, warnings: string[]): void {
+    if (warnings.length === 0) return;
+    const prev = this.pendingWarnings.get(filename) || [];
+    this.pendingWarnings.set(filename, [...prev, ...warnings]);
+  }
+
+  /**
+   * Did the CSS change have a chance to show up? Catches the two ways an agent
+   * "fixes" layout without anything changing on screen: styling a selector that
+   * matches nothing, and a declaration that a later rule, an @media block or
+   * !important overrides. Heuristic by design — it only produces warnings.
+   */
+  private checkCssEffect(filename: string, before: string, after: string): void {
+    let issues: string[] = [];
+    try {
+      issues = cssEffectIssues(filename, before, after, this.files);
+    } catch {
+      issues = [];
+    }
+    if (issues.length > 0) {
+      this.cssIssues.set(filename, issues);
+      this.addWarnings(filename, issues);
+    } else {
+      this.cssIssues.delete(filename);
+    }
   }
 
   /** Warnings to attach to a success result; reading them clears them. */
@@ -1424,6 +1457,7 @@ class SiteWorkspace {
         }
         const rollback = this.validateChange(filename, current, code, force);
         if (rollback) return { result: rollback };
+        this.checkCssEffect(filename, current, code);
         this.files.set(filename, code);
         this.changedFiles.add(filename);
         this.patchCount += 1;
@@ -1463,6 +1497,7 @@ class SiteWorkspace {
           const rollback = this.validateChange(filename, prev, stripped, force);
           if (rollback) return { result: rollback };
         }
+        this.checkCssEffect(filename, prev ?? "", stripped);
         this.files.set(filename, stripped);
         this.readFiles.add(filename);
         this.changedFiles.add(filename);
@@ -1503,6 +1538,21 @@ class SiteWorkspace {
               error: "Нельзя завершить задачу без реального изменения кода. Сначала вызови apply_patch или write_page.",
             },
           };
+        }
+        const cssIssues = [...this.cssIssues.values()].flat();
+        if (cssIssues.length > 0) {
+          if (!this.cssFinishNagged) {
+            this.cssFinishNagged = true;
+            return {
+              result: {
+                ok: false,
+                error: "CSS-правка, скорее всего, не видна на странице. Исправь причину (родительский контейнер, @media, !important, несуществующий класс) через apply_patch и снова вызови finish. Если уверен, что всё верно, вызови finish ещё раз.",
+                css_issues: cssIssues.slice(0, 6),
+              },
+            };
+          }
+          const caveat = "\n\n⚠️ Визуальный эффект не подтверждён: " + cssIssues.slice(0, 3).join("; ");
+          return { result: { ok: true }, finished: summary + caveat };
         }
         return { result: { ok: true }, finished: summary };
       }
@@ -1878,4 +1928,155 @@ function finalizeToolAgentResult(
     streamedText,
     patchCount: workspace.patchCount,
   };
+}
+
+
+// ── CSS effectiveness heuristics ────────────────────────────────────────────
+
+interface CssDecl {
+  sel: string;
+  media: string;
+  prop: string;
+  value: string;
+  important: boolean;
+  order: number;
+}
+
+function normalizeCssSelector(sel: string): string {
+  return sel.replace(/\s+/g, " ").replace(/\s*([>+~,])\s*/g, "$1").trim().toLowerCase();
+}
+
+/** Naive brace-matching parser: enough for inline <style> and site CSS. */
+export function parseCssDecls(css: string): CssDecl[] {
+  const out: CssDecl[] = [];
+  const src = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  let order = 0;
+  const walk = (text: string, media: string, depth: number) => {
+    let i = 0;
+    while (i < text.length) {
+      const open = text.indexOf("{", i);
+      if (open < 0) break;
+      const prelude = text.slice(i, open).replace(/^[\s;]*/, "").trim();
+      let d = 1;
+      let j = open + 1;
+      while (j < text.length && d > 0) {
+        const c = text[j];
+        if (c === "{") d += 1;
+        else if (c === "}") d -= 1;
+        j += 1;
+      }
+      const body = text.slice(open + 1, j - 1);
+      i = j;
+      if (!prelude) continue;
+      if (/^@(media|supports|container|layer)\b/i.test(prelude)) {
+        if (depth < 4) walk(body, (media ? media + " and " : "") + prelude.replace(/\s+/g, " "), depth + 1);
+        continue;
+      }
+      if (prelude.startsWith("@")) continue;
+      const sel = normalizeCssSelector(prelude);
+      for (const part of body.split(";")) {
+        const k = part.indexOf(":");
+        if (k <= 0) continue;
+        const prop = part.slice(0, k).trim().toLowerCase();
+        if (!/^-?[a-z][a-z0-9-]*$/.test(prop)) continue;
+        let value = part.slice(k + 1).trim();
+        const important = /!\s*important\s*$/i.test(value);
+        value = value.replace(/!\s*important\s*$/i, "").trim().replace(/\s+/g, " ");
+        out.push({ sel, media, prop, value, important, order: order++ });
+      }
+    }
+  };
+  walk(src, "", 0);
+  return out;
+}
+
+function extractCssText(filename: string, content: string): string {
+  if (filename.endsWith(".css")) return content;
+  const parts: string[] = [];
+  const re = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content))) parts.push(m[1]);
+  return parts.join("\n");
+}
+
+function collectMarkupNames(files: Map<string, string>, override: { filename: string; content: string }) {
+  const classes = new Set<string>();
+  const ids = new Set<string>();
+  const addWords = (v: string, into: Set<string>) => {
+    for (const w of v.split(/\s+/)) if (w) into.add(w.toLowerCase());
+  };
+  for (const [fn, raw] of files) {
+    const text = fn === override.filename ? override.content : raw;
+    if (!fn.endsWith(".html")) continue;
+    let m: RegExpExecArray | null;
+    const cls = /\bclass(?:Name)?\s*=\s*["']([^"']*)["']/gi;
+    while ((m = cls.exec(text))) addWords(m[1], classes);
+    const idr = /\bid\s*=\s*["']([^"']*)["']/gi;
+    while ((m = idr.exec(text))) addWords(m[1], ids);
+    // classes added from scripts: classList.add('a', "b") / toggle(...)
+    const js = /classList\.(?:add|toggle|replace)\(([^)]*)\)/g;
+    while ((m = js.exec(text))) {
+      for (const q of m[1].match(/["'`]([\w-]+)["'`]/g) || []) classes.add(q.slice(1, -1).toLowerCase());
+    }
+  }
+  return { classes, ids };
+}
+
+export function cssEffectIssues(
+  filename: string,
+  before: string,
+  after: string,
+  files: Map<string, string>,
+): string[] {
+  const afterCss = extractCssText(filename, after);
+  if (!afterCss.trim()) return [];
+  const beforeDecls = parseCssDecls(extractCssText(filename, before));
+  const afterDecls = parseCssDecls(afterCss);
+  const key = (d: CssDecl) => `${d.media}|${d.sel}|${d.prop}|${d.value}|${d.important ? 1 : 0}`;
+  const had = new Set(beforeDecls.map(key));
+  const changed = afterDecls.filter((d) => !had.has(key(d)));
+  if (changed.length === 0) return [];
+
+  const withOverride = new Map(files);
+  withOverride.set(filename, after);
+  const { classes, ids } = collectMarkupNames(withOverride, { filename, content: after });
+  const hasMarkup = classes.size > 0 || ids.size > 0;
+
+  // Other stylesheets can also override: check the shared one for !important.
+  const shared = filename !== "assets/style.css" && files.has("assets/style.css")
+    ? parseCssDecls(files.get("assets/style.css") || "")
+    : [];
+
+  const issues: string[] = [];
+  const seen = new Set<string>();
+  const push = (msg: string) => {
+    if (seen.has(msg) || issues.length >= 6) return;
+    seen.add(msg);
+    issues.push(msg);
+  };
+
+  for (const d of changed) {
+    if (hasMarkup) {
+      for (const part of d.sel.split(",")) {
+        const bare = part.replace(/::?[\w-]+(\([^)]*\))?/g, "");
+        const missingCls = (bare.match(/\.[\w-]+/g) || []).map((c) => c.slice(1)).filter((c) => !classes.has(c));
+        const missingId = (bare.match(/#[\w-]+/g) || []).map((c) => c.slice(1)).filter((c) => !ids.has(c));
+        for (const c of missingCls) push(`селектор «${part}»: класса .${c} нет в разметке — правило ни к чему не применяется`);
+        for (const c of missingId) push(`селектор «${part}»: id #${c} нет в разметке — правило ни к чему не применяется`);
+      }
+    }
+    const rivals = [...afterDecls, ...shared].filter(
+      (o) => o !== d && o.sel === d.sel && o.prop === d.prop && o.value !== d.value,
+    );
+    for (const o of rivals) {
+      if (o.important && !d.important) {
+        push(`«${d.sel} { ${d.prop}: ${d.value} }» перебивается «${o.prop}: ${o.value} !important»${o.media ? ` в ${o.media}` : ""}`);
+      } else if (!shared.includes(o) && o.media === d.media && o.order > d.order && (!d.important || o.important)) {
+        push(`«${d.sel} { ${d.prop}: ${d.value} }» ниже в CSS переопределено на «${o.value}» — правка не видна`);
+      } else if (!d.media && o.media && !(d.important && !o.important)) {
+        push(`«${d.sel} { ${d.prop} }»: в ${o.media} задано «${o.value}» — на этих экранах правка не видна`);
+      }
+    }
+  }
+  return issues;
 }
