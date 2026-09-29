@@ -4,7 +4,8 @@
  * Key: ROUTER_CHEAP_API_KEY (Amvera env only — never expose to the frontend).
  * Base URL: https://router.cheap (Anthropic Messages API compatible).
  * Context: 1M window via anthropic-beta header when the model supports it.
- * Default model: claude-opus-5 (override with ROUTER_CHEAP_MODEL).
+ * Default model: claude-opus-5-5 (override with ROUTER_CHEAP_MODEL);
+ * auto-fallback to claude-opus-5 (ROUTER_CHEAP_FALLBACK_MODEL) when it has no channel.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -14,9 +15,70 @@ import { KieApiError } from "./kie-errors";
 export const ROUTER_CHEAP_BASE_URL =
   process.env.ROUTER_CHEAP_BASE_URL?.trim() || "https://router.cheap";
 
-/** Prefer an Amvera override; default is Claude Opus 5 via router.cheap for agent V1. */
+/** Prefer an Amvera override; default is Claude Opus 5.5 via router.cheap for agent V1. */
 export const ROUTER_CHEAP_MODEL =
-  process.env.ROUTER_CHEAP_MODEL?.trim() || "claude-opus-5";
+  process.env.ROUTER_CHEAP_MODEL?.trim() || "claude-opus-5-5";
+
+/**
+ * Used automatically when the primary model has no channel on router.cheap
+ * (503 "no channel is currently available", 404 model_not_found, 529 overloaded).
+ */
+export const ROUTER_CHEAP_FALLBACK_MODEL =
+  process.env.ROUTER_CHEAP_FALLBACK_MODEL?.trim() || "claude-opus-5";
+
+const PRIMARY_COOLDOWN_MS = 5 * 60_000;
+let primaryDownUntil = 0;
+
+/** True when the router says the requested model/channel is unavailable (not a prompt error). */
+export function isModelUnavailableError(err: unknown): boolean {
+  const e = err as any;
+  const status = Number(e?.status || e?.statusCode || 0);
+  if (status === 503 || status === 404 || status === 529) return true;
+  const msg = String(e?.message || e || "");
+  return /no (available )?channel|model_not_found|model [^\n]{0,80}(not found|does not exist)|temporarily unavailable|overloaded/i.test(
+    msg,
+  );
+}
+
+/** Model that agent V1 will actually hit right now (primary unless it is cooling down). */
+export function getActiveRouterCheapModel(): string {
+  return Date.now() < primaryDownUntil ? ROUTER_CHEAP_FALLBACK_MODEL : ROUTER_CHEAP_MODEL;
+}
+
+function modelCandidates(explicit?: string): string[] {
+  if (explicit && explicit !== ROUTER_CHEAP_MODEL) return [explicit];
+  if (Date.now() < primaryDownUntil) return [ROUTER_CHEAP_FALLBACK_MODEL];
+  return Array.from(new Set([ROUTER_CHEAP_MODEL, ROUTER_CHEAP_FALLBACK_MODEL]));
+}
+
+function markPrimaryDown(err: unknown): void {
+  primaryDownUntil = Date.now() + PRIMARY_COOLDOWN_MS;
+  const msg = String((err as any)?.message || err).slice(0, 200);
+  console.warn(
+    `[AGENT] ${ROUTER_CHEAP_MODEL} unavailable on router.cheap, using ${ROUTER_CHEAP_FALLBACK_MODEL} for ${PRIMARY_COOLDOWN_MS / 60_000} min:`,
+    msg,
+  );
+}
+
+async function withModelFallback<T>(explicit: string | undefined, fn: (model: string) => Promise<T>): Promise<T> {
+  const candidates = modelCandidates(explicit);
+  let lastErr: unknown;
+  for (let i = 0; i < candidates.length; i++) {
+    const model = candidates[i];
+    try {
+      return await fn(model);
+    } catch (err) {
+      lastErr = err;
+      const hasNext = i < candidates.length - 1;
+      if (model === ROUTER_CHEAP_MODEL && hasNext && isModelUnavailableError(err)) {
+        markPrimaryDown(err);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
 
 /**
  * Output token cap for agent V1 (create/edit via tools or stream).
@@ -106,14 +168,16 @@ export async function routerCheapGenerateSync(opts: {
   assertRouterCheapConfigured();
   // SDK requires streaming when max_tokens implies >10 min wall time
   // (expected ≈ 60min * max_tokens / 128000). Use stream→finalMessage.
-  const resp = await anthropic.messages
-    .stream({
-      model: opts.model || ROUTER_CHEAP_MODEL,
-      max_tokens: opts.maxTokens ?? ROUTER_CHEAP_MAX_TOKENS,
-      system: opts.systemPrompt,
-      messages: opts.messages,
-    })
-    .finalMessage();
+  const resp = await withModelFallback(opts.model, (model) =>
+    anthropic.messages
+      .stream({
+        model,
+        max_tokens: opts.maxTokens ?? ROUTER_CHEAP_MAX_TOKENS,
+        system: opts.systemPrompt,
+        messages: opts.messages,
+      })
+      .finalMessage(),
+  );
   let text = "";
   for (const block of resp.content) {
     if (block.type === "text") text += block.text;
@@ -129,20 +193,36 @@ export async function* routerCheapGenerateStream(opts: {
   model?: string;
 }): AsyncGenerator<string> {
   assertRouterCheapConfigured();
-  const stream = anthropic.messages.stream({
-    model: opts.model || ROUTER_CHEAP_MODEL,
-    max_tokens: opts.maxTokens ?? ROUTER_CHEAP_MAX_TOKENS,
-    system: opts.systemPrompt,
-    messages: opts.messages,
-  });
-
-  for await (const event of stream) {
-    if (
-      event.type === "content_block_delta" &&
-      event.delta.type === "text_delta" &&
-      event.delta.text
-    ) {
-      yield event.delta.text;
+  const candidates = modelCandidates(opts.model);
+  for (let i = 0; i < candidates.length; i++) {
+    const model = candidates[i];
+    let yielded = false;
+    try {
+      const stream = anthropic.messages.stream({
+        model,
+        max_tokens: opts.maxTokens ?? ROUTER_CHEAP_MAX_TOKENS,
+        system: opts.systemPrompt,
+        messages: opts.messages,
+      });
+      for await (const event of stream) {
+        if (
+          event.type === "content_block_delta" &&
+          event.delta.type === "text_delta" &&
+          event.delta.text
+        ) {
+          yielded = true;
+          yield event.delta.text;
+        }
+      }
+      return;
+    } catch (err) {
+      // Only switch models before any text reached the caller.
+      const hasNext = i < candidates.length - 1;
+      if (!yielded && model === ROUTER_CHEAP_MODEL && hasNext && isModelUnavailableError(err)) {
+        markPrimaryDown(err);
+        continue;
+      }
+      throw err;
     }
   }
 }
@@ -223,8 +303,8 @@ export async function routerCheapToolsRound(opts: {
   const canNonStream = maxTokens <= 20000;
   const preferNonStream = opts.preferNonStreaming !== false && canNonStream;
 
-  const requestBody = {
-    model: opts.model || ROUTER_CHEAP_MODEL,
+  const buildRequest = (model: string) => ({
+    model,
     max_tokens: maxTokens,
     system: opts.systemPrompt,
     messages: opts.messages,
@@ -232,7 +312,7 @@ export async function routerCheapToolsRound(opts: {
     tool_choice: (opts.forceToolUse ? { type: "any" } : { type: "auto" }) as
       | { type: "any" }
       | { type: "auto" },
-  };
+  });
 
   const toResult = (resp: { content: Anthropic.Messages.ContentBlock[]; stop_reason: string | null }): RouterCheapToolRoundResult => {
     const content: RouterCheapToolRoundResult["content"] = [];
@@ -259,7 +339,8 @@ export async function routerCheapToolsRound(opts: {
     };
   };
 
-  try {
+  const runOnce = async (model: string): Promise<RouterCheapToolRoundResult> => {
+    const requestBody = buildRequest(model);
     if (preferNonStream) {
       try {
         const resp = await anthropic.messages.create(requestBody);
@@ -273,16 +354,20 @@ export async function routerCheapToolsRound(opts: {
         console.warn("[AGENT] Claude non-stream tools rejected, falling back to stream:", nsMsg.slice(0, 160));
       }
     }
-
     const resp = await anthropic.messages.stream(requestBody).finalMessage();
     return toResult(resp);
+  };
+
+  try {
+    return await withModelFallback(opts.model, runOnce);
   } catch (err: any) {
     const status = Number(err?.status || err?.statusCode || 0);
     const msg = String(err?.message || err);
     // Tools rejected by the router → signal multipage stream fallback.
-    // Don't treat "Streaming is required…" / empty-stream as a tools rejection.
+    // Don't treat "Streaming is required…" / empty-stream / missing channel as a tools rejection.
     if (
       (status === 400 || status === 422 || /tool/i.test(msg)) &&
+      !isModelUnavailableError(err) &&
       !/streaming is required/i.test(msg) &&
       !/stream ended without producing/i.test(msg)
     ) {

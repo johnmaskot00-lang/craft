@@ -185,16 +185,19 @@ interface TourStep {
   position?: "top" | "bottom" | "left" | "right";
 }
 
+/** Professional mode: max optional reference / product images. */
+const MAX_PRO_REFS = 10;
+
 const CHOOSE_TOUR_STEPS: TourStep[] = [
-  { target: '[data-tour="mode-photo"]', title: "Профессионал", text: "Claude Opus 5 — загрузите макет или референс; минимум преднастроек, точная реализация структуры.", position: "bottom" },
+  { target: '[data-tour="mode-photo"]', title: "Профессионал", text: "Claude Opus 5.5 без шаблонов: напишите промпт и, по желанию, приложите до 10 референсов или фото товара.", position: "bottom" },
   { target: '[data-tour="mode-prompt"]', title: "По описанию", text: "Просто напишите текстом, что вам нужно — ИИ сделает сайт по вашему описанию.", position: "bottom" },
   { target: '[data-tour="mode-interactive"]', title: "Интерактивный", text: "Сайт с кинематографичной анимацией, которая разворачивается по мере прокрутки.", position: "bottom" },
 ];
 
 const PHOTO_TOUR_STEPS: TourStep[] = [
   { target: '[data-tour="photo-title"]', title: "Название", text: "Задайте имя проекта, чтобы легко найти его на дашборде.", position: "bottom" },
-  { target: '[data-tour="photo-desc"]', title: "Описание", text: "Добавьте инструкции: замените текст, укажите язык, опишите желаемые изменения.", position: "bottom" },
-  { target: '[data-tour="photo-upload"]', title: "Загрузите скриншот", text: "Перетащите скриншот или макет сайта. ИИ воссоздаст его дизайн.", position: "left" },
+  { target: '[data-tour="photo-desc"]', title: "Описание", text: "Опишите сайт своими словами — ИИ следует только вашему промпту, без готовых шаблонов.", position: "bottom" },
+  { target: '[data-tour="photo-upload"]', title: "Референсы и фото", text: "Необязательно: до 10 изображений — референсы дизайна и/или фото товара.", position: "left" },
   { target: '[data-tour="photo-ai-gen"]', title: "AI генератор макетов", text: "Нет скриншота? Опишите дизайн — ИИ нарисует макет для вас (15 токенов).", position: "left" },
   { target: '[data-tour="photo-create"]', title: "Создать проект", text: "Нажмите, чтобы запустить генерацию сайта. ИИ создаст готовый HTML/CSS/JS код.", position: "top" },
 ];
@@ -660,7 +663,7 @@ export default function DashboardPage() {
       const agent = draft?.agentVersion ?? agentVersion;
 
       const prompt = mode === "photo"
-        ? (desc || (photos.length > 0 ? "Создай профессиональный сайт, вдохновляясь приложенными референсами" : "Создай стильный профессиональный сайт"))
+        ? (desc.trim() || "Сайт по приложенным изображениям")
         : desc || t;
       const interactiveParam = mode === "interactive"
         ? `&interactive=1&istyle=${iStyle}`
@@ -681,7 +684,7 @@ export default function DashboardPage() {
           : `&agent=${agent}`;
       const mockupParam = mockupUrls.length > 0
         ? `&mockup=1&mockupUrls=${encodeURIComponent(mockupUrls.join(","))}`
-        : "";
+        : mode === "photo" ? "&pro=1" : "";
       const iProductParam = productUrl ? `&iproductUrl=${encodeURIComponent(productUrl)}` : "";
       try { clearCreateDraft(); } catch { /* ignore */ }
       setShowCreateModal(false);
@@ -769,6 +772,10 @@ export default function DashboardPage() {
     }
     const liveDescription = descriptionInputRef.current?.value ?? description;
     if (liveDescription !== description) setDescription(liveDescription);
+    if (selectedMode === "photo" && !liveDescription.trim() && photoImages.length === 0) {
+      toast({ title: "Опишите сайт", description: "Напишите промпт или приложите хотя бы одно изображение" });
+      return;
+    }
     // React state updates are async; pass the live textarea value directly so
     // the first create cannot accidentally submit the previous keystroke.
     createMutation.mutate({ ...stashCreateDraft(), description: liveDescription });
@@ -1653,7 +1660,7 @@ export default function DashboardPage() {
                     {
                       m: "photo",
                       t: "Профессионал",
-                      d: "Claude Opus 5",
+                      d: "Claude Opus 5.5",
                       badge: null as string | null,
                       icon: (
                         <svg viewBox="0 0 24 24" fill="none" className="w-8 h-8">
@@ -1915,7 +1922,7 @@ export default function DashboardPage() {
                         <Textarea
                           placeholder={
                             selectedMode === "photo"
-                              ? "Сделай сайт как у референса, но с моим товаром"
+                              ? "Опишите сайт как хотите: ниша, стиль, секции, тексты. Например: лендинг кофейни в тёплых тонах, мой товар — на фото #1"
                               : "Сайт SPA студии, в бежевых тонах, с картинкой в Hero секции, и плавной анимацией"
                           }
                           ref={descriptionInputRef}
@@ -1933,7 +1940,7 @@ export default function DashboardPage() {
                     <div className="flex flex-col gap-3">
                       {selectedMode === "photo" ? (
                         <div className="flex flex-col gap-3 flex-1">
-                          <div style={{ fontSize: '0.65rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#86868B', paddingLeft: 4 }}>Референсы (дизайн и/или фото товара) — необязательно</div>
+                          <div style={{ fontSize: '0.65rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#86868B', paddingLeft: 4 }}>Референсы и фото товара — необязательно, до 10</div>
                           <input
                             ref={photoInputRef}
                             type="file"
@@ -1944,9 +1951,9 @@ export default function DashboardPage() {
                             onChange={(e) => {
                               const files = Array.from(e.target.files || []);
                               if (files.length === 0) return;
-                              const remaining = Math.max(0, 5 - photoImages.length);
+                              const remaining = Math.max(0, MAX_PRO_REFS - photoImages.length);
                               if (files.length > remaining) {
-                                toast({ title: "Слишком много файлов", description: "Максимум 5 референсов", variant: "destructive" });
+                                toast({ title: "Слишком много файлов", description: `Максимум ${MAX_PRO_REFS} изображений`, variant: "destructive" });
                               }
                               files.slice(0, remaining).forEach(file => {
                                 if (file.size > 5 * 1024 * 1024) {
@@ -2004,7 +2011,7 @@ export default function DashboardPage() {
                                     </div>
                                   </div>
                                 ))}
-                                {photoImages.length < 5 && (
+                                {photoImages.length < MAX_PRO_REFS && (
                                   <button
                                     type="button"
                                     data-testid="button-add-more-photos"
@@ -2017,7 +2024,7 @@ export default function DashboardPage() {
                                   </button>
                                 )}
                               </div>
-                              <p className="text-[10px]" style={{ color: '#A78BFA' }}>Приложите скриншот дизайна-референса и/или реальные фото товара/бренда — ИИ сам решит, что использовать как вдохновение, а что сохранить как есть</p>
+                              <p className="text-[10px]" style={{ color: '#A78BFA' }}>Номер на превью (#1, #2…) можно упоминать в промпте: «товар с фото #2 в hero»</p>
                             </div>
                           ) : (
                             <div className="flex flex-col gap-2 flex-1">
@@ -2034,7 +2041,7 @@ export default function DashboardPage() {
                                 </div>
                                 <div className="text-center">
                                   <p className="text-sm font-semibold" style={{ color: '#6D28D9' }}>Загрузить референсы</p>
-                                  <p className="text-xs mt-0.5" style={{ color: '#A78BFA' }}>Необязательно — дизайн и/или фото товара, до 5 файлов, PNG/JPG/WEBP до 5 МБ</p>
+                                  <p className="text-xs mt-0.5" style={{ color: '#A78BFA' }}>Необязательно — референсы и/или фото товара, до 10 файлов, PNG/JPG/WEBP до 5 МБ</p>
                                 </div>
                               </button>
                               <div className="rounded-xl p-2.5" data-tour="photo-ai-gen" style={{ background: 'rgba(139,92,246,0.04)', border: '1px solid rgba(139,92,246,0.15)' }}>

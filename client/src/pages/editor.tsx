@@ -283,6 +283,8 @@ export default function EditorPage() {
   const firstCreateKickRef = useRef(false);
   /** Agent version forced by the dashboard create URL for the first kick. */
   const firstCreateAgentRef = useRef<"v1" | "v2" | null>(null);
+  /** Dashboard Professional mode without references: lean prompt on first build. */
+  const firstCreateProRef = useRef(false);
 
   const [auditOpen, setAuditOpen] = useState(false);
   const [auditRunning, setAuditRunning] = useState(false);
@@ -450,6 +452,7 @@ export default function EditorPage() {
       productUrl: initialProductImageUrl,
     };
     const isMockup = urlParams.get("mockup") === "1";
+    const isPro = isMockup || urlParams.get("pro") === "1";
     const mockupUrlsParam = urlParams.get("mockupUrls") || urlParams.get("mockupUrl") || "";
     const mockupUrlList = mockupUrlsParam.split(",").map(s => s.trim()).filter(Boolean);
     if (initialPrompt && !project?.generatedCode && messages.length === 0) {
@@ -473,10 +476,11 @@ export default function EditorPage() {
           firstCreateKickRef.current = true;
           // Professional (mockup or agent=v1) → Claude V1; else Gemini V2.
           const kickVersion =
-            isMockup || urlParams.get("agent") === "v1"
+            isPro || urlParams.get("agent") === "v1"
               ? "v1"
               : "v2";
           firstCreateAgentRef.current = kickVersion;
+          firstCreateProRef.current = isPro;
           setAgentVersion(kickVersion);
           try { localStorage.setItem("craft-agent-version", kickVersion); } catch {}
           setTimeout(() => handleGenerate(initialPrompt, enhanced, initialResearch, initialMultiPages, initialSeoH1, initialSeoH2s, mockupImages, initialLeadForm, initialInteractive, initialInteractiveStyle, initialProductImageUrl || undefined), 500);
@@ -892,6 +896,10 @@ export default function EditorPage() {
       const isMockupGen = !!(isMockupActive && hasMockupRefs);
       if (siteEmpty) {
         const forced = firstCreateAgentRef.current;
+        if (firstCreateProRef.current) {
+          bodyData.professionalMode = true;
+          firstCreateProRef.current = false;
+        }
         if (forced) {
           bodyData.agentVersion = forced;
           firstCreateAgentRef.current = null;
