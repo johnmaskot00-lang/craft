@@ -14,6 +14,108 @@ import {
   putVersionBlob,
   type VersionPayload,
 } from "./version-blobs";
+import {
+  SITE_BLOB_PREFIX,
+  getSiteBlob,
+  putSiteBlob,
+  shouldOffloadSiteCode,
+  siteCodeKey,
+  siteFileKey,
+} from "./site-blobs";
+
+/**
+ * Superseded site objects are kept this long before deletion: longer than DB backups
+ * are kept (CRAFT_BACKUP_KEEP_DAYS, default 14), so a restored backup never points at
+ * a deleted object.
+ */
+const SITE_OBJECT_GRACE_SEC = Math.max(
+  1,
+  Number(process.env.CRAFT_SITE_OBJECT_GRACE_DAYS ?? ((Number(process.env.CRAFT_BACKUP_KEEP_DAYS) || 14) + 7)) * 86400,
+);
+
+/**
+ * Queue Object Storage keys for deletion. Rows can share a key (content-addressed:
+ * a duplicated project points at the same object), so the outbox worker re-checks
+ * references before deleting.
+ */
+async function enqueueObjectDeletes(keys: Array<string | null | undefined>): Promise<void> {
+  const unique = Array.from(new Set(keys.filter((k): k is string => !!k)));
+  if (!unique.length) return;
+  // Site objects outlive the newest DB backup that may still point at them: restoring
+  // backup N must find every page as it was at N. Versions keep the old behaviour.
+  const graceSec = (key: string) => (key.startsWith(SITE_BLOB_PREFIX) ? SITE_OBJECT_GRACE_SEC : 0);
+  const rows = unique.map((key) => ({ key, delay: graceSec(key) }));
+  // One JSON param: drizzle expands a JS array into ($1, $2, ...), which is not a
+  // valid ::text[] literal (that silently broke the old version-blob enqueue).
+  await db.execute(sql`
+    INSERT INTO object_delete_outbox (object_key, next_attempt_at)
+    SELECT r.key, CURRENT_TIMESTAMP + (r.delay || ' seconds')::interval
+    FROM json_to_recordset(${JSON.stringify(rows)}::json) AS r(key text, delay integer)
+    ON CONFLICT (object_key) DO NOTHING
+  `).catch((e: any) => console.warn("[outbox] enqueue:", e?.message || e));
+}
+
+/**
+ * Upload `code` and return the columns to store. Falls back to inline storage when
+ * offload is disabled, the payload is out of range, or the upload fails — losing
+ * the offload is fine, losing the write is not.
+ */
+async function siteCodeColumns(
+  projectId: number,
+  code: string,
+): Promise<{ generatedCode: string; codeBlobKey: string | null }> {
+  if (!shouldOffloadSiteCode(code)) return { generatedCode: code, codeBlobKey: null };
+  const key = siteCodeKey(projectId);
+  try {
+    await putSiteBlob(key, code);
+    return { generatedCode: "", codeBlobKey: key };
+  } catch (e: any) {
+    console.warn(`[site-blobs] upload failed for project ${projectId}, keeping code inline:`, e?.message || e);
+    return { generatedCode: code, codeBlobKey: null };
+  }
+}
+
+async function siteFileColumns(
+  projectId: number,
+  filename: string,
+  code: string,
+): Promise<{ code: string; blobKey: string | null; codeBytes: number }> {
+  const codeBytes = Buffer.byteLength(code || "", "utf8");
+  if (!shouldOffloadSiteCode(code)) return { code, blobKey: null, codeBytes };
+  const key = siteFileKey(projectId, filename);
+  try {
+    await putSiteBlob(key, code);
+    return { code: "", blobKey: key, codeBytes };
+  } catch (e: any) {
+    console.warn(`[site-blobs] file upload failed (${projectId}/${filename}), keeping inline:`, e?.message || e);
+    return { code, blobKey: null, codeBytes };
+  }
+}
+
+/** Resolve a project row's real HTML. Throws if the object is unreadable. */
+async function hydrateProject<T extends { generatedCode: string; codeBlobKey?: string | null }>(row: T): Promise<T> {
+  if (!row.codeBlobKey) return row;
+  return { ...row, generatedCode: await getSiteBlob(row.codeBlobKey) };
+}
+
+async function hydrateFile(row: ProjectFile): Promise<ProjectFile> {
+  if (!row.blobKey) return row;
+  return { ...row, code: await getSiteBlob(row.blobKey) };
+}
+
+/** Bounded parallel map — a 100-page SEO site must not open 100 S3 reads at once. */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
 
 /** Never serialize password hashes to API clients (admin or otherwise). */
 export function publicUser<T extends { password?: string | null }>(user: T): Omit<T, "password"> {
@@ -33,7 +135,13 @@ export function publicUser<T extends { password?: string | null }>(user: T): Omi
  */
 export type ProjectListRow = Omit<
   Project,
-  "generatedCode" | "generatingPlaceholder" | "animPending" | "animReady"
+  | "generatedCode"
+  | "generatingPlaceholder"
+  | "animPending"
+  | "animReady"
+  | "animTaskPending"
+  | "hasScrollJacking"
+  | "codeBlobKey"
 > & { generatedCode: ""; hasPreview: boolean };
 
 export interface IStorage {
@@ -189,6 +297,9 @@ export interface IStorage {
 }
 
 export const NEW_USER_CREDITS = 0;
+
+/** Per-message cap for project chat history (characters). */
+const MESSAGE_MAX_CHARS = Math.max(4000, Number(process.env.CRAFT_MESSAGE_MAX_CHARS) || 60000);
 
 /** Max version snapshots kept per project (full HTML). Was 80 — blew heap on list. */
 export const VERSION_RETENTION_PER_PROJECT = Math.max(
@@ -424,8 +535,9 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getProject(id: number): Promise<Project | undefined> {
-    const [project] = await db.select().from(projects).where(eq(projects.id, id));
-    if (!project) return undefined;
+    const [row] = await db.select().from(projects).where(eq(projects.id, id));
+    if (!row) return undefined;
+    const project = await hydrateProject(row);
     // Full row already paid the TOAST cost — refresh cached flags cheaply in memory
     // and write-through so /generation-status never needs to scan HTML again.
     const meta = deriveProjectContentMeta(project.generatedCode);
@@ -433,12 +545,17 @@ export class DatabaseStorage implements IStorage {
       meta.codeBytes !== Number(project.codeBytes || 0) ||
       meta.generatingPlaceholder !== Boolean(project.generatingPlaceholder) ||
       meta.animPending !== Boolean(project.animPending) ||
-      meta.animReady !== Boolean(project.animReady);
+      meta.animReady !== Boolean(project.animReady) ||
+      meta.animTaskPending !== Boolean(project.animTaskPending) ||
+      meta.hasScrollJacking !== Boolean(project.hasScrollJacking);
     if (stale) {
+      // Only if nothing saved the row since it was read: the HTML above can be
+      // seconds old (S3 read), and stale flags on a fresh save could e.g. mark a
+      // finished site as still generating.
       void db
         .update(projects)
         .set(meta)
-        .where(eq(projects.id, id))
+        .where(and(eq(projects.id, id), eq(projects.updatedAt, row.updatedAt)))
         .catch((e: any) => console.warn("[projects] meta refresh:", e?.message || e));
       return { ...project, ...meta };
     }
@@ -526,46 +643,48 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createProject(insertProject: InsertProject): Promise<Project> {
-    const meta = deriveProjectContentMeta(insertProject.generatedCode);
+    const code = insertProject.generatedCode || "";
+    const meta = deriveProjectContentMeta(code);
+    // The object key needs the row id, so insert first, then move the code out.
     const [project] = await db
       .insert(projects)
       .values({
         ...insertProject,
-        previewImage: extractPreviewImage(insertProject.generatedCode),
+        previewImage: extractPreviewImage(code),
         ...meta,
       })
       .returning();
-    return project;
+    if (!project || !shouldOffloadSiteCode(code)) return project;
+    const cols = await siteCodeColumns(project.id, code);
+    if (!cols.codeBlobKey) return project;
+    await db.update(projects).set(cols).where(eq(projects.id, project.id));
+    return { ...project, codeBlobKey: cols.codeBlobKey, generatedCode: code };
   }
 
   async duplicateProject(sourceId: number, userId: number): Promise<Project | undefined> {
-    const [source] = await db.select().from(projects).where(eq(projects.id, sourceId));
-    if (!source || source.userId !== userId) return undefined;
+    const [sourceRow] = await db.select().from(projects).where(eq(projects.id, sourceId));
+    if (!sourceRow || sourceRow.userId !== userId) return undefined;
+    const source = await hydrateProject(sourceRow);
 
     // Hosting fields stay empty: the clone is a fresh draft that publishes to its
     // own bucket/domain instead of hijacking the original site.
-    const meta = deriveProjectContentMeta(source.generatedCode);
-    const [copy] = await db
-      .insert(projects)
-      .values({
-        userId,
-        title: `${source.title} (копия)`.slice(0, 200),
-        description: source.description,
-        generatedCode: source.generatedCode,
-        previewImage: source.previewImage,
-        type: source.type,
-        seoConfig: source.seoConfig,
-        publishStatus: "draft",
-        ...meta,
-      })
-      .returning();
+    const copy = await this.createProject({
+      userId,
+      title: `${source.title} (копия)`.slice(0, 200),
+      description: source.description,
+      generatedCode: source.generatedCode,
+      previewImage: source.previewImage,
+      type: source.type,
+      seoConfig: source.seoConfig,
+      publishStatus: "draft",
+    });
     if (!copy) return undefined;
 
-    const files = await db.select().from(projectFiles).where(eq(projectFiles.projectId, sourceId));
-    if (files.length) {
-      await db.insert(projectFiles).values(
-        files.map((f) => ({ projectId: copy.id, filename: f.filename, code: f.code })),
-      );
+    // Re-upload under the copy's own keys: sharing objects with the source would
+    // let deleting one project take the other's pages with it.
+    const files = await this.getProjectFiles(sourceId);
+    for (const f of files) {
+      await this.upsertProjectFile({ projectId: copy.id, filename: f.filename, code: f.code });
     }
 
     // Image library is referenced by {{IMG:name}} markers inside the cloned HTML.
@@ -586,31 +705,45 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateProject(id: number, data: Partial<Project>): Promise<Project | undefined> {
-    const patch: Partial<Project> = { ...data, updatedAt: new Date() };
+    // The pointer column is owned by this class; a stale value from a caller's
+    // spread row must never overwrite it.
+    const { codeBlobKey: _ignored, ...rest } = data;
+    const patch: Partial<Project> = { ...rest, updatedAt: new Date() };
+    const code = data.generatedCode;
+    let previousKey: string | null = null;
     // Refresh cached thumbnail + content flags whenever the site HTML changes.
-    if (data.generatedCode !== undefined) {
+    if (code !== undefined) {
       if (data.previewImage === undefined) {
-        patch.previewImage = extractPreviewImage(data.generatedCode);
+        patch.previewImage = extractPreviewImage(code);
       }
-      Object.assign(patch, deriveProjectContentMeta(data.generatedCode));
+      Object.assign(patch, deriveProjectContentMeta(code));
+      const [current] = await db
+        .select({ codeBlobKey: projects.codeBlobKey })
+        .from(projects)
+        .where(eq(projects.id, id));
+      previousKey = current?.codeBlobKey ?? null;
+      Object.assign(patch, await siteCodeColumns(id, code));
     }
     const [project] = await db.update(projects).set(patch).where(eq(projects.id, id)).returning();
-    return project;
+    if (!project) return project;
+    if (code !== undefined) {
+      if (previousKey && previousKey !== project.codeBlobKey) await enqueueObjectDeletes([previousKey]);
+      return { ...project, generatedCode: code };
+    }
+    // Metadata-only update: callers still expect the full row back.
+    return hydrateProject(project).catch((e: any) => {
+      console.warn(`[site-blobs] hydrate after update failed for project ${id}:`, e?.message || e);
+      return project;
+    });
   }
 
   async deleteProject(id: number): Promise<void> {
-    const blobRows = await db
-      .select({ blobKey: projectVersions.blobKey })
-      .from(projectVersions)
-      .where(eq(projectVersions.projectId, id));
-    const blobKeys = blobRows.map((r) => r.blobKey).filter((key): key is string => !!key);
-    if (blobKeys.length) {
-      await db.execute(sql`
-        INSERT INTO object_delete_outbox (object_key)
-        SELECT key FROM unnest(${blobKeys}::text[]) AS key
-        ON CONFLICT (object_key) DO NOTHING
-      `).catch((e: any) => console.warn("[outbox] enqueue project blobs:", e?.message || e));
-    }
+    const [versionRows, fileRows, projectRows] = await Promise.all([
+      db.select({ key: projectVersions.blobKey }).from(projectVersions).where(eq(projectVersions.projectId, id)),
+      db.select({ key: projectFiles.blobKey }).from(projectFiles).where(eq(projectFiles.projectId, id)),
+      db.select({ key: projects.codeBlobKey }).from(projects).where(eq(projects.id, id)),
+    ]);
+    await enqueueObjectDeletes([...versionRows, ...fileRows, ...projectRows].map((r) => r.key));
     await Promise.all([
       db.delete(projectMessages).where(eq(projectMessages.projectId, id)),
       db.delete(projectFiles).where(eq(projectFiles.projectId, id)),
@@ -652,7 +785,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createProjectMessage(message: InsertProjectMessage): Promise<ProjectMessage> {
-    const [msg] = await db.insert(projectMessages).values(message).returning();
+    // Chat history is display + short agent context, not storage for whole pages a
+    // user pasted or a model echoed back. Cap each message.
+    const content = message.content || "";
+    const capped = content.length > MESSAGE_MAX_CHARS
+      ? `${content.slice(0, MESSAGE_MAX_CHARS)}\n…[сообщение сокращено: ${content.length} символов]`
+      : content;
+    const [msg] = await db.insert(projectMessages).values({ ...message, content: capped }).returning();
     return msg;
   }
 
@@ -930,53 +1069,76 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getProjectFiles(projectId: number): Promise<ProjectFile[]> {
-    return db.select().from(projectFiles).where(eq(projectFiles.projectId, projectId)).orderBy(projectFiles.filename);
+    const rows = await db.select().from(projectFiles).where(eq(projectFiles.projectId, projectId)).orderBy(projectFiles.filename);
+    return mapLimit(rows, 12, hydrateFile);
   }
 
   async getProjectFile(projectId: number, filename: string): Promise<ProjectFile | undefined> {
     const [file] = await db.select().from(projectFiles).where(and(eq(projectFiles.projectId, projectId), eq(projectFiles.filename, filename)));
-    return file;
+    return file ? hydrateFile(file) : undefined;
   }
 
   async upsertProjectFile(file: InsertProjectFile): Promise<ProjectFile> {
-    // Prefer atomic upsert when unique (project_id, filename) exists.
+    const code = file.code || "";
+    const cols = await siteFileColumns(file.projectId, file.filename, code);
+    // Prefer atomic upsert when unique (project_id, filename) exists. The CTE reads
+    // the pre-statement key so the superseded object can be queued for deletion.
     try {
       const result = await db.execute(sql`
-        INSERT INTO project_files (project_id, filename, code)
-        VALUES (${file.projectId}, ${file.filename}, ${file.code})
+        WITH prev AS (
+          SELECT blob_key FROM project_files
+          WHERE project_id = ${file.projectId} AND filename = ${file.filename}
+        )
+        INSERT INTO project_files (project_id, filename, code, blob_key, code_bytes)
+        VALUES (${file.projectId}, ${file.filename}, ${cols.code}, ${cols.blobKey}, ${cols.codeBytes})
         ON CONFLICT (project_id, filename)
-        DO UPDATE SET code = EXCLUDED.code
-        RETURNING id, project_id, filename, code, created_at
+        DO UPDATE SET code = EXCLUDED.code, blob_key = EXCLUDED.blob_key, code_bytes = EXCLUDED.code_bytes
+        RETURNING id, project_id, filename, blob_key, code_bytes, created_at,
+                  (SELECT blob_key FROM prev) AS prev_blob_key
       `);
       const row = (result.rows as any[])?.[0];
       if (row) {
+        if (row.prev_blob_key && row.prev_blob_key !== row.blob_key) {
+          await enqueueObjectDeletes([row.prev_blob_key]);
+        }
         return {
           id: row.id,
           projectId: row.project_id,
           filename: row.filename,
-          code: row.code,
+          code,
+          blobKey: row.blob_key,
+          codeBytes: Number(row.code_bytes || 0),
           createdAt: row.created_at,
         } as ProjectFile;
       }
     } catch (err: any) {
-      // Unique index may not exist yet in older DBs вЂ” fall back to select/update.
+      // Unique index may not exist yet in older DBs — fall back to select/update.
       console.warn("[storage] upsert ON CONFLICT failed, fallback:", err?.message?.slice?.(0, 120));
     }
-    const existing = await this.getProjectFile(file.projectId, file.filename);
+    const [existing] = await db
+      .select({ id: projectFiles.id, blobKey: projectFiles.blobKey })
+      .from(projectFiles)
+      .where(and(eq(projectFiles.projectId, file.projectId), eq(projectFiles.filename, file.filename)));
     if (existing) {
-      const [updated] = await db.update(projectFiles).set({ code: file.code }).where(eq(projectFiles.id, existing.id)).returning();
-      return updated;
+      const [updated] = await db.update(projectFiles).set(cols).where(eq(projectFiles.id, existing.id)).returning();
+      if (existing.blobKey && existing.blobKey !== cols.blobKey) await enqueueObjectDeletes([existing.blobKey]);
+      return { ...updated, code };
     }
-    const [created] = await db.insert(projectFiles).values(file).returning();
-    return created;
+    const [created] = await db.insert(projectFiles).values({ ...file, ...cols }).returning();
+    return { ...created, code };
   }
 
   async deleteProjectFile(id: number): Promise<void> {
-    await db.delete(projectFiles).where(eq(projectFiles.id, id));
+    const deleted = await db.delete(projectFiles).where(eq(projectFiles.id, id)).returning({ key: projectFiles.blobKey });
+    await enqueueObjectDeletes(deleted.map((r) => r.key));
   }
 
   async deleteProjectFilesByProject(projectId: number): Promise<void> {
-    await db.delete(projectFiles).where(eq(projectFiles.projectId, projectId));
+    const deleted = await db
+      .delete(projectFiles)
+      .where(eq(projectFiles.projectId, projectId))
+      .returning({ key: projectFiles.blobKey });
+    await enqueueObjectDeletes(deleted.map((r) => r.key));
   }
 
   async getLead(id: number): Promise<Lead | undefined> {
@@ -1051,9 +1213,13 @@ export class DatabaseStorage implements IStorage {
     return Number(row?.count ?? 0);
   }
 
+  /**
+   * Hot path (every request on a custom domain) — metadata only. `generatedCode`
+   * is NOT hydrated here; load the site with getProject(id) when the HTML is needed.
+   */
   async getProjectByCustomDomain(domain: string): Promise<Project | undefined> {
     const result = await db.select().from(projects).where(eq(projects.customDomain, domain)).limit(1);
-    return result[0];
+    return result[0] ? { ...result[0], generatedCode: "" } : undefined;
   }
 
   async getPublishedProjectsCount(userId: number): Promise<number> {
@@ -1065,7 +1231,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAllPublishedProjects(): Promise<Project[]> {
-    return db.select().from(projects).where(eq(projects.publishStatus, "published"));
+    const rows = await db.select().from(projects).where(eq(projects.publishStatus, "published"));
+    return mapLimit(rows, 6, hydrateProject);
   }
 
   async getAllUsersWithPublishedSites(): Promise<{ userId: number; publishedCount: number }[]> {
@@ -1082,18 +1249,19 @@ export class DatabaseStorage implements IStorage {
     return rows.map((r) => ({ userId: Number(r.userId), publishedCount: Number(r.publishedCount) }));
   }
 
+  // The scans below use cached flag columns, never LIKE over generated_code: offloaded
+  // sites keep their HTML in Object Storage, and LIKE detoasted every row anyway.
   async getAllProjectsWithPendingAnim(): Promise<Project[]> {
-    // SQL filter — avoid loading every project's generatedCode into Node.
-    return db.select().from(projects).where(
-      sql`${projects.generatedCode} LIKE '%data-scroll-anim-pending="1"%'`,
-    );
+    const ids = await this.listProjectIdsWithPendingAnim(50);
+    const rows = await Promise.all(ids.map((id) => this.getProject(id)));
+    return rows.filter((p): p is Project => !!p);
   }
 
   async listProjectIdsWithPendingAnim(limit = 12): Promise<number[]> {
     const rows = await db
       .select({ id: projects.id })
       .from(projects)
-      .where(sql`${projects.generatedCode} LIKE '%data-scroll-anim-pending="1"%'`)
+      .where(eq(projects.animPending, true))
       .orderBy(desc(projects.updatedAt))
       .limit(Math.max(1, Math.min(50, limit)));
     return rows.map((r) => r.id);
@@ -1103,18 +1271,38 @@ export class DatabaseStorage implements IStorage {
   // spinner section or in a fallback section written after a server restart.
   // Used by the periodic animation-resume job.
   async getAllProjectsWithAnimTaskId(): Promise<Project[]> {
-    return db.select().from(projects).where(
-      sql`${projects.generatedCode} LIKE '%data-scroll-anim-task-id="%'`
-    );
+    const ids = await this.listProjectIdsWithAnimTaskId(40);
+    const rows = await Promise.all(ids.map((id) => this.getProject(id)));
+    return rows.filter((p): p is Project => !!p);
   }
 
   async listProjectIdsWithAnimTaskId(limit = 8): Promise<number[]> {
     const rows = await db
       .select({ id: projects.id })
       .from(projects)
-      .where(sql`${projects.generatedCode} LIKE '%data-scroll-anim-task-id="%'`)
+      .where(eq(projects.animTaskPending, true))
       .orderBy(desc(projects.updatedAt))
       .limit(Math.max(1, Math.min(40, limit)));
+    return rows.map((r) => r.id);
+  }
+
+  /** Ids of sites still showing a generation placeholder (stuck-generation cleanup). */
+  async listProjectIdsWithGeneratingPlaceholder(limit = 50): Promise<number[]> {
+    const rows = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(eq(projects.generatingPlaceholder, true))
+      .orderBy(desc(projects.updatedAt))
+      .limit(Math.max(1, Math.min(200, limit)));
+    return rows.map((r) => r.id);
+  }
+
+  async listProjectIdsWithScrollJacking(limit = 50): Promise<number[]> {
+    const rows = await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(eq(projects.hasScrollJacking, true))
+      .limit(Math.max(1, Math.min(200, limit)));
     return rows.map((r) => r.id);
   }
 

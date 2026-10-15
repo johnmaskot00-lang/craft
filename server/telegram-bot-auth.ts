@@ -141,6 +141,17 @@ function botApi(method: string, body?: Record<string, unknown>) {
     });
 }
 
+/** Operational alert to the admin (ADMIN_TELEGRAM_ID). Never throws. */
+export async function notifyAdmin(text: string): Promise<boolean> {
+  const chatId = (process.env.ADMIN_TELEGRAM_ID || "").trim();
+  if (!chatId) {
+    console.warn("[alert] ADMIN_TELEGRAM_ID not set, alert only logged:", text.slice(0, 300));
+    return false;
+  }
+  const res = await botApi("sendMessage", { chat_id: chatId, text: text.slice(0, 4000), disable_web_page_preview: true });
+  return res != null;
+}
+
 export function getBotUsernameFromEnv(): string | null {
   if (cachedBotUsername) return cachedBotUsername;
   const fromEnv = process.env.VITE_TELEGRAM_BOT_USERNAME || process.env.TELEGRAM_BOT_USERNAME;

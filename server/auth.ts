@@ -20,8 +20,22 @@ import {
   handleTelegramUpdate,
 } from "./telegram-bot-auth";
 import { extractReferralCode } from "./referral";
+import { getRedis } from "./redis";
+import { RedisFirstSessionStore, logRedisPersistence } from "./session-store";
 
 const scryptAsync = promisify(scrypt);
+
+/** Redis when REDIS_URL is set (CRAFT_SESSION_STORE=pg forces the old store). */
+function buildSessionStore(pgStore: session.Store): session.Store {
+  const redis = process.env.CRAFT_SESSION_STORE === "pg" ? null : getRedis();
+  if (!redis) {
+    console.log("[session] store: postgres");
+    return pgStore;
+  }
+  console.log("[session] store: redis (postgres fallback)");
+  void logRedisPersistence(redis);
+  return new RedisFirstSessionStore(redis, pgStore);
+}
 
 async function hashPassword(password: string) {
   const salt = randomBytes(16).toString("hex");
@@ -117,13 +131,15 @@ export function setupAuth(app: Express) {
     rolling: true,
     // Amvera terminates TLS at the proxy — trust X-Forwarded-Proto for Secure cookies.
     proxy: true,
-    store: new PgSessionStore({
-      pool: pool,
-      tableName: "session",
-      createTableIfMissing: true,
-      // Prune expired rows periodically; never wipe active sessions on boot.
-      pruneSessionInterval: 60 * 15,
-    }),
+    store: buildSessionStore(
+      new PgSessionStore({
+        pool: pool,
+        tableName: "session",
+        createTableIfMissing: true,
+        // Prune expired rows periodically; never wipe active sessions on boot.
+        pruneSessionInterval: 60 * 15,
+      }),
+    ),
     cookie: {
       maxAge: 30 * 24 * 60 * 60 * 1000,
       httpOnly: true,

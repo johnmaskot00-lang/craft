@@ -238,9 +238,18 @@ export const projects = pgTable("projects", {
    * that detoasts multi-MB HTML and stalls the whole Postgres pool.
    */
   codeBytes: integer("code_bytes").notNull().default(0),
+  /**
+   * Object Storage key of the gzipped site HTML (server/site-blobs.ts). When set,
+   * `generated_code` is empty and storage.ts hydrates it on read.
+   */
+  codeBlobKey: text("code_blob_key"),
   generatingPlaceholder: boolean("generating_placeholder").notNull().default(false),
   animPending: boolean("anim_pending").notNull().default(false),
   animReady: boolean("anim_ready").notNull().default(false),
+  /** HTML carries a data-scroll-anim-task-id (Kling resume scanner). */
+  animTaskPending: boolean("anim_task_pending").notNull().default(false),
+  /** HTML still has the legacy scroll-jacking block (one-off migration). */
+  hasScrollJacking: boolean("has_scroll_jacking").notNull().default(false),
   type: varchar("type", { length: 20 }).notNull().default("website"),
   seoConfig: json("seo_config").$type<SeoConfig>(),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
@@ -318,6 +327,8 @@ export const insertProjectSchema = createInsertSchema(projects).omit({
   id: true,
   createdAt: true,
   updatedAt: true,
+  // Managed by storage.ts (Object Storage offload), never supplied by callers.
+  codeBlobKey: true,
 });
 
 export const insertProjectMessageSchema = createInsertSchema(projectMessages).omit({
@@ -387,6 +398,9 @@ export const projectFiles = pgTable("project_files", {
   projectId: integer("project_id").notNull(),
   filename: text("filename").notNull(),
   code: text("code").notNull(),
+  /** Object Storage key of the gzipped file; `code` is empty when set. */
+  blobKey: text("blob_key"),
+  codeBytes: integer("code_bytes").notNull().default(0),
   createdAt: timestamp("created_at").default(sql`CURRENT_TIMESTAMP`).notNull(),
 }, (t) => ({
   projectFilenameUniq: uniqueIndex("project_files_project_id_filename_uniq").on(t.projectId, t.filename),
@@ -395,6 +409,9 @@ export const projectFiles = pgTable("project_files", {
 export const insertProjectFileSchema = createInsertSchema(projectFiles).omit({
   id: true,
   createdAt: true,
+  // Managed by storage.ts (Object Storage offload), never supplied by callers.
+  blobKey: true,
+  codeBytes: true,
 });
 export type ProjectFile = typeof projectFiles.$inferSelect;
 export type InsertProjectFile = z.infer<typeof insertProjectFileSchema>;

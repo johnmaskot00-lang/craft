@@ -81,7 +81,7 @@ import {
   probeMediaStorage,
   uploadBufferToObjectStorage,
 } from "./media-upload";
-import { db } from "./db";
+import { db, pool } from "./db";
 import { sql } from "drizzle-orm";
 import { rateLimit, userOrIpKey } from "./rate-limit";
 import {
@@ -111,11 +111,55 @@ import {
 import { registerJobHandler, startInProcessWorker } from "./job-worker";
 import {
   backfillProjectPreviewImages,
+  backfillProjectScanFlags,
+  backfillSiteBlobs,
   backfillVersionBlobs,
+  inlineSiteBlobs,
   pruneOperationalTables,
   processObjectDeleteOutbox,
 } from "./version-blob-backfill";
-import { withSingletonLease } from "./singleton-lease";
+import { releaseSingletonLease, withSingletonLease } from "./singleton-lease";
+import {
+  backupsEnabled,
+  listBackups,
+  pruneBackups,
+  readManifest,
+  runBackup,
+  summarizeManifest,
+  verifyBackup,
+} from "./db-backup";
+import { notifyAdmin } from "./telegram-bot-auth";
+
+/** Backup → verify → prune, alerting the admin on any failure. */
+let backupRunning = false;
+async function runNightlyBackup(label: string): Promise<{ ok: boolean; summary: string; problems: string[] }> {
+  if (backupRunning) return { ok: false, summary: "already running", problems: [] };
+  backupRunning = true;
+  const t0 = Date.now();
+  try {
+    const manifest = await runBackup();
+    const verify = await verifyBackup(manifest, pool);
+    const summary = `${summarizeManifest(manifest)}, ${Math.round((Date.now() - t0) / 1000)}с`;
+    if (!verify.ok) {
+      console.error(`[backup] ${label} verification FAILED:`, verify.problems);
+      await notifyAdmin(`⚠️ Craft AI: бэкап базы ${manifest.stamp} НЕ прошёл проверку.\n${verify.problems.slice(0, 8).join("\n")}`);
+      return { ok: false, summary, problems: verify.problems };
+    }
+    const pruned = await pruneBackups().catch((e: any) => {
+      console.warn("[backup] prune failed:", e?.message || e);
+      return 0;
+    });
+    console.log(`[backup] ${label} ok: ${manifest.stamp} — ${summary}${pruned ? `, удалено старых: ${pruned}` : ""}`);
+    return { ok: true, summary, problems: [] };
+  } catch (e: any) {
+    const msg = String(e?.message || e).slice(0, 500);
+    console.error(`[backup] ${label} FAILED:`, msg);
+    await notifyAdmin(`⚠️ Craft AI: ночной бэкап базы не выполнен.\n${msg}`);
+    return { ok: false, summary: "", problems: [msg] };
+  } finally {
+    backupRunning = false;
+  }
+}
 import { buildOmniVideoRequest, kieVideoResolution } from "./kie-video-model";
 import { redisEnabled, redisAcquireLease, redisReleaseLease } from "./redis";
 import { assertPublicHttpUrl, safeFetch } from "./url-guard";
@@ -4905,6 +4949,18 @@ export async function registerRoutes(
     sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS generating_placeholder boolean NOT NULL DEFAULT false`,
     sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS anim_pending boolean NOT NULL DEFAULT false`,
     sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS anim_ready boolean NOT NULL DEFAULT false`,
+    // Site code offload to Object Storage (server/site-blobs.ts) + scan flags that
+    // replace LIKE over generated_code.
+    sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS code_blob_key text`,
+    sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS anim_task_pending boolean NOT NULL DEFAULT false`,
+    sql`ALTER TABLE projects ADD COLUMN IF NOT EXISTS has_scroll_jacking boolean NOT NULL DEFAULT false`,
+    sql`ALTER TABLE project_files ADD COLUMN IF NOT EXISTS blob_key text`,
+    sql`ALTER TABLE project_files ADD COLUMN IF NOT EXISTS code_bytes integer NOT NULL DEFAULT 0`,
+    sql`CREATE INDEX IF NOT EXISTS projects_anim_pending_idx ON projects (updated_at DESC) WHERE anim_pending`,
+    sql`CREATE INDEX IF NOT EXISTS projects_anim_task_idx ON projects (updated_at DESC) WHERE anim_task_pending`,
+    sql`CREATE INDEX IF NOT EXISTS projects_generating_idx ON projects (updated_at DESC) WHERE generating_placeholder`,
+    sql`CREATE INDEX IF NOT EXISTS projects_code_blob_key_idx ON projects (code_blob_key) WHERE code_blob_key IS NOT NULL`,
+    sql`CREATE INDEX IF NOT EXISTS project_files_blob_key_idx ON project_files (blob_key) WHERE blob_key IS NOT NULL`,
   ]) {
     await db.execute(stmt).catch((e: any) =>
       console.warn("[boot] projects content meta:", e?.message?.slice?.(0, 160) || e),
@@ -5000,8 +5056,12 @@ export async function registerRoutes(
         console.warn("[boot] DB retention cleanup:", e?.message?.slice?.(0, 200) || e);
       }
       await backfillProjectPreviewImages();
+      // Scan flags first: the Kling resume / stuck-generation scanners rely on them.
+      await backfillProjectScanFlags();
       // Move the remaining snapshots out of Postgres once retention has trimmed them.
       await backfillVersionBlobs();
+      // Then the live site code itself (projects.generated_code + project_files).
+      await backfillSiteBlobs();
     }).catch((e) => console.warn("[boot] maintenance lease:", e?.message || e));
   }, 5_000).unref?.();
 
@@ -5014,6 +5074,20 @@ export async function registerRoutes(
     void withSingletonLease("object-delete-outbox", 5 * 60_000, processObjectDeleteOutbox)
       .catch((e) => console.warn("[outbox] lease:", e?.message || e));
   }, 60_000).unref?.();
+
+  // Nightly logical backup to our own bucket (server/db-backup.ts). Checked every
+  // 10 minutes; runs once per day after 00:30 UTC (03:30 MSK). The lease name holds
+  // the date, so restarts and multiple instances cannot double-run it.
+  setInterval(() => {
+    const now = new Date();
+    if (!backupsEnabled() || now.getUTCHours() * 60 + now.getUTCMinutes() < 30) return;
+    const lease = `db-backup-${now.toISOString().slice(0, 10)}`;
+    void withSingletonLease(lease, 26 * 60 * 60_000, async () => {
+      const result = await runNightlyBackup("nightly");
+      // Failed: free the lease so the next 10-minute tick (any instance) retries today.
+      if (!result.ok) await releaseSingletonLease(lease);
+    }).catch((e) => console.warn("[backup] lease:", e?.message || e));
+  }, 10 * 60_000).unref?.();
 
   try {
     await db.execute(sql`
@@ -10482,8 +10556,9 @@ ${fullHtml}`;
       if (!Number.isInteger(projectId) || projectId <= 0) {
         return res.status(400).json({ message: "Некорректный проект" });
       }
-      const project = await storage.getProject(projectId);
-      if (!project) return res.status(404).json({ message: "Проект не найден" });
+      // Existence check only: never wait on Object Storage before saving a lead.
+      const projectOwnerId = await storage.getProjectOwnerId(projectId);
+      if (projectOwnerId === undefined) return res.status(404).json({ message: "Проект не найден" });
 
       const clean = (v: any, max: number) =>
         (typeof v === "string" ? v : v == null ? "" : String(v)).slice(0, max).trim();
@@ -10955,6 +11030,59 @@ ${fullHtml}`;
     if (!isAdmin) return res.status(403).json({ message: "Forbidden" });
     next();
   };
+
+  // ── Backups (server/db-backup.ts) ─────────────────────────────────────────
+  app.get("/api/admin/backups", adminOnly, async (_req, res) => {
+    try {
+      if (!backupsEnabled()) return res.json({ enabled: false, backups: [] });
+      const stamps = (await listBackups()).slice(0, 20);
+      const latest = stamps[0] ? await readManifest(stamps[0]).catch(() => null) : null;
+      res.json({
+        enabled: true,
+        running: backupRunning,
+        backups: stamps,
+        latest: latest ? { stamp: latest.stamp, finishedAt: latest.finishedAt, summary: summarizeManifest(latest) } : null,
+      });
+    } catch (err: any) {
+      console.error("[admin/backups]", err);
+      res.status(500).json({ message: err?.message || "Не удалось получить список бэкапов" });
+    }
+  });
+
+  /** Run a backup now (also verifies it). Takes minutes; the request waits for it. */
+  app.post("/api/admin/backups/run", adminOnly, async (_req, res) => {
+    if (!backupsEnabled()) return res.status(400).json({ message: "Бэкапы выключены: нет YC_KEY_ID/YC_SECRET или CRAFT_BACKUPS=0" });
+    if (backupRunning) return res.status(409).json({ message: "Бэкап уже выполняется" });
+    // Same lease family as the nightly run, so two instances cannot dump at once.
+    let result: Awaited<ReturnType<typeof runNightlyBackup>> | null = null;
+    const ran = await withSingletonLease("db-backup-manual", 2 * 60 * 60_000, async () => {
+      result = await runNightlyBackup("manual");
+    });
+    await releaseSingletonLease("db-backup-manual");
+    if (!ran || !result) return res.status(409).json({ message: "Бэкап уже выполняется на другом инстансе" });
+    const r = result as Awaited<ReturnType<typeof runNightlyBackup>>;
+    res.status(r.ok ? 200 : 500).json(r);
+  });
+
+  /** Rollback prep: pull all site code back into Postgres (see inlineSiteBlobs). */
+  app.post("/api/admin/site-blobs/inline", adminOnly, async (_req, res) => {
+    try {
+      res.json(await inlineSiteBlobs());
+    } catch (err: any) {
+      res.status(500).json({ message: err?.message || "inline failed" });
+    }
+  });
+
+  app.post("/api/admin/backups/:stamp/verify", adminOnly, async (req, res) => {
+    try {
+      const stamp = String(req.params.stamp || "");
+      if (!/^[0-9TZ-]+$/.test(stamp)) return res.status(400).json({ message: "bad stamp" });
+      const manifest = await readManifest(stamp);
+      res.json(await verifyBackup(manifest, pool));
+    } catch (err: any) {
+      res.status(500).json({ message: err?.message || "Проверка не удалась" });
+    }
+  });
 
   app.get("/api/admin/stats", adminOnly, async (req, res) => {
     try {
@@ -11703,16 +11831,14 @@ ${fullHtml}`;
     const RESIZE_ANCHOR = '    window.addEventListener(\'resize\',resize);';
 
     try {
-      const { projects } = await import("@shared/schema");
-      const { ilike } = await import("drizzle-orm");
-      const rows = await db.select({ id: projects.id, generatedCode: projects.generatedCode })
-        .from(projects)
-        .where(ilike(projects.generatedCode, '%Scroll-jacking: lock page scroll while animation plays%'));
+      // Flag column, not LIKE over generated_code: offloaded sites keep HTML in Object Storage.
+      const ids = await storage.listProjectIdsWithScrollJacking(200);
+      if (!ids.length) return;
+      console.log(`[Migration] Patching scroll-jacking → passive scroll in ${ids.length} project(s)`);
 
-      if (!rows.length) return;
-      console.log(`[Migration] Patching scroll-jacking → passive scroll in ${rows.length} project(s)`);
-
-      for (const row of rows) {
+      for (const id of ids) {
+        const row = await storage.getProject(id);
+        if (!row) continue;
         let html = row.generatedCode || "";
         let changed = false;
         let searchFrom = 0;
@@ -11759,21 +11885,15 @@ ${fullHtml}`;
   const STUCK_GENERATING_MIN_AGE_MS = 10 * 60 * 1000;
   async function cleanupStuckGeneratingPlaceholders(label: string, opts?: { forceOrphans?: boolean }) {
     try {
-      const { projects } = await import("@shared/schema");
-      const { ilike } = await import("drizzle-orm");
-      const rows = await db
-        .select({
-          id: projects.id,
-          generatedCode: projects.generatedCode,
-          updatedAt: projects.updatedAt,
-        })
-        .from(projects)
-        .where(ilike(projects.generatedCode, '%data-craft-generating="1"%'));
-      if (!rows.length) return;
+      // Flag column, not LIKE over generated_code: offloaded sites keep HTML in Object Storage.
+      const ids = await storage.listProjectIdsWithGeneratingPlaceholder(200);
+      if (!ids.length) return;
       const now = Date.now();
       let cleared = 0;
-      for (const row of rows) {
-        if (activeProjectGenerations.has(row.id)) continue;
+      for (const id of ids) {
+        if (activeProjectGenerations.has(id)) continue;
+        const row = await storage.getProject(id);
+        if (!row) continue;
         const updated = row.updatedAt ? new Date(row.updatedAt).getTime() : 0;
         const isOrphan = opts?.forceOrphans || !updated || now - updated >= STUCK_GENERATING_MIN_AGE_MS;
         if (!isOrphan) continue;

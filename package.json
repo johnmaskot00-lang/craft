@@ -10,7 +10,8 @@
     "worker": "tsx server/worker-main.ts",
     "start:worker": "NODE_ENV=production node --max-old-space-size=${NODE_MAX_OLD_SPACE_SIZE:-1792} dist/worker.cjs",
     "check": "tsc",
-    "db:push": "drizzle-kit push"
+    "db:push": "drizzle-kit push",
+    "test:integration": "node --import tsx --import ./tests/register-stubs.mjs tests/site-blobs.itest.ts && node --import tsx tests/session-store.itest.ts && node --import tsx tests/db-backup.itest.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
@@ -101,6 +102,8 @@
     "zod-validation-error": "^3.5.4"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.3.14",
+    "@electric-sql/pglite-socket": "0.0.19",
     "@replit/vite-plugin-cartographer": "^0.4.4",
     "@replit/vite-plugin-dev-banner": "^0.1.1",
     "@replit/vite-plugin-runtime-error-modal": "^0.0.3",

@@ -34,6 +34,10 @@ export function deriveProjectContentMeta(html: string | null | undefined): {
   generatingPlaceholder: boolean;
   animPending: boolean;
   animReady: boolean;
+  /** A Kling task id is stored in the HTML (resume scanner picks these up). */
+  animTaskPending: boolean;
+  /** Legacy scroll-jacking block that the one-off migration rewrites. */
+  hasScrollJacking: boolean;
 } {
   const code = html || "";
   const animPending = code.includes('data-scroll-anim-pending="1"');
@@ -44,5 +48,7 @@ export function deriveProjectContentMeta(html: string | null | undefined): {
     animReady:
       !animPending &&
       (code.includes("data-craft-scrollanim") || code.includes('data-scroll-anim-fallback="1"')),
+    animTaskPending: code.includes('data-scroll-anim-task-id="'),
+    hasScrollJacking: code.includes("Scroll-jacking: lock page scroll while animation plays"),
   };
 }

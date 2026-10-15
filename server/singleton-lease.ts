@@ -69,3 +69,10 @@ export async function withSingletonLease(
   await fn();
   return true;
 }
+
+/** Give a lease back early (e.g. a failed daily job that should retry today). */
+export async function releaseSingletonLease(name: string): Promise<void> {
+  await db
+    .execute(sql`DELETE FROM singleton_leases WHERE name = ${name} AND holder = ${HOLDER}`)
+    .catch((e: any) => console.warn(`[lease] release ${name}:`, e?.message || e));
+}
