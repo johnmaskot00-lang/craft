@@ -26,6 +26,8 @@ const DEFAULT_TTL_SEC = 30 * 24 * 60 * 60;
 type Cb<T = unknown> = (err?: any, value?: T) => void;
 
 function withTimeout<T>(work: Promise<T>): Promise<T> {
+  // Unhandled rejection guard: the caller may have given up (fast path) already.
+  work.catch(() => undefined);
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`redis session op timed out after ${REDIS_TIMEOUT_MS}ms`)), REDIS_TIMEOUT_MS);
     work.then(
@@ -56,6 +58,17 @@ export class RedisFirstSessionStore extends session.Store {
     super();
   }
 
+  /**
+   * Fail fast while the client is not connected: ioredis would otherwise queue the
+   * command and every request would wait out the timeout during an outage (or with
+   * a wrong REDIS_URL host).
+   */
+  private run<T>(op: (r: Redis) => Promise<T>): Promise<T> {
+    const status = (this.redis as any).status;
+    if (status !== undefined && status !== "ready") return Promise.reject(new Error(`redis not ready (${status})`));
+    return withTimeout(op(this.redis));
+  }
+
   private warn(op: string, e: any) {
     // Rate-limit: an outage would otherwise log once per request.
     const now = Date.now();
@@ -67,7 +80,7 @@ export class RedisFirstSessionStore extends session.Store {
   get(sid: string, cb: Cb<session.SessionData | null>): void {
     (async () => {
       try {
-        const raw = await withTimeout(this.redis.get(PREFIX + sid));
+        const raw = await this.run((r) => r.get(PREFIX + sid));
         if (raw) return JSON.parse(raw) as session.SessionData;
       } catch (e) {
         this.warn("get", e);
@@ -76,7 +89,7 @@ export class RedisFirstSessionStore extends session.Store {
       // Redis miss: a session from before the switch (or written during an outage).
       const legacy = (await call<session.SessionData | null>((c) => this.fallback.get(sid, c))) ?? null;
       if (legacy) {
-        await withTimeout(this.redis.set(PREFIX + sid, JSON.stringify(legacy), "EX", ttlSeconds(legacy))).catch((e) =>
+        await this.run((r) => r.set(PREFIX + sid, JSON.stringify(legacy), "EX", ttlSeconds(legacy))).catch((e) =>
           this.warn("migrate", e),
         );
       }
@@ -85,7 +98,7 @@ export class RedisFirstSessionStore extends session.Store {
   }
 
   set(sid: string, sess: session.SessionData, cb?: Cb): void {
-    withTimeout(this.redis.set(PREFIX + sid, JSON.stringify(sess), "EX", ttlSeconds(sess)))
+    this.run((r) => r.set(PREFIX + sid, JSON.stringify(sess), "EX", ttlSeconds(sess)))
       .then(() => cb?.())
       .catch((e) => {
         this.warn("set", e);
@@ -98,7 +111,7 @@ export class RedisFirstSessionStore extends session.Store {
     // Never (re)create a key here: touch also fires for requests still in flight on
     // a session that logout just destroyed, and recreating it would undo the logout.
     // A key that vanished is rebuilt by get() from the Postgres copy, if there is one.
-    withTimeout(this.redis.expire(PREFIX + sid, ttlSeconds(sess)))
+    this.run((r) => r.expire(PREFIX + sid, ttlSeconds(sess)))
       .then(() => cb?.())
       .catch((e) => {
         this.warn("touch", e);
@@ -110,7 +123,7 @@ export class RedisFirstSessionStore extends session.Store {
   destroy(sid: string, cb?: Cb): void {
     // Both stores: a logout must not be undone by the legacy row on the next miss.
     Promise.allSettled([
-      withTimeout(this.redis.del(PREFIX + sid)),
+      this.run((r) => r.del(PREFIX + sid)),
       call((c) => this.fallback.destroy(sid, c)),
     ]).then((results) => {
       if (results[0].status === "rejected") this.forgetLater(sid);
@@ -136,7 +149,7 @@ export class RedisFirstSessionStore extends session.Store {
         this.forgetTimer = null;
         return;
       }
-      withTimeout(this.redis.del(...batch.map((s) => PREFIX + s)))
+      this.run((r) => r.del(...batch.map((s) => PREFIX + s)))
         .then(() => batch.forEach((s) => this.pendingForget.delete(s)))
         .catch(() => undefined);
     }, 5000);

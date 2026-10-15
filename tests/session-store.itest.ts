@@ -70,6 +70,15 @@ async function main() {
   assert.ok(Date.now() - t0 < 1000, "did not hang");
   console.log("  ✓ redis hang: time-boxed, served from postgres");
 
+  // not connected (wrong host / reconnecting) → instant fallback, no timeout wait
+  redis.mode = "hang";
+  (redis as any).status = "reconnecting";
+  const t1 = Date.now();
+  assert.equal(((await p((c) => store.get("b", c))) as any).passport.user, 2);
+  assert.ok(Date.now() - t1 < 100, `fast path took ${Date.now() - t1}ms`);
+  (redis as any).status = undefined;
+  console.log("  ✓ redis not connected: instant postgres fallback");
+
   // destroy clears both stores even if one is down
   redis.mode = "ok";
   await p((c) => store.destroy("old", c));
