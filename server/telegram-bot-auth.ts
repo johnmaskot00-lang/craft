@@ -141,6 +141,59 @@ function botApi(method: string, body?: Record<string, unknown>) {
     });
 }
 
+export type BotApiResult<T = any> = {
+  ok: boolean;
+  result?: T;
+  /** Telegram error code (403 blocked/kicked, 400 chat not found, 429 flood). 0 = network. */
+  errorCode: number;
+  description: string;
+  /** Present on 400 when a group was upgraded to a supergroup. */
+  migrateToChatId?: number;
+  retryAfter?: number;
+};
+
+/**
+ * Like botApi, but returns Telegram's error details instead of swallowing them, so
+ * callers can react (drop a blocked chat, follow a supergroup migration). Never throws.
+ */
+export async function botApiRaw<T = any>(method: string, body?: Record<string, unknown>): Promise<BotApiResult<T>> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return { ok: false, errorCode: 0, description: "TELEGRAM_BOT_TOKEN not set" };
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(12_000),
+    });
+    const data: any = await res.json().catch(() => null);
+    if (res.ok && data?.ok) return { ok: true, result: data.result, errorCode: 0, description: "" };
+    return {
+      ok: false,
+      errorCode: Number(data?.error_code || res.status || 0),
+      description: String(data?.description || res.statusText || ""),
+      migrateToChatId: data?.parameters?.migrate_to_chat_id,
+      retryAfter: data?.parameters?.retry_after,
+    };
+  } catch (err: any) {
+    return { ok: false, errorCode: 0, description: String(err?.message || err).slice(0, 200) };
+  }
+}
+
+/**
+ * Other features hook bot updates here (e.g. lead notifications handle
+ * `/start leads_<code>` and my_chat_member). A hook returns true when it
+ * consumed the update.
+ */
+type UpdateHook = (update: any) => Promise<boolean>;
+const updateHooks: UpdateHook[] = [];
+export function registerTelegramUpdateHook(hook: UpdateHook): void {
+  updateHooks.push(hook);
+}
+
+/** Updates the bot subscribes to (webhook + polling). */
+const ALLOWED_UPDATES = ["message", "my_chat_member"];
+
 /** Operational alert to the admin (ADMIN_TELEGRAM_ID). Never throws. */
 export async function notifyAdmin(text: string): Promise<boolean> {
   const chatId = (process.env.ADMIN_TELEGRAM_ID || "").trim();
@@ -191,6 +244,9 @@ async function sendLoginConfirm(chatId: number | string) {
 export function handleTelegramUpdate(update: any): void {
   void (async () => {
     try {
+      for (const hook of updateHooks) {
+        if (await hook(update).catch((e) => { console.error("telegram update hook error:", e); return false; })) return;
+      }
       const message = update?.message || update?.edited_message;
       if (!message?.chat?.id || typeof message.text !== "string") return;
 
@@ -234,7 +290,7 @@ async function pollUpdatesLoop() {
     const result = await botApi("getUpdates", {
       offset,
       timeout: 25,
-      allowed_updates: ["message"],
+      allowed_updates: ALLOWED_UPDATES,
     });
     if (!Array.isArray(result)) {
       await new Promise((r) => setTimeout(r, 3000));
@@ -277,7 +333,7 @@ export async function ensureTelegramBotAuthIngress(): Promise<void> {
     set = await botApi("setWebhook", {
       url: webhookUrl,
       secret_token: secret,
-      allowed_updates: ["message"],
+      allowed_updates: ALLOWED_UPDATES,
       drop_pending_updates: false,
     });
     if (set) break;

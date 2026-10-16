@@ -129,6 +129,18 @@ import {
   verifyBackup,
 } from "./db-backup";
 import { notifyAdmin } from "./telegram-bot-auth";
+// Importing registers the bot update hook for `/start leads_<code>`.
+import {
+  createLeadLink,
+  deleteLeadTarget,
+  ensureLeadTelegramSchema,
+  getLeadLinkStatus,
+  listLeadTargets,
+  listProjectsLeadNotify,
+  notifyLeadTelegram,
+  sendLeadTest,
+  setProjectLeadNotify,
+} from "./lead-telegram";
 
 /** Backup → verify → prune, alerting the admin on any failure. */
 let backupRunning = false;
@@ -10549,6 +10561,82 @@ ${fullHtml}`;
     res.sendStatus(204);
   });
 
+  // ── Leads → Telegram (server/lead-telegram.ts) ───────────────────────────
+  // Registered before /api/leads/:projectId so "telegram" is never read as an id.
+  void ensureLeadTelegramSchema().catch((e) => console.warn("[lead-telegram] schema:", e?.message || e));
+
+  app.get("/api/leads/telegram", requireAuth, async (req, res) => {
+    try {
+      const userId = (req.user as any).id as number;
+      const [targets, projects] = await Promise.all([listLeadTargets(userId), listProjectsLeadNotify(userId)]);
+      res.json({
+        enabled: Boolean(process.env.TELEGRAM_BOT_TOKEN),
+        targets: targets.map((t) => ({ id: t.id, chatTitle: t.chatTitle, chatType: t.chatType, createdAt: t.createdAt })),
+        projects,
+      });
+    } catch (err: any) {
+      console.error("[lead-telegram] list:", err);
+      res.status(500).json({ message: "Не удалось загрузить настройки Telegram" });
+    }
+  });
+
+  app.post("/api/leads/telegram/link", requireAuth, async (req, res) => {
+    try {
+      if (!process.env.TELEGRAM_BOT_TOKEN) return res.status(503).json({ message: "Telegram-бот не настроен" });
+      res.json(await createLeadLink((req.user as any).id));
+    } catch (err: any) {
+      console.error("[lead-telegram] link:", err);
+      res.status(500).json({ message: "Не удалось создать ссылку" });
+    }
+  });
+
+  app.get("/api/leads/telegram/link/:code", requireAuth, async (req, res) => {
+    try {
+      const code = String(req.params.code || "");
+      if (!/^[a-f0-9]{16,64}$/i.test(code)) return res.status(400).json({ message: "bad code" });
+      res.json(await getLeadLinkStatus((req.user as any).id, code.toLowerCase()));
+    } catch (err: any) {
+      res.status(500).json({ message: "Не удалось проверить статус" });
+    }
+  });
+
+  app.post("/api/leads/telegram/test", requireAuth, async (req, res) => {
+    try {
+      const result = await sendLeadTest((req.user as any).id);
+      if (!result.sent && !result.failed) return res.status(400).json({ message: "Сначала подключите Telegram" });
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ message: "Не удалось отправить тест" });
+    }
+  });
+
+  app.delete("/api/leads/telegram/:targetId", requireAuth, async (req, res) => {
+    try {
+      const targetId = parseInt(String(req.params.targetId), 10);
+      if (!Number.isInteger(targetId) || targetId <= 0) return res.status(400).json({ message: "bad id" });
+      const ok = await deleteLeadTarget((req.user as any).id, targetId);
+      if (!ok) return res.status(404).json({ message: "Не найдено" });
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ message: "Не удалось отключить" });
+    }
+  });
+
+  app.patch("/api/projects/:id/lead-notify", requireAuth, async (req, res) => {
+    try {
+      const projectId = parseInt(String(req.params.id), 10);
+      if (!Number.isInteger(projectId) || projectId <= 0) return res.status(400).json({ message: "bad id" });
+      const owner = await storage.getProjectOwnerId(projectId);
+      if (owner === undefined) return res.status(404).json({ message: "Проект не найден" });
+      if (owner !== (req.user as any).id) return res.status(403).json({ message: "Нет доступа" });
+      const enabled = req.body?.enabled === true;
+      await setProjectLeadNotify(projectId, enabled);
+      res.json({ success: true, leadNotify: enabled });
+    } catch (err: any) {
+      res.status(500).json({ message: "Не удалось сохранить" });
+    }
+  });
+
   app.post("/api/leads/:projectId", leadIntakeLimiter, async (req, res) => {
     res.header("Access-Control-Allow-Origin", "*");
     try {
@@ -10585,6 +10673,8 @@ ${fullHtml}`;
 
       const lead = await storage.createLead({ projectId, name, email, phone, message, source, fingerprint });
       res.json({ success: true, id: lead.id });
+      // After the response: a slow or failing Telegram must never affect the visitor.
+      void notifyLeadTelegram(projectId, { name, email, phone, message, source, createdAt: lead.createdAt });
     } catch (err) {
       res.status(500).json({ message: "Ошибка сохранения заявки" });
     }

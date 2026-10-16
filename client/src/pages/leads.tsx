@@ -6,6 +6,7 @@ import { useLocation } from "wouter";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { Lead } from "@shared/schema";
+import { LeadsTelegramCard } from "@/components/leads-telegram-card";
 import {
   ArrowLeft,
   Mail,
@@ -111,6 +112,8 @@ export default function LeadsPage() {
       </header>
 
       <main style={{ maxWidth: 960, margin: "0 auto", padding: "2.5rem 2rem" }}>
+
+        <LeadsTelegramCard />
 
         {/* Filter tabs */}
         <div style={{ display: "flex", gap: "0.4rem", marginBottom: "1.75rem", background: "rgba(0,0,0,0.03)", borderRadius: 14, padding: "0.25rem", width: "fit-content" }}>
