@@ -105,3 +105,26 @@ export async function redisReleaseLease(key: string, token: string): Promise<voi
     await r.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", 1, `craft:lease:${key}`, token);
   } catch { /* best effort */ }
 }
+/**
+ * Take or extend a lease atomically: succeeds when the key is free or already
+ * ours, fails when someone else holds it. (Acquire + release would leave a gap
+ * another instance could slip into.)
+ */
+export async function redisHoldLease(key: string, token: string, ttlMs: number): Promise<boolean> {
+  const r = getRedis();
+  if (!r) return false;
+  try {
+    const res = await r.eval(
+      "local v = redis.call('get', KEYS[1]) " +
+        "if v == false or v == ARGV[1] then redis.call('set', KEYS[1], ARGV[1], 'PX', ARGV[2]) return 1 end " +
+        "return 0",
+      1,
+      `craft:lease:${key}`,
+      token,
+      String(Math.max(5000, ttlMs)),
+    );
+    return Number(res) === 1;
+  } catch {
+    return false;
+  }
+}

@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "crypto";
 import { pool } from "./db";
+import { startTelegramPolling } from "./telegram-poll";
 
 function log(message: string) {
   console.log(`[telegram] ${message}`);
@@ -372,6 +373,14 @@ export async function ensureTelegramBotAuthIngress(): Promise<void> {
   if (me?.username) {
     cachedBotUsername = String(me.username).replace(/^@/, "");
     log(`bot username: @${cachedBotUsername}`);
+  }
+
+  // Default: pull updates (outgoing long-poll). Telegram's incoming webhook
+  // requests time out on the current host, which delayed /start by 1-2 minutes.
+  // TELEGRAM_MODE=webhook restores push delivery.
+  if ((process.env.TELEGRAM_MODE || "polling").toLowerCase() !== "webhook") {
+    startTelegramPolling(botApi, handleTelegramUpdate, ALLOWED_UPDATES, log);
+    return;
   }
 
   const base = (process.env.APP_BASE_URL || "https://craft-ai.ru").replace(/\/$/, "");
