@@ -128,7 +128,7 @@ import {
   summarizeManifest,
   verifyBackup,
 } from "./db-backup";
-import { notifyAdmin } from "./telegram-bot-auth";
+import { logWebhookHealth, notifyAdmin } from "./telegram-bot-auth";
 // Importing registers the bot update hook for `/start leads_<code>`.
 import {
   createLeadLink,
@@ -11172,6 +11172,17 @@ ${fullHtml}`;
     } catch (err: any) {
       res.status(500).json({ message: err?.message || "Проверка не удалась" });
     }
+  });
+
+  /** Telegram's view of webhook delivery (backlog, last error, target IP). */
+  app.get("/api/admin/telegram/webhook", adminOnly, async (_req, res) => {
+    const info = await logWebhookHealth();
+    if (!info) return res.status(502).json({ message: "getWebhookInfo failed" });
+    const { url, pending_update_count, ip_address, last_error_date, last_error_message, max_connections, allowed_updates } = info;
+    res.json({
+      url, pending_update_count, ip_address, max_connections, allowed_updates,
+      last_error: last_error_date ? { at: new Date(last_error_date * 1000).toISOString(), message: last_error_message } : null,
+    });
   });
 
   app.get("/api/admin/stats", adminOnly, async (req, res) => {

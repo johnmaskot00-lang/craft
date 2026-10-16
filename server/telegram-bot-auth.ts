@@ -284,6 +284,56 @@ export function handleTelegramUpdate(update: any): void {
 
 let pollingStarted = false;
 
+/** A-record of the app host (IPv4), "" when it cannot be resolved. */
+async function resolvePublicIp(base: string): Promise<string> {
+  try {
+    const host = new URL(base).hostname;
+    const { promises: dns } = await import("dns");
+    const ips = await dns.resolve4(host);
+    return ips[0] || "";
+  } catch {
+    return "";
+  }
+}
+
+/** One log line with Telegram's view of delivery: backlog, last error, target IP. */
+export async function logWebhookHealth(): Promise<any> {
+  const info = await botApi("getWebhookInfo");
+  if (!info) return null;
+  const lastErr = info.last_error_date
+    ? `${new Date(info.last_error_date * 1000).toISOString()} ${String(info.last_error_message || "").slice(0, 160)}`
+    : "none";
+  log(`webhook health: pending=${info.pending_update_count ?? 0} ip=${info.ip_address || "?"} last_error=${lastErr}`);
+  return info;
+}
+
+let watchTimer: NodeJS.Timeout | null = null;
+/**
+ * Every 5 minutes: if our IP changed or Telegram reports a backlog with a recent
+ * delivery error, re-register the webhook (pinned to the current IP) right away.
+ */
+function startWebhookWatch(base: string): void {
+  if (watchTimer) return;
+  watchTimer = setInterval(async () => {
+    try {
+      const info = await botApi("getWebhookInfo");
+      if (!info) return;
+      const current = (process.env.TELEGRAM_WEBHOOK_IP || (await resolvePublicIp(base))).trim();
+      const ipMoved = !!current && !!info.ip_address && info.ip_address !== current;
+      const recentError = info.last_error_date && Date.now() / 1000 - info.last_error_date < 600;
+      if (ipMoved || (recentError && (info.pending_update_count ?? 0) > 0)) {
+        log(`webhook watch: re-registering (ip ${info.ip_address} → ${current || "dns"}, pending=${info.pending_update_count})`);
+        watchTimer && clearInterval(watchTimer);
+        watchTimer = null;
+        await ensureTelegramBotAuthIngress();
+      }
+    } catch (e: any) {
+      console.warn("[telegram] webhook watch:", e?.message || e);
+    }
+  }, 5 * 60_000);
+  watchTimer.unref?.();
+}
+
 async function pollUpdatesLoop() {
   let offset = 0;
   while (pollingStarted) {
@@ -328,6 +378,11 @@ export async function ensureTelegramBotAuthIngress(): Promise<void> {
   const secret = webhookSecret();
   const webhookUrl = `${base}/api/auth/telegram/webhook`;
 
+  // Telegram's view before we re-register: shows why earlier deliveries lagged.
+  await logWebhookHealth();
+  // Pin delivery to our current public IP: after the 10.2026 region move Telegram
+  // kept retrying a stale DNS answer and updates arrived ~1-2 min late.
+  const ipAddress = (process.env.TELEGRAM_WEBHOOK_IP || (await resolvePublicIp(base))).trim();
   let set: unknown = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     set = await botApi("setWebhook", {
@@ -335,14 +390,18 @@ export async function ensureTelegramBotAuthIngress(): Promise<void> {
       secret_token: secret,
       allowed_updates: ALLOWED_UPDATES,
       drop_pending_updates: false,
+      max_connections: 40,
+      ...(ipAddress ? { ip_address: ipAddress } : {}),
     });
     if (set) break;
     await new Promise((r) => setTimeout(r, 800 * attempt));
   }
 
   if (set) {
-    log(`webhook set: ${webhookUrl}`);
+    log(`webhook set: ${webhookUrl}${ipAddress ? ` (ip ${ipAddress})` : ""}`);
     pollingStarted = false;
+    void logWebhookHealth();
+    startWebhookWatch(base);
     return;
   }
 
