@@ -64,12 +64,6 @@ export function LeadsTelegramCard() {
     }
   };
 
-  const testMutation = useMutation({
-    mutationFn: () => apiRequest("POST", "/api/leads/telegram/test").then((r) => r.json()),
-    onSuccess: (r: any) =>
-      toast({ title: r.failed ? "Отправлено не во все чаты" : "Тестовая заявка отправлена", description: `Доставлено: ${r.sent}${r.failed ? `, не удалось: ${r.failed}` : ""}` }),
-    onError: (e: any) => toast({ title: "Ошибка", description: e.message, variant: "destructive" }),
-  });
   const removeMutation = useMutation({
     mutationFn: (id: number) => apiRequest("DELETE", `/api/leads/telegram/${id}`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/leads/telegram"] }),
@@ -143,11 +137,6 @@ export function LeadsTelegramCard() {
         <button onClick={() => start("group")} disabled={linkMutation.isPending} data-testid="button-tg-connect-group" style={btn("rgba(34,158,217,0.1)", TG_BLUE)}>
           <Users size={15} aria-hidden /> В группу команды
         </button>
-        {connected && (
-          <button onClick={() => testMutation.mutate()} disabled={testMutation.isPending} data-testid="button-tg-test" style={btn("rgba(0,0,0,0.05)", "#1D1D1F")}>
-            {testMutation.isPending && <Loader2 size={15} className="animate-spin" aria-hidden />} Отправить тест
-          </button>
-        )}
       </div>
 
       {link && (

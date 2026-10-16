@@ -306,18 +306,6 @@ export async function notifyLeadTelegram(projectId: number, lead: LeadForMessage
   }
 }
 
-/** "Test" button: one sample message to each of the user's chats. */
-export async function sendLeadTest(userId: number): Promise<{ sent: number; failed: number }> {
-  const targets = await listLeadTargets(userId);
-  const html = formatLeadMessage(
-    { name: "Иван (тест)", phone: "+7 900 000-00-00", email: "test@example.ru", message: "Это тестовая заявка — так будут выглядеть новые заявки с ваших сайтов.", source: "test" },
-    "Ваш сайт",
-  );
-  let sent = 0;
-  for (const t of targets) if ((await sendToChat(t.chatId, html)).ok) sent += 1;
-  return { sent, failed: targets.length - sent };
-}
-
 export async function setProjectLeadNotify(projectId: number, enabled: boolean): Promise<void> {
   await ensureLeadTelegramSchema();
   await pool.query(`UPDATE projects SET lead_notify = $2 WHERE id = $1`, [projectId, enabled]);

@@ -138,7 +138,6 @@ import {
   listLeadTargets,
   listProjectsLeadNotify,
   notifyLeadTelegram,
-  sendLeadTest,
   setProjectLeadNotify,
 } from "./lead-telegram";
 
@@ -300,6 +299,8 @@ setInterval(() => {
 }, 60_000).unref?.();
 
 // Rate limiters — shared via Redis when REDIS_URL is set (multi-instance).
+/** Wait for a duplicate request from the same submit before posting to Telegram. */
+const LEAD_NOTIFY_DELAY_MS = Math.max(0, Number(process.env.CRAFT_LEAD_NOTIFY_DELAY_MS ?? 2500));
 const leadIntakeLimiter = rateLimit("lead-intake", { windowMs: 60_000, max: 20, message: "Слишком много заявок. Попробуйте позже." });
 const aiLimiter = rateLimit("ai", { windowMs: 60_000, max: 20, keyGenerator: userOrIpKey, message: "Слишком много запросов к ИИ. Подождите минуту." });
 const publishLimiter = rateLimit("publish", {
@@ -10600,16 +10601,6 @@ ${fullHtml}`;
     }
   });
 
-  app.post("/api/leads/telegram/test", requireAuth, async (req, res) => {
-    try {
-      const result = await sendLeadTest((req.user as any).id);
-      if (!result.sent && !result.failed) return res.status(400).json({ message: "Сначала подключите Telegram" });
-      res.json(result);
-    } catch (err: any) {
-      res.status(500).json({ message: "Не удалось отправить тест" });
-    }
-  });
-
   app.delete("/api/leads/telegram/:targetId", requireAuth, async (req, res) => {
     try {
       const targetId = parseInt(String(req.params.targetId), 10);
@@ -10661,20 +10652,28 @@ ${fullHtml}`;
         return res.status(400).json({ message: "Пустая заявка" });
       }
 
-      // Protect against accidental double-submit: published sites may contain
-      // both an AI-authored handler and our injected leads script.
-      const duplicate = await storage.findRecentDuplicateLead(
+      // One form submit often fires two requests (the site's own handler + our
+      // injected script, with slightly different text). Same sender within a
+      // minute = the same lead: merged into one row, one Telegram message.
+      const { lead, merged } = await storage.createOrMergeLead(
         { projectId, name, email, phone, message, source, fingerprint },
-        15_000,
+        60_000,
       );
-      if (duplicate) {
-        return res.json({ success: true, id: duplicate.id, duplicate: true });
-      }
-
-      const lead = await storage.createLead({ projectId, name, email, phone, message, source, fingerprint });
-      res.json({ success: true, id: lead.id });
+      res.json({ success: true, id: lead.id, ...(merged ? { duplicate: true } : {}) });
       // After the response: a slow or failing Telegram must never affect the visitor.
-      void notifyLeadTelegram(projectId, { name, email, phone, message, source, createdAt: lead.createdAt });
+      // The sibling request lands within ~1s and may carry the fuller text, so
+      // notify a moment later with the merged row.
+      if (!merged) {
+        setTimeout(() => {
+          void (async () => {
+            const final = (await storage.getLead(lead.id).catch(() => undefined)) || lead;
+            await notifyLeadTelegram(projectId, {
+              name: final.name, email: final.email, phone: final.phone, message: final.message,
+              source: final.source, createdAt: final.createdAt,
+            });
+          })();
+        }, LEAD_NOTIFY_DELAY_MS).unref?.();
+      }
     } catch (err) {
       res.status(500).json({ message: "Ошибка сохранения заявки" });
     }

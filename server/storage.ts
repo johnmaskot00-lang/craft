@@ -222,6 +222,7 @@ export interface IStorage {
     withinMs: number,
   ): Promise<Lead | undefined>;
   createLead(lead: InsertLead): Promise<Lead>;
+  createOrMergeLead(lead: InsertLead, withinMs: number): Promise<{ lead: Lead; merged: boolean }>;
   markLeadRead(id: number): Promise<Lead | undefined>;
   deleteLead(id: number): Promise<void>;
   getUnreadLeadCount(userId: number): Promise<number>;
@@ -1183,6 +1184,58 @@ export class DatabaseStorage implements IStorage {
       .digest("hex");
     const [existing] = await db.select().from(leads).where(and(eq(leads.fingerprint, fingerprint), gte(leads.createdAt, cutoff))).orderBy(desc(leads.createdAt)).limit(1);
     return existing;
+  }
+
+  /**
+   * Insert a lead, or merge it into one from the same sender a few seconds ago.
+   *
+   * One click on a published form can fire two requests: the AI-written handler
+   * (which often decorates the message, e.g. "[Сьют: …] text") and our injected
+   * script (plain text). Exact-text matching missed those, so the sender —
+   * project + phone/email (or name when neither is given) — is the key. A
+   * transaction-scoped advisory lock on that key makes check-and-insert atomic,
+   * so two requests racing on two API instances still produce one row.
+   * The longer / more detailed message wins.
+   */
+  async createOrMergeLead(lead: InsertLead, withinMs: number): Promise<{ lead: Lead; merged: boolean }> {
+    const norm = (v: string | null | undefined) => (v || "").trim().toLowerCase();
+    const phoneDigits = (lead.phone || "").replace(/\D+/g, "");
+    const sender = phoneDigits || norm(lead.email) || norm(lead.name);
+    if (!sender) return { lead: await this.createLead(lead), merged: false };
+    const lockKey = `lead:${lead.projectId}:${sender}`;
+    return db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+      const cutoff = new Date(Date.now() - Math.max(1000, withinMs));
+      const recent = await tx
+        .select()
+        .from(leads)
+        .where(and(eq(leads.projectId, lead.projectId), gte(leads.createdAt, cutoff)))
+        .orderBy(desc(leads.createdAt))
+        .limit(20);
+      const same = recent.find((r) => {
+        const rDigits = (r.phone || "").replace(/\D+/g, "");
+        const rSender = rDigits || norm(r.email) || norm(r.name);
+        return rSender === sender;
+      });
+      if (same) {
+        const longer = (a: string, b: string) => ((b || "").length > (a || "").length ? b : a);
+        const patch = {
+          name: longer(same.name, lead.name || ""),
+          email: longer(same.email, lead.email || ""),
+          phone: longer(same.phone, lead.phone || ""),
+          message: longer(same.message, lead.message || ""),
+        };
+        const changed = Object.entries(patch).some(([k, v]) => (same as any)[k] !== v);
+        if (!changed) return { lead: same, merged: true };
+        const [updated] = await tx.update(leads).set(patch).where(eq(leads.id, same.id)).returning();
+        return { lead: updated, merged: true };
+      }
+      const fingerprint = lead.fingerprint || crypto.createHash("sha256")
+        .update([lead.projectId, lead.name, lead.email, lead.phone, lead.message, lead.source].join("\x1f"))
+        .digest("hex");
+      const [created] = await tx.insert(leads).values({ ...lead, fingerprint }).returning();
+      return { lead: created, merged: false };
+    });
   }
 
   async createLead(lead: InsertLead): Promise<Lead> {

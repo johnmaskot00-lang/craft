@@ -150,14 +150,12 @@ async function main() {
   tgMode = "ok";
   ok("telegram down: no throw; intake is fire-and-forget");
 
-  // 10. test message + delete own target only
-  sent.length = 0;
-  assert.deepEqual(await lt.sendLeadTest(7), { sent: 1, failed: 0 });
+  // 10. delete own target only
   const [t2001] = await lt.listLeadTargets(7);
   assert.equal(await lt.deleteLeadTarget(8, t2001.id), false, "cannot delete another user's chat");
   assert.equal(await lt.deleteLeadTarget(7, t2001.id), true);
   assert.equal((await lt.listLeadTargets(7)).length, 0);
-  ok("test message; delete is owner-only");
+  ok("delete is owner-only");
 
   // 11. unrelated /start payloads still fall through to the login handler
   sent.length = 0;
