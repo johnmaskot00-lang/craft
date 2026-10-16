@@ -85,6 +85,7 @@ export function LeadsTelegramCard() {
 
   if (isLoading || !data || !data.enabled) return null;
   const connected = data.targets.length > 0;
+  const hasPrivate = data.targets.some((t) => t.chatType === "private");
   const offCount = data.projects.filter((p) => !p.leadNotify).length;
 
   return (
@@ -130,10 +131,13 @@ export function LeadsTelegramCard() {
       )}
 
       <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "1rem" }}>
-        <button onClick={() => start("private")} disabled={linkMutation.isPending} data-testid="button-tg-connect" style={btn(TG_BLUE, "#fff")}>
-          {linkMutation.isPending ? <Loader2 size={15} className="animate-spin" aria-hidden /> : <Send size={15} aria-hidden />}
-          {connected ? "Добавить личный чат" : "Подключить Telegram"}
-        </button>
+        {/* A personal chat is linked once; after that only a team group can be added. */}
+        {!hasPrivate && (
+          <button onClick={() => start("private")} disabled={linkMutation.isPending} data-testid="button-tg-connect" style={btn(TG_BLUE, "#fff")}>
+            {linkMutation.isPending ? <Loader2 size={15} className="animate-spin" aria-hidden /> : <Send size={15} aria-hidden />}
+            Подключить Telegram
+          </button>
+        )}
         <button onClick={() => start("group")} disabled={linkMutation.isPending} data-testid="button-tg-connect-group" style={btn("rgba(34,158,217,0.1)", TG_BLUE)}>
           <Users size={15} aria-hidden /> В группу команды
         </button>
