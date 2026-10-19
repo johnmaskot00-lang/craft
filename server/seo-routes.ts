@@ -32,7 +32,7 @@ import {
   type SitePage,
 } from "./agent-runtime";
 import { bundleSeoMediaForDeploy, normalizeSeoMediaUrls, persistSeoCoverFromUrl } from "./seo-media";
-import { KIE_GEMINI_MODEL, KIE_GEMINI_SYNC_URL, withKieGeminiRetry } from "./kie-gemini";
+import { KIE_GEMINI_MODEL, kieGeminiSyncUrl, withKieGeminiRetry } from "./kie-gemini";
 import {
   applyHeroVariantToTheme,
   articleTemplateIssues,
@@ -65,7 +65,7 @@ import {
 import { loadProfessionalTastePack, truncateSkillsForStudy } from "./taste-skill-loader";
 
 const KIE_API_KEY = process.env.KIE_API_KEY;
-const KIE_GEMINI_URL = KIE_GEMINI_SYNC_URL;
+// KIE Gemini URL is chosen per call (active model, with fallback): see kieGeminiText.
 const KIE_JOBS_CREATE = "https://api.kie.ai/api/v1/jobs/createTask";
 const KIE_JOBS_STATUS = "https://api.kie.ai/api/v1/jobs/recordInfo";
 
@@ -463,11 +463,11 @@ async function kieSync(messages: { role: string; content: string }[], timeout = 
   const body: any = { contents };
   if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
 
-  return withKieGeminiRetry(`SEO/${KIE_GEMINI_MODEL}`, async () => {
+  return withKieGeminiRetry(`SEO/${KIE_GEMINI_MODEL}`, async (_attempt, model) => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeout);
     try {
-      const resp = await fetch(KIE_GEMINI_URL, {
+      const resp = await fetch(kieGeminiSyncUrl(model), {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${KIE_API_KEY}` },
         body: JSON.stringify(body),

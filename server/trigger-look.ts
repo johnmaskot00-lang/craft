@@ -5,6 +5,7 @@
  */
 
 import { gemini } from "./gemini";
+import { KIE_GEMINI_MODEL } from "./kie-gemini";
 import { type SiteTheme, themeOrDefault, themeImport, themeSize, themeHeadingCss, alpha } from "./site-theme";
 
 async function downloadFrameBase64(
@@ -54,7 +55,7 @@ export async function normalizeTriggerLookFrames(frames: string[]): Promise<stri
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const callP = gemini.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: KIE_GEMINI_MODEL,
       contents: [{
         role: "user",
         parts: [

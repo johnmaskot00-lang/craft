@@ -2138,7 +2138,7 @@ export default function DashboardPage() {
                         <button type="button" onClick={() => setAgentVersion("v2")}
                           className="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold transition-all"
                           style={{ background: agentVersion === "v2" ? 'linear-gradient(135deg,#4f46e5,#7c3aed)' : 'transparent', color: agentVersion === "v2" ? '#fff' : '#86868B', boxShadow: agentVersion === "v2" ? '0 1px 6px rgba(99,102,241,0.4)' : 'none', cursor: 'pointer' }}>
-                          {isMobile ? '✦ V2' : '✦ V2 · Gemini Flash'}
+                          {isMobile ? '✦ V2' : '✦ V2 · Gemini 3.8 Flash'}
                         </button>
                       </div>
 

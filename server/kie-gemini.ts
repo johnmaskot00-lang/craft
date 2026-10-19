@@ -1,13 +1,57 @@
 /**
  * Shared KIE Gemini endpoints + one automatic retry on flaky provider errors.
  *
- * Model: Gemini 3.7 Flash — https://docs.kie.ai/market/gemini/gemini-3-7-flash
- *   POST https://api.kie.ai/gemini/v1/models/gemini-3-7-flash:streamGenerateContent
- *   POST https://api.kie.ai/gemini/v1/models/gemini-3-7-flash:generateContent
+ * Model: Gemini 3.8 Flash — https://docs.kie.ai/market/gemini/gemini-3-8-flash
+ *   POST https://api.kie.ai/gemini/v1/models/gemini-3-8-flash:streamGenerateContent
+ *   POST https://api.kie.ai/gemini/v1/models/gemini-3-8-flash:generateContent
+ *
+ * KIE marks 3.8 Flash "chat only — not yet adapted for agent use". When KIE rejects
+ * the model (unknown model / tools refused), calls switch to the fallback for a
+ * cooldown and then try the primary again (see `noteKieGeminiModelFailure`).
  */
 
 export const KIE_GEMINI_MODEL =
-  (process.env.CRAFT_GEMINI_MODEL || "gemini-3-7-flash").trim() || "gemini-3-7-flash";
+  (process.env.CRAFT_GEMINI_MODEL || "gemini-3-8-flash").trim() || "gemini-3-8-flash";
+export const KIE_GEMINI_FALLBACK_MODEL =
+  (process.env.CRAFT_GEMINI_FALLBACK_MODEL || "gemini-3-7-flash").trim() || "gemini-3-7-flash";
+const FALLBACK_COOLDOWN_MS = Math.max(60_000, Number(process.env.CRAFT_GEMINI_FALLBACK_COOLDOWN_MS) || 10 * 60_000);
+
+let primaryBlockedUntil = 0;
+
+/** Model to use right now: the primary, or the fallback during a cooldown. */
+export function activeKieGeminiModel(): string {
+  if (KIE_GEMINI_MODEL === KIE_GEMINI_FALLBACK_MODEL) return KIE_GEMINI_MODEL;
+  return Date.now() < primaryBlockedUntil ? KIE_GEMINI_FALLBACK_MODEL : KIE_GEMINI_MODEL;
+}
+
+/**
+ * True for errors that mean "this model cannot serve the request" (as opposed to
+ * a flaky provider), so switching models helps where a plain retry would not.
+ */
+export function isKieGeminiModelError(status: number, message: string): boolean {
+  const m = String(message || "").toLowerCase();
+  if (status === 404) return true;
+  if (/model[^a-z]{0,20}(not (found|exist|support)|unknown|unavailable|invalid)|unsupported model|no such model|not yet adapted/.test(m)) return true;
+  if ((status === 400 || status === 422) && /tool|function/.test(m)) return true;
+  return false;
+}
+
+/**
+ * Report a failure of `model`. Returns true when the caller should retry with
+ * the fallback model (primary failed with a model error).
+ */
+export function noteKieGeminiModelFailure(model: string, status: number, message: string): boolean {
+  if (model !== KIE_GEMINI_MODEL || model === KIE_GEMINI_FALLBACK_MODEL) return false;
+  if (!isKieGeminiModelError(status, message)) return false;
+  const first = Date.now() >= primaryBlockedUntil;
+  primaryBlockedUntil = Date.now() + FALLBACK_COOLDOWN_MS;
+  if (first) {
+    console.warn(
+      `[kie-gemini] ${model} rejected (${status}: ${String(message).slice(0, 160)}) — using ${KIE_GEMINI_FALLBACK_MODEL} for ${Math.round(FALLBACK_COOLDOWN_MS / 60000)} min`,
+    );
+  }
+  return true;
+}
 
 /** Total attempts for a single Gemini call (1 primary + 1 retry by default). */
 export const KIE_GEMINI_ATTEMPTS = Math.max(
@@ -23,6 +67,7 @@ export function kieGeminiStreamUrl(model: string = KIE_GEMINI_MODEL): string {
   return `https://api.kie.ai/gemini/v1/models/${model}:streamGenerateContent`;
 }
 
+/** Primary-model URLs (kept for logs/back-compat); requests use the *Url() of activeKieGeminiModel(). */
 export const KIE_GEMINI_SYNC_URL = kieGeminiSyncUrl();
 export const KIE_GEMINI_STREAM_URL = kieGeminiStreamUrl();
 
@@ -67,7 +112,7 @@ export function isRetryableKieGeminiError(err: unknown): boolean {
 
 export async function withKieGeminiRetry<T>(
   label: string,
-  fn: (attempt: number) => Promise<T>,
+  fn: (attempt: number, model: string) => Promise<T>,
   opts?: {
     attempts?: number;
     shouldRetry?: (err: unknown, attempt: number) => boolean;
@@ -75,11 +120,21 @@ export async function withKieGeminiRetry<T>(
 ): Promise<T> {
   const attempts = opts?.attempts ?? KIE_GEMINI_ATTEMPTS;
   let lastErr: unknown;
+  let switchedModel = false;
   for (let attempt = 1; attempt <= attempts; attempt++) {
+    const model = activeKieGeminiModel();
     try {
-      return await fn(attempt);
+      return await fn(attempt, model);
     } catch (err) {
       lastErr = err;
+      const e = err as any;
+      const status = Number(e?.status || e?.statusCode || 0) || Number(String(e?.message || "").match(/\b([45]\d\d)\b/)?.[1] || 0);
+      // Model rejected: one extra try on the fallback, not counted as a retry.
+      if (!switchedModel && noteKieGeminiModelFailure(model, status, String(e?.message || err))) {
+        switchedModel = true;
+        attempt -= 1;
+        continue;
+      }
       const retry =
         attempt < attempts &&
         (opts?.shouldRetry?.(err, attempt) ?? isRetryableKieGeminiError(err));

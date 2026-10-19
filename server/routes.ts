@@ -69,7 +69,7 @@ import {
   type YooPayment,
 } from "./yookassa";
 import { setupAuth } from "./auth";
-import { gemini } from "./gemini";
+import { gemini, googleGenAI } from "./gemini";
 import { deployToYandex, addCustomDomain, removeCustomDomain, checkDomainStatus, unpublishFromYandex, deleteProjectFromYandex, getDomainProxyIp } from "./yandex-deploy";
 import { selfHostPageFonts } from "./fonts-selfhost";
 import { registerSeoRoutes } from "./seo-routes";
@@ -230,8 +230,10 @@ import {
 import {
   KIE_GEMINI_ATTEMPTS,
   KIE_GEMINI_MODEL,
-  KIE_GEMINI_STREAM_URL,
-  KIE_GEMINI_SYNC_URL,
+  activeKieGeminiModel,
+  kieGeminiStreamUrl,
+  kieGeminiSyncUrl,
+  noteKieGeminiModelFailure,
   isRetryableKieGeminiError,
   withKieGeminiRetry,
 } from "./kie-gemini";
@@ -449,7 +451,7 @@ const NANO_BANANA_CREATE_URL = "https://api.kie.ai/api/v1/jobs/createTask";
 const NANO_BANANA_STATUS_URL = "https://api.kie.ai/api/v1/jobs/recordInfo";
 // Agent V1 (Claude) → Anthropic SDK → router.cheap (see ./anthropic.ts).
 // Agent V2 (Gemini) streams via KIE Gemini 3.7 Flash (see ./kie-gemini.ts).
-const KIE_GEMINI_URL = KIE_GEMINI_STREAM_URL;
+// Stream URL is chosen per request (activeKieGeminiModel); see kieGeminiStream.
 const ENHANCE_PROMPT_TIMEOUT_MS = 90_000;
 
 const AUTO_IMAGE_COST = 15;
@@ -1250,7 +1252,7 @@ Return STRICT JSON only (no markdown, no commentary):
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const callP = gemini.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: KIE_GEMINI_MODEL,
       contents: [
         { role: "user", parts: [
           { inlineData: { data: img.base64, mimeType: img.mimeType } },
@@ -1368,7 +1370,7 @@ Respond with ONLY the motion prompt sentence — no JSON, no explanation, no quo
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const callP = gemini.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: KIE_GEMINI_MODEL,
       contents: [{ role: "user", parts: [
         { inlineData: { data: base64, mimeType } },
         { text: instruction },
@@ -3882,7 +3884,9 @@ async function* geminiGenerateStream(
   }
 
   let lastErr: unknown;
-  for (let attempt = 1; attempt <= KIE_GEMINI_ATTEMPTS; attempt++) {
+  // +1: a model rejection (3.8 Flash refusing a request) moves to the fallback model.
+  for (let attempt = 1; attempt <= KIE_GEMINI_ATTEMPTS + 1; attempt++) {
+    const model = activeKieGeminiModel();
     // Hard cap: hung KIE streams must not pin generate slots forever.
     const streamAc = new AbortController();
     const streamKill = setTimeout(() => streamAc.abort(), 10 * 60 * 1000);
@@ -3892,7 +3896,7 @@ async function* geminiGenerateStream(
     try {
       let resp: Response;
       try {
-        resp = await fetch(KIE_GEMINI_URL, {
+        resp = await fetch(kieGeminiStreamUrl(model), {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -3985,12 +3989,15 @@ async function* geminiGenerateStream(
       return;
     } catch (err) {
       lastErr = err;
+      if (!yielded && noteKieGeminiModelFailure(model, Number((err as any)?.status || 0), String((err as any)?.message || err))) {
+        continue; // next attempt uses the fallback model
+      }
       if (yielded || attempt >= KIE_GEMINI_ATTEMPTS || !isRetryableKieGeminiError(err)) {
         throw err;
       }
       const delay = attempt * 1200;
       console.warn(
-        `[Gemini stream/${KIE_GEMINI_MODEL}] attempt ${attempt}/${KIE_GEMINI_ATTEMPTS} failed, retry in ${delay}ms:`,
+        `[Gemini stream/${model}] attempt ${attempt}/${KIE_GEMINI_ATTEMPTS} failed, retry in ${delay}ms:`,
         String((err as any)?.message || err).slice(0, 220),
       );
       await new Promise((r) => setTimeout(r, delay));
@@ -4666,16 +4673,16 @@ async function kieGeminiGenerateSync(
     body.systemInstruction = { parts: [{ text: systemPrompt }] };
   }
 
-  return withKieGeminiRetry(`ENHANCE/${KIE_GEMINI_MODEL}`, async () => {
+  return withKieGeminiRetry(`ENHANCE/${KIE_GEMINI_MODEL}`, async (_attempt, model) => {
     const ac = new AbortController();
     const kill = setTimeout(() => ac.abort(), timeoutMs);
     kill.unref?.();
 
     try {
-      console.log(`[ENHANCE] POST ${KIE_GEMINI_SYNC_URL} (timeout ${timeoutMs}ms)`);
+      console.log(`[ENHANCE] POST ${kieGeminiSyncUrl(model)} (timeout ${timeoutMs}ms)`);
       let resp: Response;
       try {
-        resp = await fetch(KIE_GEMINI_SYNC_URL, {
+        resp = await fetch(kieGeminiSyncUrl(model), {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -4778,7 +4785,7 @@ async function deepResearch(query: string): Promise<{ research: string; success:
   try {
     console.log("Starting Deep Research for:", query);
 
-    const interaction = await gemini.interactions.create({
+    const interaction = await googleGenAI.interactions.create({
       input: `Исследуй тему "${query}" для создания premium-веб-сайта. Собери:\n- Основная информация, ключевые особенности (5-7), преимущества\n- Технические детали, факты и цифры, цитаты/отзывы\n- Ценообразование, целевая аудитория\n- Конкуренты и рыночные тренды\nПиши ТОЛЬКО факты из источников на русском языке. НЕ придумывай.`,
       agent: "deep-research-pro-preview-12-2025",
       background: true,
@@ -4789,7 +4796,7 @@ async function deepResearch(query: string): Promise<{ research: string; success:
     const maxAttempts = 60;
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise(resolve => setTimeout(resolve, 5000));
-      const result = await gemini.interactions.get((interaction as any).id) as any;
+      const result = await googleGenAI.interactions.get((interaction as any).id) as any;
       console.log(`Deep Research poll ${i + 1}/${maxAttempts}, status: ${result.status}`);
 
       if (result.status === "completed") {

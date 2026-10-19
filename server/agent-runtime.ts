@@ -15,8 +15,10 @@ import { storage } from "./storage";
 import { KieApiError, kieHttpError, nestedErrorCode } from "./kie-errors";
 import {
   KIE_GEMINI_ATTEMPTS,
-  KIE_GEMINI_SYNC_URL,
+  activeKieGeminiModel,
   isRetryableKieGeminiError,
+  kieGeminiSyncUrl,
+  noteKieGeminiModelFailure,
 } from "./kie-gemini";
 import { routerCheapToolsRound, isRouterCheapConfigured, ROUTER_CHEAP_TOOLS_MAX_TOKENS } from "./anthropic";
 import {
@@ -36,8 +38,7 @@ export { catLines, grepFiles, maxB64Index, validatePatchedHtml, buildPatchDiagno
 export const CRAFT_MD_FILENAME = "craft.md";
 
 const KIE_API_KEY = process.env.KIE_API_KEY;
-// Gemini V2 uses KIE Gemini 3 Flash v1beta; Claude V1 tools go through Anthropic SDK → router.cheap.
-const KIE_GEMINI_GENERATE_URL = KIE_GEMINI_SYNC_URL;
+// Gemini V2 uses KIE Gemini Flash (model in kie-gemini.ts); Claude V1 tools go through router.cheap.
 /**
  * One automatic retry on flaky KIE errors (~5%). Do not raise further:
  * after a transport disconnect KIE may still be running the original task.
@@ -1132,12 +1133,42 @@ async function kieClaudeToolsRound(
 
 type GeminiToolCall = { name: string; args: Record<string, unknown>; id?: string };
 
+type GeminiToolsResult = { text: string; functionCalls: GeminiToolCall[]; modelParts: any[]; toolsSupported: boolean };
+
+/**
+ * Tools round on the active KIE Gemini model. If KIE rejects that model (unknown
+ * model, or tools refused — 3.8 Flash is "chat only" on KIE), retry once on the
+ * fallback model, which then stays active for a cooldown.
+ */
 async function kieGeminiToolsRound(
   contents: any[],
   systemPrompt: string,
   tools: readonly any[] = SITE_AGENT_EDIT_TOOLS,
   forceToolUse = false,
-): Promise<{ text: string; functionCalls: GeminiToolCall[]; modelParts: any[]; toolsSupported: boolean }> {
+): Promise<GeminiToolsResult> {
+  const model = activeKieGeminiModel();
+  try {
+    const res = await kieGeminiToolsRoundOn(model, contents, systemPrompt, tools, forceToolUse);
+    if (!res.toolsSupported && noteKieGeminiModelFailure(model, 400, res.rejection || "tools rejected")) {
+      return kieGeminiToolsRoundOn(activeKieGeminiModel(), contents, systemPrompt, tools, forceToolUse);
+    }
+    return res;
+  } catch (e: any) {
+    const status = Number(e?.status || e?.statusCode || 0);
+    if (noteKieGeminiModelFailure(model, status, String(e?.message || e))) {
+      return kieGeminiToolsRoundOn(activeKieGeminiModel(), contents, systemPrompt, tools, forceToolUse);
+    }
+    throw e;
+  }
+}
+
+async function kieGeminiToolsRoundOn(
+  model: string,
+  contents: any[],
+  systemPrompt: string,
+  tools: readonly any[],
+  forceToolUse: boolean,
+): Promise<GeminiToolsResult & { rejection?: string }> {
   if (!KIE_API_KEY) throw new Error("KIE_API_KEY missing");
 
   const body: any = {
@@ -1157,7 +1188,7 @@ async function kieGeminiToolsRound(
     const kill = setTimeout(() => ac.abort(), KIE_GEMINI_TOOLS_TIMEOUT_MS);
     kill.unref?.();
     try {
-      const resp = await fetch(KIE_GEMINI_GENERATE_URL, {
+      const resp = await fetch(kieGeminiSyncUrl(model), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1170,8 +1201,8 @@ async function kieGeminiToolsRound(
       if (!resp.ok) {
         const err = await resp.text();
         if (resp.status === 400 || resp.status === 422 || /tool|function/i.test(err)) {
-          console.warn("[AGENT] Gemini tools rejected by KIE:", resp.status, err.slice(0, 300));
-          return { text: "", functionCalls: [], modelParts: [], toolsSupported: false };
+          console.warn(`[AGENT] Gemini tools rejected by KIE (${model}):`, resp.status, err.slice(0, 300));
+          return { text: "", functionCalls: [], modelParts: [], toolsSupported: false, rejection: err.slice(0, 300) };
         }
         if (isTransientKieStatus(resp.status) && attempt < KIE_TOOL_ROUND_RETRIES - 1) {
           const delay = (attempt + 1) * 1500;
