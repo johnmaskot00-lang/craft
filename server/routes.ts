@@ -11400,6 +11400,53 @@ ${fullHtml}`;
     }
   });
 
+  /**
+   * Move a project (found by id or by its custom domain) to another user.
+   * Needed after the partial DB restore: some sites survived while their
+   * owners did not, so the domain stays "taken" and leads have no owner.
+   * Leads and Telegram routing follow projects.user_id, so they move too.
+   */
+  app.post("/api/admin/users/:userId/claim-project", adminOnly, async (req, res) => {
+    try {
+      const userId = parseInt(req.params.userId, 10);
+      if (!Number.isFinite(userId)) return res.status(400).json({ message: "Invalid user id" });
+      const target = await storage.getUser(userId);
+      if (!target) return res.status(404).json({ message: "Пользователь не найден" });
+
+      const raw = String(req.body?.project ?? "").trim().toLowerCase();
+      if (!raw) return res.status(400).json({ message: "Укажите ID проекта или домен" });
+      let projectId: number | undefined;
+      if (/^\d+$/.test(raw)) {
+        projectId = Number(raw);
+      } else {
+        const host = domainToASCII(raw.replace(/^https?:\/\//, "").split("/")[0].replace(/^www\./, ""));
+        if (!host) return res.status(400).json({ message: "Некорректный домен" });
+        projectId = (await storage.getProjectByCustomDomain(host))?.id;
+      }
+      const ownerBefore = projectId ? await storage.getProjectOwnerId(projectId) : undefined;
+      if (!projectId || ownerBefore === undefined) return res.status(404).json({ message: "Проект не найден" });
+      if (ownerBefore === userId) return res.json({ success: true, projectId, unchanged: true });
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(`UPDATE projects SET user_id = $2 WHERE id = $1`, [projectId, userId]);
+        await client.query(`UPDATE project_images SET user_id = $2 WHERE project_id = $1`, [projectId, userId]);
+        await client.query("COMMIT");
+      } catch (e) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw e;
+      } finally {
+        client.release();
+      }
+      console.log(`[admin] Project ${projectId} moved from user ${ownerBefore} to user ${userId}`);
+      res.json({ success: true, projectId, fromUserId: ownerBefore });
+    } catch (err: any) {
+      console.error("[admin claim-project]", err);
+      res.status(500).json({ message: err.message || "Ошибка переноса проекта" });
+    }
+  });
+
   app.get("/api/admin/promos", adminOnly, async (_req, res) => {
     try {
       const promos = await storage.listPromoCodes();
