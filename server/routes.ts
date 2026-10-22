@@ -11401,49 +11401,26 @@ ${fullHtml}`;
   });
 
   /**
-   * Move a project (found by id or by its custom domain) to another user.
-   * Needed after the partial DB restore: some sites survived while their
-   * owners did not, so the domain stays "taken" and leads have no owner.
-   * Leads and Telegram routing follow projects.user_id, so they move too.
+   * Free a custom domain held by another project (e.g. a site whose owner was
+   * lost in the partial DB restore) so it can be bound to a new project.
+   * Only the binding is removed; the old project itself stays untouched.
    */
-  app.post("/api/admin/users/:userId/claim-project", adminOnly, async (req, res) => {
+  app.post("/api/admin/domains/release", adminOnly, async (req, res) => {
     try {
-      const userId = parseInt(req.params.userId, 10);
-      if (!Number.isFinite(userId)) return res.status(400).json({ message: "Invalid user id" });
-      const target = await storage.getUser(userId);
-      if (!target) return res.status(404).json({ message: "Пользователь не найден" });
-
-      const raw = String(req.body?.project ?? "").trim().toLowerCase();
-      if (!raw) return res.status(400).json({ message: "Укажите ID проекта или домен" });
-      let projectId: number | undefined;
-      if (/^\d+$/.test(raw)) {
-        projectId = Number(raw);
-      } else {
-        const host = domainToASCII(raw.replace(/^https?:\/\//, "").split("/")[0].replace(/^www\./, ""));
-        if (!host) return res.status(400).json({ message: "Некорректный домен" });
-        projectId = (await storage.getProjectByCustomDomain(host))?.id;
-      }
-      const ownerBefore = projectId ? await storage.getProjectOwnerId(projectId) : undefined;
-      if (!projectId || ownerBefore === undefined) return res.status(404).json({ message: "Проект не найден" });
-      if (ownerBefore === userId) return res.json({ success: true, projectId, unchanged: true });
-
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        await client.query(`UPDATE projects SET user_id = $2 WHERE id = $1`, [projectId, userId]);
-        await client.query(`UPDATE project_images SET user_id = $2 WHERE project_id = $1`, [projectId, userId]);
-        await client.query("COMMIT");
-      } catch (e) {
-        await client.query("ROLLBACK").catch(() => {});
-        throw e;
-      } finally {
-        client.release();
-      }
-      console.log(`[admin] Project ${projectId} moved from user ${ownerBefore} to user ${userId}`);
-      res.json({ success: true, projectId, fromUserId: ownerBefore });
+      const raw = String(req.body?.domain ?? "").trim().toLowerCase();
+      const host = raw ? domainToASCII(raw.replace(/^https?:\/\//, "").split("/")[0].replace(/^www\./, "")) : "";
+      if (!host) return res.status(400).json({ message: "Укажите домен" });
+      const holder = await storage.getProjectByCustomDomain(host);
+      if (!holder) return res.status(404).json({ message: "Домен ни к одному проекту не привязан" });
+      await pool.query(`UPDATE projects SET custom_domain = NULL WHERE id = $1 AND custom_domain = $2`, [holder.id, host]);
+      removeCustomDomain(host, holder.ycStoragePoolId).catch((e) =>
+        console.warn("[admin domain release] bucket cleanup non-fatal:", e?.message || e),
+      );
+      console.log(`[admin] Domain ${host} released from project ${holder.id} (user ${holder.userId})`);
+      res.json({ success: true, domain: host, projectId: holder.id, userId: holder.userId });
     } catch (err: any) {
-      console.error("[admin claim-project]", err);
-      res.status(500).json({ message: err.message || "Ошибка переноса проекта" });
+      console.error("[admin domain release]", err);
+      res.status(500).json({ message: err.message || "Ошибка освобождения домена" });
     }
   });
 

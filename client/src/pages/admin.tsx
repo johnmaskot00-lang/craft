@@ -420,16 +420,16 @@ function UserDetail({ userId, onBack }: { userId: number; onBack: () => void }) 
   const [claimInput, setClaimInput] = useState("");
   const claimMutation = useMutation({
     mutationFn: (project: string) =>
-      apiRequest("POST", `/api/admin/users/${userId}/claim-project`, { project }).then(r => r.json()),
+      apiRequest("POST", `/api/admin/domains/release`, { domain: project }).then(r => r.json()),
     onSuccess: (data) => {
       toast({
-        title: data.unchanged ? "Проект уже у этого пользователя" : "Проект перенесён",
-        description: data.unchanged ? `#${data.projectId}` : `#${data.projectId}: от пользователя ${data.fromUserId}`,
+        title: "Домен освобождён",
+        description: `${data.domain} снят с проекта #${data.projectId}. Теперь его можно привязать к новому сайту.`,
       });
       setClaimInput("");
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users", userId, "projects"] });
     },
-    onError: (err: any) => toast({ title: "Ошибка переноса", description: err.message, variant: "destructive" }),
+    onError: (err: any) => toast({ title: "Ошибка", description: err.message, variant: "destructive" }),
   });
 
   const downloadZip = async (projectId: number, title: string) => {
@@ -619,15 +619,15 @@ function UserDetail({ userId, onBack }: { userId: number; onBack: () => void }) 
               e.preventDefault();
               const v = claimInput.trim();
               if (!v) return;
-              if (confirm(`Перенести проект «${v}» этому пользователю? Лиды и редактирование перейдут к нему.`)) claimMutation.mutate(v);
+              if (confirm(`Освободить домен ${v}? Он будет отвязан от текущего проекта (сам проект не изменится).`)) claimMutation.mutate(v);
             }}
             style={{ display: "flex", gap: 8, padding: "12px 24px", borderBottom: "1px solid #F2F2F7", flexWrap: "wrap" }}
           >
             <input
               value={claimInput}
               onChange={(e) => setClaimInput(e.target.value)}
-              placeholder="ID проекта или домен, например onlinewizards.ru"
-              aria-label="ID проекта или домен для переноса"
+              placeholder="Занятый домен, например onlinewizards.ru"
+              aria-label="Домен для освобождения"
               style={{ flex: 1, minWidth: 220, padding: "8px 12px", borderRadius: 8, border: "1px solid #E0E0E5", fontSize: "0.82rem" }}
             />
             <button
@@ -638,7 +638,7 @@ function UserDetail({ userId, onBack }: { userId: number; onBack: () => void }) 
                 fontSize: "0.78rem", fontWeight: 700, cursor: "pointer", opacity: claimMutation.isPending || !claimInput.trim() ? 0.6 : 1,
               }}
             >
-              Перенести сюда
+              Освободить домен
             </button>
           </form>
           {projLoading ? (
