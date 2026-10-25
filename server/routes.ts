@@ -129,6 +129,7 @@ import {
   verifyBackup,
 } from "./db-backup";
 import { logWebhookHealth, notifyAdmin } from "./telegram-bot-auth";
+import { scheduleDbRepairOnce } from "./db-repair";
 // Importing registers the bot update hook for `/start leads_<code>`.
 import {
   createLeadLink,
@@ -5094,6 +5095,9 @@ export async function registerRoutes(
     void withSingletonLease("object-delete-outbox", 5 * 60_000, processObjectDeleteOutbox)
       .catch((e) => console.warn("[outbox] lease:", e?.message || e));
   }, 60_000).unref?.();
+
+  // One-time index/sequence repair after the partial restore (server/db-repair.ts).
+  scheduleDbRepairOnce();
 
   // Nightly logical backup to our own bucket (server/db-backup.ts). Checked every
   // 10 minutes; runs once per day after 00:30 UTC (03:30 MSK). The lease name holds

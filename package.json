@@ -11,7 +11,7 @@
     "start:worker": "NODE_ENV=production node --max-old-space-size=${NODE_MAX_OLD_SPACE_SIZE:-1792} dist/worker.cjs",
     "check": "tsc",
     "db:push": "drizzle-kit push",
-    "test:integration": "node --import tsx --import ./tests/register-stubs.mjs tests/site-blobs.itest.ts && node --import tsx tests/session-store.itest.ts && node --import tsx tests/db-backup.itest.ts && node --import tsx tests/lead-telegram.itest.ts && node --import tsx tests/lead-dedup.itest.ts && node --import tsx tests/telegram-poll.itest.ts && node --import tsx --import ./tests/register-stubs.mjs tests/telegram-poll-lease.itest.ts && node --import tsx tests/kie-gemini-model.itest.ts"
+    "test:integration": "node --import tsx --import ./tests/register-stubs.mjs tests/site-blobs.itest.ts && node --import tsx tests/session-store.itest.ts && node --import tsx tests/db-backup.itest.ts && node --import tsx tests/lead-telegram.itest.ts && node --import tsx tests/lead-dedup.itest.ts && node --import tsx tests/telegram-poll.itest.ts && node --import tsx --import ./tests/register-stubs.mjs tests/telegram-poll-lease.itest.ts && node --import tsx tests/kie-gemini-model.itest.ts && node --import tsx tests/db-repair.itest.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
