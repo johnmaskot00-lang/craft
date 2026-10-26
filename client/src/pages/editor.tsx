@@ -1916,6 +1916,48 @@ export default function EditorPage() {
     setDomainError(null);
   };
 
+  const [domainDetaching, setDomainDetaching] = useState(false);
+  const handleDetachDomain = async () => {
+    if (!project?.customDomain) return;
+    if (!confirm(`Отвязать домен ${project.customDomain}?\nСайт останется на бесплатном техническом адресе, списание 35 токенов/день прекратится.`)) return;
+    setDomainDetaching(true);
+    setDomainError(null);
+    try {
+      const res = await fetch(`/api/projects/${project.id}/domain`, { method: "DELETE", credentials: "include" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || "Ошибка отвязки домена");
+      handleChangeDomain();
+      await refetchProject();
+      toast({ title: "Домен отвязан", description: "Списание за свой домен прекращено." });
+    } catch (e: any) {
+      setDomainError(e.message);
+    } finally {
+      setDomainDetaching(false);
+    }
+  };
+
+  // A draft keeps its old publishedUrl after "Снять с публикации": live = has a URL and still hosted.
+  const siteLive = Boolean(project?.publishedUrl) && ["published", "publishing", "suspended", "error"].includes(project?.publishStatus || "");
+  const [unpublishing, setUnpublishing] = useState(false);
+  const handleUnpublish = async () => {
+    if (!project) return;
+    if (!confirm("Снять сайт с публикации?\nПо адресу сайта будет заглушка, списание за хостинг прекратится. Опубликовать снова можно в любой момент.")) return;
+    setUnpublishing(true);
+    try {
+      const res = await fetch(`/api/projects/${project.id}/unpublish`, { method: "POST", credentials: "include" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || "Ошибка снятия с публикации");
+      setPublishResult(null);
+      setShowPublishModal(false);
+      await refetchProject();
+      toast({ title: "Сайт снят с публикации" });
+    } catch (e: any) {
+      toast({ title: "Ошибка", description: e.message, variant: "destructive" });
+    } finally {
+      setUnpublishing(false);
+    }
+  };
+
   const handleCheckDomain = async () => {
     if (!project || !customDomain.trim()) return;
     setDomainChecking(true);
@@ -3463,7 +3505,7 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
                 setDomainResult(null);
               }
               setShowPublishModal(true);
-              if (!project?.publishedUrl) {
+              if (!siteLive) {
                 setTimeout(() => handlePublish(), 50);
               }
             }}
@@ -5062,7 +5104,7 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
 
           {/* scrollable body */}
           <div style={{ overflowY: "auto", flex: 1, padding: "1rem 1.25rem 1.25rem" }}>
-            {!publishResult && !isPublishing && !publishError && project?.publishedUrl && (
+            {!publishResult && !isPublishing && !publishError && siteLive && project?.publishedUrl && (
               <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", color: "#16a34a" }}>
                   <CheckCircle2 className="w-5 h-5" />
@@ -5100,6 +5142,16 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
                         data-testid="button-change-domain"
                       >
                         Сменить домен
+                      </button>
+                    )}
+                    {project?.customDomain && (
+                      <button
+                        onClick={handleDetachDomain}
+                        disabled={domainDetaching}
+                        style={{ marginLeft: domainResult ? 0 : "auto", fontSize: "0.72rem", color: "#dc2626", background: "none", border: "1px solid #fecaca", borderRadius: 6, padding: "2px 8px", cursor: "pointer", fontWeight: 500, opacity: domainDetaching ? 0.6 : 1 }}
+                        data-testid="button-detach-domain"
+                      >
+                        {domainDetaching ? "Отвязываем…" : "Отвязать"}
                       </button>
                     )}
                   </div>
@@ -5165,6 +5217,15 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
                     Обновить сайт
                   </Button>
                 </div>
+
+                <button
+                  onClick={handleUnpublish}
+                  disabled={unpublishing}
+                  style={{ alignSelf: "center", fontSize: "0.78rem", color: "#6b7280", background: "none", border: "none", cursor: "pointer", textDecoration: "underline", opacity: unpublishing ? 0.6 : 1 }}
+                  data-testid="button-unpublish"
+                >
+                  {unpublishing ? "Снимаем с публикации…" : "Снять с публикации"}
+                </button>
               </div>
             )}
 
@@ -5216,6 +5277,16 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
                         data-testid="button-change-domain-2"
                       >
                         Сменить домен
+                      </button>
+                    )}
+                    {project?.customDomain && (
+                      <button
+                        onClick={handleDetachDomain}
+                        disabled={domainDetaching}
+                        style={{ marginLeft: domainResult ? 0 : "auto", fontSize: "0.72rem", color: "#dc2626", background: "none", border: "1px solid #fecaca", borderRadius: 6, padding: "2px 8px", cursor: "pointer", fontWeight: 500, opacity: domainDetaching ? 0.6 : 1 }}
+                        data-testid="button-detach-domain-2"
+                      >
+                        {domainDetaching ? "Отвязываем…" : "Отвязать"}
                       </button>
                     )}
                   </div>
@@ -5282,6 +5353,15 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
                     Открыть сайт
                   </Button>
                 </div>
+
+                <button
+                  onClick={handleUnpublish}
+                  disabled={unpublishing}
+                  style={{ alignSelf: "center", fontSize: "0.78rem", color: "#6b7280", background: "none", border: "none", cursor: "pointer", textDecoration: "underline", opacity: unpublishing ? 0.6 : 1 }}
+                  data-testid="button-unpublish-2"
+                >
+                  {unpublishing ? "Снимаем с публикации…" : "Снять с публикации"}
+                </button>
               </div>
             )}
 

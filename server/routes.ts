@@ -10807,7 +10807,7 @@ ${fullHtml}`;
       const project = await storage.getProject(projectId);
       if (!project) return res.status(404).json({ message: "Проект не найден" });
       if (project.userId !== (req.user as any).id) return res.status(403).json({ message: "Нет доступа" });
-      if (project.publishStatus !== "published") return res.status(400).json({ message: "Проект не опубликован" });
+      if (!UNPUBLISHABLE.has(project.publishStatus)) return res.status(400).json({ message: "Проект не опубликован" });
 
       await unpublishFromYandex(projectId, project.customDomain, project.ycStoragePoolId);
       // Voluntary unpublish frees the plan slot → "draft". "suspended" is reserved for
@@ -10817,6 +10817,40 @@ ${fullHtml}`;
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ message: err.message || "Ошибка снятия с публикации" });
+    }
+  });
+
+  // Statuses that still occupy hosting (and may still be billed via a custom domain).
+  const UNPUBLISHABLE = new Set(["published", "publishing", "suspended", "error"]);
+
+  /**
+   * Remove a project's custom domain. Daily billing only charges projects with a
+   * custom domain, so this stops the 35 tokens/day; the site stays live on its
+   * free technical address. The domain bucket is cleaned up in the background.
+   */
+  async function detachProjectDomain(project: { id: number; customDomain: string | null; ycStoragePoolId: number | null }): Promise<string | null> {
+    const domain = project.customDomain;
+    if (!domain) return null;
+    await pool.query(`UPDATE projects SET custom_domain = NULL WHERE id = $1`, [project.id]);
+    removeCustomDomain(domain, project.ycStoragePoolId).catch((e) =>
+      console.warn(`[domain detach] bucket cleanup for ${domain} non-fatal:`, e?.message || e),
+    );
+    return domain;
+  }
+
+  app.delete("/api/projects/:id/domain", async (req, res) => {
+    if (!req.isAuthenticated()) return res.status(401).json({ message: "Не авторизован" });
+    try {
+      const projectId = parseInt(req.params.id, 10);
+      const project = await storage.getProject(projectId);
+      if (!project) return res.status(404).json({ message: "Проект не найден" });
+      if (project.userId !== (req.user as any).id) return res.status(403).json({ message: "Нет доступа" });
+      const domain = await detachProjectDomain(project);
+      if (!domain) return res.status(400).json({ message: "Домен не привязан" });
+      console.log(`[domain] user ${project.userId} detached ${domain} from project ${projectId}`);
+      res.json({ success: true, domain });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || "Ошибка отвязки домена" });
     }
   });
 
@@ -11425,6 +11459,37 @@ ${fullHtml}`;
     } catch (err: any) {
       console.error("[admin domain release]", err);
       res.status(500).json({ message: err.message || "Ошибка освобождения домена" });
+    }
+  });
+
+  app.post("/api/admin/projects/:projectId/detach-domain", adminOnly, async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId, 10);
+      const project = Number.isFinite(projectId) ? await storage.getProject(projectId) : undefined;
+      if (!project) return res.status(404).json({ message: "Проект не найден" });
+      const domain = await detachProjectDomain(project);
+      if (!domain) return res.status(400).json({ message: "Домен не привязан" });
+      console.log(`[admin] Detached ${domain} from project ${projectId} (user ${project.userId})`);
+      res.json({ success: true, domain });
+    } catch (err: any) {
+      console.error("[admin detach-domain]", err);
+      res.status(500).json({ message: err.message || "Ошибка отвязки домена" });
+    }
+  });
+
+  app.post("/api/admin/projects/:projectId/unpublish", adminOnly, async (req, res) => {
+    try {
+      const projectId = parseInt(req.params.projectId, 10);
+      const project = Number.isFinite(projectId) ? await storage.getProject(projectId) : undefined;
+      if (!project) return res.status(404).json({ message: "Проект не найден" });
+      if (!UNPUBLISHABLE.has(project.publishStatus)) return res.status(400).json({ message: "Проект не опубликован" });
+      await unpublishFromYandex(projectId, project.customDomain, project.ycStoragePoolId);
+      await storage.updateProject(projectId, { publishStatus: "draft" });
+      console.log(`[admin] Unpublished project ${projectId} (user ${project.userId})`);
+      res.json({ success: true });
+    } catch (err: any) {
+      console.error("[admin unpublish]", err);
+      res.status(500).json({ message: err.message || "Ошибка снятия с публикации" });
     }
   });
 

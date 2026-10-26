@@ -417,6 +417,26 @@ function UserDetail({ userId, onBack }: { userId: number; onBack: () => void }) 
     onError: (err: any) => toast({ title: "Ошибка", description: err.message, variant: "destructive" }),
   });
 
+  const detachMutation = useMutation({
+    mutationFn: (projectId: number) =>
+      apiRequest("POST", `/api/admin/projects/${projectId}/detach-domain`).then(r => r.json()),
+    onSuccess: (data) => {
+      toast({ title: "Домен отвязан", description: `${data.domain}: списание прекращено` });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users", userId, "projects"] });
+    },
+    onError: (err: any) => toast({ title: "Ошибка", description: err.message, variant: "destructive" }),
+  });
+
+  const unpublishMutation = useMutation({
+    mutationFn: (projectId: number) =>
+      apiRequest("POST", `/api/admin/projects/${projectId}/unpublish`).then(r => r.json()),
+    onSuccess: () => {
+      toast({ title: "Сайт снят с публикации" });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users", userId, "projects"] });
+    },
+    onError: (err: any) => toast({ title: "Ошибка", description: err.message, variant: "destructive" }),
+  });
+
   const [claimInput, setClaimInput] = useState("");
   const claimMutation = useMutation({
     mutationFn: (project: string) =>
@@ -652,6 +672,14 @@ function UserDetail({ userId, onBack }: { userId: number; onBack: () => void }) 
                   <div style={{ flex: 1, minWidth: 160 }}>
                     <div style={{ fontSize: "0.88rem", fontWeight: 600, color: "#1D1D1F" }}>{p.title}</div>
                     <div style={{ fontSize: "0.75rem", color: "#86868B" }}>ID: {p.id} · {new Date(p.createdAt).toLocaleDateString("ru-RU")}</div>
+                    {p.customDomain && (
+                      <div style={{ fontSize: "0.75rem", marginTop: 2, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <a href={`https://${p.customDomain}`} target="_blank" rel="noreferrer" style={{ color: "#007AFF", fontWeight: 600 }}>{p.customDomain}</a>
+                        <span style={{ color: p.publishStatus === "published" ? "#E67E22" : "#86868B" }}>
+                          {p.publishStatus === "published" ? "· 35 ток./день" : "· не списывается"}
+                        </span>
+                      </div>
+                    )}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     {p.publishStatus === "published" && (
@@ -667,6 +695,40 @@ function UserDetail({ userId, onBack }: { userId: number; onBack: () => void }) 
                       <a href={p.publishedUrl} target="_blank" rel="noreferrer" style={{ color: "#007AFF" }} title="Открыть сайт">
                         <ExternalLink size={14} />
                       </a>
+                    )}
+                    {p.customDomain && (
+                      <button
+                        type="button"
+                        disabled={detachMutation.isPending}
+                        onClick={() => {
+                          if (confirm(`Отвязать домен ${p.customDomain} от «${p.title}» (#${p.id})?\nСписание 35 ток./день прекратится, сайт останется на техническом адресе.`)) detachMutation.mutate(p.id);
+                        }}
+                        title="Отвязать домен"
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 10px", borderRadius: 8,
+                          border: "1px solid #F5C6CB", background: "#FFF5F5", cursor: "pointer",
+                          fontSize: "0.72rem", fontWeight: 700, color: "#C0392B", opacity: detachMutation.isPending ? 0.6 : 1,
+                        }}
+                      >
+                        Отвязать домен
+                      </button>
+                    )}
+                    {["published", "publishing", "suspended", "error"].includes(p.publishStatus) && (
+                      <button
+                        type="button"
+                        disabled={unpublishMutation.isPending}
+                        onClick={() => {
+                          if (confirm(`Снять «${p.title}» (#${p.id}) с публикации?\nПо адресу будет заглушка, пользователь сможет опубликовать снова.`)) unpublishMutation.mutate(p.id);
+                        }}
+                        title="Снять с публикации"
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 10px", borderRadius: 8,
+                          border: "1px solid #E0E0E5", background: "#F9F9F9", cursor: "pointer",
+                          fontSize: "0.72rem", fontWeight: 700, color: "#1D1D1F", opacity: unpublishMutation.isPending ? 0.6 : 1,
+                        }}
+                      >
+                        Снять с публикации
+                      </button>
                     )}
                     <button
                       type="button"
