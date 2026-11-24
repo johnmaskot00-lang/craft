@@ -209,6 +209,7 @@ import {
   resolveEditContextBudget,
   type SitePage,
 } from "./agent-runtime";
+import { shouldUseOneShotEdit } from "./edit-routing";
 import { registerGeoRoutes } from "./geo";
 import {
   isRouterCheapConfigured,
@@ -229,15 +230,11 @@ import {
   nestedErrorCode,
 } from "./kie-errors";
 import {
-  KIE_GEMINI_ATTEMPTS,
   KIE_GEMINI_MODEL,
-  activeKieGeminiModel,
-  kieGeminiStreamUrl,
   kieGeminiSyncUrl,
-  noteKieGeminiModelFailure,
-  isRetryableKieGeminiError,
   withKieGeminiRetry,
 } from "./kie-gemini";
+import { routerCheapGeminiGenerateStream } from "./router-cheap-neon";
 import {
   REFERRAL_RATE,
   normalizeReferralCode,
@@ -451,8 +448,7 @@ const KIE_API_KEY = process.env.KIE_API_KEY;
 const NANO_BANANA_CREATE_URL = "https://api.kie.ai/api/v1/jobs/createTask";
 const NANO_BANANA_STATUS_URL = "https://api.kie.ai/api/v1/jobs/recordInfo";
 // Agent V1 (Claude) → Anthropic SDK → router.cheap (see ./anthropic.ts).
-// Agent V2 (Gemini) streams via KIE Gemini 3.7 Flash (see ./kie-gemini.ts).
-// Stream URL is chosen per request (activeKieGeminiModel); see kieGeminiStream.
+// Agent V2 (Gemini) streams via Router Cheap (model order in router-cheap-neon.ts).
 const ENHANCE_PROMPT_TIMEOUT_MS = 90_000;
 
 const AUTO_IMAGE_COST = 15;
@@ -3863,9 +3859,6 @@ async function* geminiGenerateStream(
   messages: KieMessage[],
   systemPrompt: string
 ): AsyncGenerator<string> {
-  if (!KIE_API_KEY) {
-    throw new KieApiError("KIE_API_KEY missing — agent V2 requires it", { source: "http", status: 503 });
-  }
   const contents: any[] = [];
   for (const msg of messages) {
     if (msg.role === "developer" || msg.role === "system") continue;
@@ -3879,134 +3872,7 @@ async function* geminiGenerateStream(
     if (parts.length > 0) contents.push({ role, parts });
   }
 
-  const body: any = { stream: true, contents };
-  if (systemPrompt) {
-    body.systemInstruction = { parts: [{ text: systemPrompt }] };
-  }
-
-  let lastErr: unknown;
-  // +1: a model rejection (3.8 Flash refusing a request) moves to the fallback model.
-  for (let attempt = 1; attempt <= KIE_GEMINI_ATTEMPTS + 1; attempt++) {
-    const model = activeKieGeminiModel();
-    // Hard cap: hung KIE streams must not pin generate slots forever.
-    const streamAc = new AbortController();
-    const streamKill = setTimeout(() => streamAc.abort(), 10 * 60 * 1000);
-    streamKill.unref?.();
-    let yielded = false;
-
-    try {
-      let resp: Response;
-      try {
-        resp = await fetch(kieGeminiStreamUrl(model), {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${KIE_API_KEY}`,
-          },
-          body: JSON.stringify(body),
-          signal: streamAc.signal,
-        });
-      } catch (err: any) {
-        throw new KieApiError(`Gemini KIE transport error (${nestedErrorCode(err) || "TRANSPORT_ERROR"}): ${err?.message || err}`, {
-          source: "network",
-          cause: err,
-        });
-      }
-
-      if (!resp.ok) {
-        const errText = await resp.text();
-        throw kieHttpError(resp.status, errText.slice(0, 400), "Gemini KIE");
-      }
-
-      const ct = String(resp.headers.get("content-type") || "").toLowerCase();
-      if (ct.includes("application/json") && !ct.includes("event-stream") && !ct.includes("text/event-stream")) {
-        const data = await resp.json();
-        throwIfKieErrorBody(data, "Gemini KIE");
-        for (const part of data?.candidates?.[0]?.content?.parts ?? []) {
-          if (part.text) {
-            yielded = true;
-            yield part.text as string;
-          }
-        }
-        return;
-      }
-
-      const reader = (resp.body as any).getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let sawCandidate = false;
-      while (true) {
-        if (streamAc.signal.aborted) {
-          throw new KieApiError("Gemini KIE stream timed out after 10 minutes", { source: "network" });
-        }
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          const jsonStr = trimmed.startsWith("data: ") ? trimmed.slice(6) : trimmed;
-          if (!jsonStr || jsonStr === "[DONE]") continue;
-          try {
-            const parsed = JSON.parse(jsonStr);
-            throwIfKieErrorBody(parsed, "Gemini KIE");
-            for (const part of parsed?.candidates?.[0]?.content?.parts ?? []) {
-              if (part.text) {
-                sawCandidate = true;
-                yielded = true;
-                yield part.text as string;
-              }
-            }
-          } catch (e) {
-            if (e instanceof KieApiError) throw e;
-          }
-        }
-      }
-      if (buffer.trim()) {
-        const jsonStr = buffer.trim().startsWith("data: ") ? buffer.trim().slice(6) : buffer.trim();
-        try {
-          const parsed = JSON.parse(jsonStr);
-          throwIfKieErrorBody(parsed, "Gemini KIE");
-          for (const part of parsed?.candidates?.[0]?.content?.parts ?? []) {
-            if (part.text) {
-              sawCandidate = true;
-              yielded = true;
-              yield part.text as string;
-            }
-          }
-        } catch (e) {
-          if (e instanceof KieApiError) throw e;
-        }
-      }
-      if (!sawCandidate && buffer.trim().length > 0) {
-        try {
-          throwIfKieErrorBody(JSON.parse(buffer.trim()), "Gemini KIE");
-        } catch (e) {
-          if (e instanceof KieApiError) throw e;
-        }
-      }
-      return;
-    } catch (err) {
-      lastErr = err;
-      if (!yielded && noteKieGeminiModelFailure(model, Number((err as any)?.status || 0), String((err as any)?.message || err))) {
-        continue; // next attempt uses the fallback model
-      }
-      if (yielded || attempt >= KIE_GEMINI_ATTEMPTS || !isRetryableKieGeminiError(err)) {
-        throw err;
-      }
-      const delay = attempt * 1200;
-      console.warn(
-        `[Gemini stream/${model}] attempt ${attempt}/${KIE_GEMINI_ATTEMPTS} failed, retry in ${delay}ms:`,
-        String((err as any)?.message || err).slice(0, 220),
-      );
-      await new Promise((r) => setTimeout(r, delay));
-    } finally {
-      clearTimeout(streamKill);
-    }
-  }
-  throw lastErr;
+  yield* routerCheapGeminiGenerateStream({ contents, systemPrompt, temperature: 0.7, maxTokens: 32_000 });
 }
 
 const WAVESPEED_API_KEY = process.env.WAVESPEED_API_KEY;
@@ -6830,11 +6696,11 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
 
       conversationHistory.push({ role: "user", content: userContent });
 
-      console.log(`[AGENT] Generate call. Agent: ${useGemini ? "v2/Gemini-Flash" : `v1/${getActiveRouterCheapModel()}-router.cheap`}, History: ${conversationHistory.length}, Edit: ${isEditMode}`);
+      console.log(`[AGENT] Generate call. Agent: ${useGemini ? "v2/Gemini via Router Cheap" : `v1/${getActiveRouterCheapModel()} via Router Cheap`}, History: ${conversationHistory.length}, Edit: ${isEditMode}`);
 
-      // ── Multipage tool-calling agent (Claude + Gemini / KIE) ────────────────
+      // ── Multipage tool-calling agent (Claude + Gemini / Router Cheap) ─────────
       // Tries function calling so the model can read/patch ANY page.
-      // If KIE rejects tools, we fall through to the streaming multipage text protocol.
+      // If the provider rejects tools, fall through to the streaming multipage text protocol.
       // Ordinary media insertion uses tools with persistent URLs. Mockup mode
       // still needs vision pixels and therefore keeps the streaming vision path.
       let lastError: any = null;
@@ -6900,6 +6766,13 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
           }
           // Selected tweak can still finish in 1–2 rounds; leave headroom to escalate.
           const editMaxRounds = fullRewrite ? 8 : quickPatch ? 4 : 6;
+          const oneShotEdit = shouldUseOneShotEdit({
+            quickPatch,
+            fullRewrite,
+            hasSelectedTarget: !!selectedEditTarget,
+            hasSeededSnippet: !!seededSnippet,
+            prompt: String(prompt || ""),
+          });
           const agentHistory = hist.slice(-4);
 
           const buildEditUserPrompt = (
@@ -6947,10 +6820,10 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
               pages: sitePages,
               craftMd: craftMdForEdit,
               history: agentHistory,
-              maxRounds: opts?.maxRounds ?? editMaxRounds,
-              // Always full toolbelt (read/patch/write/finish) — model chooses like Replit.
+              maxRounds: opts?.maxRounds ?? (oneShotEdit && !opts?.escalate ? 1 : editMaxRounds),
+              // A failed one-shot is retried with the full tool loop below.
               preReadFiles: quickPatch ? [safeActive] : [],
-              oneShot: false,
+              oneShot: oneShotEdit && !opts?.escalate,
               provider,
               onStatus: (status) => {
                 try { res.write(`data: ${JSON.stringify({ status })}\n\n`); } catch {}
@@ -7016,11 +6889,23 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
               toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
             }
           }
+          // If the first one-shot call returns no applied patch, escalate in the same model with full tools.
+          if (
+            oneShotEdit &&
+            toolResult.toolsSupported &&
+            toolResult.changedFiles.size === 0 &&
+            toolProviderUsed === primaryProvider
+          ) {
+            res.write(`data: ${JSON.stringify({ status: "Патч не применился — уточняю фрагмент…" })}\n\n`);
+            fullResponse = "";
+            toolResult = await runEditTools(primaryProvider, { escalate: true, maxRounds: editMaxRounds });
+          }
           // Same-provider escalate whenever the first pass changed nothing (V1 stays on Claude).
           if (
             toolResult.toolsSupported &&
             toolResult.changedFiles.size === 0 &&
-            toolProviderUsed === primaryProvider
+            toolProviderUsed === primaryProvider &&
+            !oneShotEdit
           ) {
             console.warn(`[AGENT] ${primaryProvider} produced 0 changes — escalate same provider`);
             res.write(`data: ${JSON.stringify({
@@ -7034,7 +6919,8 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
           if (
             toolResult.toolsSupported &&
             toolResult.changedFiles.size === 0 &&
-            toolProviderUsed === primaryProvider
+            toolProviderUsed === primaryProvider &&
+            !oneShotEdit
           ) {
             // Last resort other model (V1 only after Claude already self-retried).
             console.warn(`[AGENT] ${primaryProvider} still 0 changes; last-resort → ${alternateProvider}`);
@@ -7186,7 +7072,7 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
             res.end();
             return;
           } else {
-            console.log(`[AGENT] ${useGemini ? "Gemini" : "Claude"} tools unsupported by KIE — using multipage stream protocol`);
+            console.log(`[AGENT] ${useGemini ? "Gemini" : "Claude"} tools unsupported by provider — using multipage stream protocol`);
             systemContent = buildMultipageEditSystemPrompt({
               baseSystem: editPromptBase || SYSTEM_PROMPT,
               activeFile: activeFile || "index.html",
@@ -7342,7 +7228,7 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
       console.log("Total response length:", fullResponse.length);
       console.log("Response preview:", fullResponse.substring(0, 200));
 
-      // Gemini Flash via KIE sometimes returns shell-command JSON lines:
+      // Legacy responses from older models sometimes return shell-command JSON lines:
       //   {"cmd":"cat > index.html <<'EOF'\n...HTML...\nEOF","workdir":""}  {"end":""}
       // Strip these so they don't bleed into the preview.
       if (fullResponse.includes('"cmd"') && fullResponse.includes('"workdir"')) {

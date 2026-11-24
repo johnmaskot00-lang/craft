@@ -2,7 +2,7 @@
 """Minimal Amvera MCP (Streamable HTTP) client used by scripts/deploy-amvera.py.
 
 Requires AMVERA_TOKEN. Optional:
-  AMVERA_MCP_URL  (default https://openmcp.msk0.amvera.ru/mcp)
+  AMVERA_MCP_URL  (default https://openmcp.msk1.amvera.ru/mcp — msk0 no longer exists)
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import sys
 import urllib.error
 import urllib.request
 
-MCP_URL = os.environ.get("AMVERA_MCP_URL", "https://openmcp.msk0.amvera.ru/mcp").rstrip("/")
+MCP_URL = os.environ.get("AMVERA_MCP_URL", "https://openmcp.msk1.amvera.ru/mcp").rstrip("/")
 TOKEN = (os.environ.get("AMVERA_TOKEN") or "").strip()
 _SESSION: str | None = None
 _REQ_ID = 0
