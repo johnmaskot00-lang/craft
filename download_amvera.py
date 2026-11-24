@@ -6,7 +6,7 @@ from pathlib import Path
 import requests
 
 
-ENDPOINT = "https://openmcp.msk0.amvera.ru/mcp"
+ENDPOINT = "https://openmcp.msk1.amvera.ru/mcp"
 TOKEN = os.environ["AMVERA_TOKEN"]
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",

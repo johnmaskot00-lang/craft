@@ -7,19 +7,14 @@
  * apply_patch / write_page, then finish. Same loop as Replit Agent.
  *
  * - Claude (agent V1) function calling via Anthropic SDK → router.cheap
- * - Gemini (agent V2) function calling via KIE `tools.functionDeclarations`
+ * - Gemini (agent V2) function calling and streaming via Router Cheap OpenAI-compatible API with ordered model fallback
  * - Multipage text protocol fallback when tools unavailable (slim HTML then)
  */
 
 import { storage } from "./storage";
 import { KieApiError, kieHttpError, nestedErrorCode } from "./kie-errors";
-import {
-  KIE_GEMINI_ATTEMPTS,
-  activeKieGeminiModel,
-  isRetryableKieGeminiError,
-  kieGeminiSyncUrl,
-  noteKieGeminiModelFailure,
-} from "./kie-gemini";
+import { KIE_GEMINI_ATTEMPTS } from "./kie-gemini";
+import { routerCheapGeminiChatCompletion } from "./router-cheap-neon";
 import { routerCheapToolsRound, isRouterCheapConfigured, ROUTER_CHEAP_TOOLS_MAX_TOKENS } from "./anthropic";
 import {
   LineIndex,
@@ -37,17 +32,13 @@ export { catLines, grepFiles, maxB64Index, validatePatchedHtml, buildPatchDiagno
 
 export const CRAFT_MD_FILENAME = "craft.md";
 
-const KIE_API_KEY = process.env.KIE_API_KEY;
-// Gemini V2 uses KIE Gemini Flash (model in kie-gemini.ts); Claude V1 tools go through router.cheap.
+// Gemini V2 uses Router Cheap (model order in router-cheap-neon.ts); Claude V1 tools go through router.cheap.
 /**
- * One automatic retry on flaky KIE errors (~5%). Do not raise further:
- * after a transport disconnect KIE may still be running the original task.
+ * One automatic retry on flaky provider errors. Do not raise further:
+ * after a transport disconnect an upstream may still be running the original task.
  * Claude/router.cheap empty-stream is flaky — allow 3 attempts for V1 tools.
  */
-const KIE_TOOL_ROUND_RETRIES = KIE_GEMINI_ATTEMPTS;
-const CLAUDE_TOOL_ROUND_RETRIES = Math.max(3, KIE_TOOL_ROUND_RETRIES);
-/** Hard cap per Gemini tools round — hung sync generateContent must not pin the UI forever. */
-const KIE_GEMINI_TOOLS_TIMEOUT_MS = Number(process.env.CRAFT_GEMINI_TOOLS_TIMEOUT_MS) || 4 * 60 * 1000;
+const CLAUDE_TOOL_ROUND_RETRIES = Math.max(3, KIE_GEMINI_ATTEMPTS);
 
 export type SitePage = { filename: string; code: string };
 
@@ -1030,28 +1021,6 @@ function toolStatusLabel(name: string, input: Record<string, unknown>): string {
     : `Инструмент ${name}…`;
 }
 
-/** Anthropic tools → Gemini functionDeclarations (KIE Gemini shape). */
-function toGeminiFunctionDeclarations(tools: readonly any[]) {
-  return tools.map((t) => {
-    const props = (t.input_schema as any).properties || {};
-    const required = (t.input_schema as any).required as string[] | undefined;
-    const parameters: any = {
-      type: "object",
-      properties: props,
-    };
-    if (required?.length) parameters.required = required;
-    return {
-      name: t.name,
-      description: t.description,
-      parameters,
-    };
-  });
-}
-
-function isTransientKieStatus(status: number): boolean {
-  return status === 429 || status >= 500;
-}
-
 async function sleep(ms: number) {
   await new Promise((r) => setTimeout(r, ms));
 }
@@ -1135,150 +1104,21 @@ type GeminiToolCall = { name: string; args: Record<string, unknown>; id?: string
 
 type GeminiToolsResult = { text: string; functionCalls: GeminiToolCall[]; modelParts: any[]; toolsSupported: boolean };
 
-/**
- * Tools round on the active KIE Gemini model. If KIE rejects that model (unknown
- * model, or tools refused — 3.8 Flash is "chat only" on KIE), retry once on the
- * fallback model, which then stays active for a cooldown.
- */
 async function kieGeminiToolsRound(
   contents: any[],
   systemPrompt: string,
   tools: readonly any[] = SITE_AGENT_EDIT_TOOLS,
   forceToolUse = false,
 ): Promise<GeminiToolsResult> {
-  const model = activeKieGeminiModel();
-  try {
-    const res = await kieGeminiToolsRoundOn(model, contents, systemPrompt, tools, forceToolUse);
-    if (!res.toolsSupported && noteKieGeminiModelFailure(model, 400, res.rejection || "tools rejected")) {
-      return kieGeminiToolsRoundOn(activeKieGeminiModel(), contents, systemPrompt, tools, forceToolUse);
-    }
-    return res;
-  } catch (e: any) {
-    const status = Number(e?.status || e?.statusCode || 0);
-    if (noteKieGeminiModelFailure(model, status, String(e?.message || e))) {
-      return kieGeminiToolsRoundOn(activeKieGeminiModel(), contents, systemPrompt, tools, forceToolUse);
-    }
-    throw e;
-  }
-}
-
-async function kieGeminiToolsRoundOn(
-  model: string,
-  contents: any[],
-  systemPrompt: string,
-  tools: readonly any[],
-  forceToolUse: boolean,
-): Promise<GeminiToolsResult & { rejection?: string }> {
-  if (!KIE_API_KEY) throw new Error("KIE_API_KEY missing");
-
-  const body: any = {
-    stream: false,
-    contents,
-    tools: [{ functionDeclarations: toGeminiFunctionDeclarations(tools) }],
-    // ANY = must call a tool (oneshot apply_patch+finish). AUTO = model may text-only.
-    toolConfig: { functionCallingConfig: { mode: forceToolUse ? "ANY" : "AUTO" } },
+  const result = await routerCheapGeminiChatCompletion({ contents, systemPrompt, tools, forceToolUse });
+  return {
+    text: result.text,
+    functionCalls: result.functionCalls,
+    modelParts: result.modelParts,
+    toolsSupported: result.toolsSupported,
   };
-  if (systemPrompt) {
-    body.systemInstruction = { parts: [{ text: systemPrompt }] };
-  }
-
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < KIE_TOOL_ROUND_RETRIES; attempt++) {
-    const ac = new AbortController();
-    const kill = setTimeout(() => ac.abort(), KIE_GEMINI_TOOLS_TIMEOUT_MS);
-    kill.unref?.();
-    try {
-      const resp = await fetch(kieGeminiSyncUrl(model), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${KIE_API_KEY}`,
-        },
-        body: JSON.stringify(body),
-        signal: ac.signal,
-      });
-
-      if (!resp.ok) {
-        const err = await resp.text();
-        if (resp.status === 400 || resp.status === 422 || /tool|function/i.test(err)) {
-          console.warn(`[AGENT] Gemini tools rejected by KIE (${model}):`, resp.status, err.slice(0, 300));
-          return { text: "", functionCalls: [], modelParts: [], toolsSupported: false, rejection: err.slice(0, 300) };
-        }
-        if (isTransientKieStatus(resp.status) && attempt < KIE_TOOL_ROUND_RETRIES - 1) {
-          const delay = (attempt + 1) * 1500;
-          console.warn(`[AGENT] Gemini KIE ${resp.status}, retry in ${delay}ms (${attempt + 1}/${KIE_TOOL_ROUND_RETRIES})`);
-          await sleep(delay);
-          continue;
-        }
-        throw kieHttpError(resp.status, err, "Gemini KIE");
-      }
-
-      const data = (await resp.json()) as any;
-      // KIE may return HTTP 200 with {code,msg} on auth/quota failures.
-      const kieCode = Number(data?.code);
-      if (
-        Number.isFinite(kieCode) &&
-        kieCode !== 200 &&
-        kieCode !== 0 &&
-        !data?.candidates
-      ) {
-        const msg = String(data?.msg || data?.message || data?.error || "KIE error").slice(0, 400);
-        throw kieHttpError(kieCode >= 400 && kieCode < 600 ? kieCode : 502, msg, "Gemini KIE");
-      }
-      const parts: any[] = data?.candidates?.[0]?.content?.parts || [];
-      let text = "";
-      const functionCalls: GeminiToolCall[] = [];
-      for (const part of parts) {
-        if (part.text) text += part.text;
-        if (part.functionCall?.name) {
-          let args: Record<string, unknown> = {};
-          const raw = part.functionCall.args ?? part.functionCall.arguments;
-          if (raw && typeof raw === "object") args = raw as Record<string, unknown>;
-          else if (typeof raw === "string") {
-            try { args = JSON.parse(raw); } catch { args = {}; }
-          }
-          functionCalls.push({
-            name: part.functionCall.name,
-            args,
-            id: part.functionCall.id,
-          });
-        }
-      }
-      return { text, functionCalls, modelParts: parts, toolsSupported: true };
-    } catch (e) {
-      lastErr = e;
-      const msg = String((e as any)?.message || e);
-      const aborted = (e as any)?.name === "AbortError" || /aborted|AbortError/i.test(msg);
-      if (aborted) {
-        throw new KieApiError(
-          `Gemini KIE tools round timed out after ${Math.round(KIE_GEMINI_TOOLS_TIMEOUT_MS / 1000)}s`,
-          { source: "network", cause: e },
-        );
-      }
-      const transient =
-        (e as any)?.confirmedKieFailure === true ||
-        isRetryableKieGeminiError(e) ||
-        /fetch failed|network|econnreset|etimedout|socket/i.test(msg);
-      if (transient && attempt < KIE_TOOL_ROUND_RETRIES - 1) {
-        const delay = (attempt + 1) * 1500;
-        console.warn(`[AGENT] Gemini KIE network error, retry in ${delay}ms:`, msg.slice(0, 160));
-        await sleep(delay);
-        continue;
-      }
-      if (/fetch failed|network|econnreset|etimedout|socket/i.test(msg) || nestedErrorCode(e)) {
-        const code = nestedErrorCode(e) || "TRANSPORT_ERROR";
-        throw new KieApiError(`Gemini KIE transport error (${code}): ${msg}`, {
-          source: "network",
-          cause: e,
-        });
-      }
-      throw e;
-    } finally {
-      clearTimeout(kill);
-    }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
+
 
 class SiteWorkspace {
   files: Map<string, string>;
@@ -1606,8 +1446,8 @@ export type ToolAgentResult = {
 };
 
 /**
- * Function-calling agent loop (Claude or Gemini via KIE).
- * Returns toolsSupported:false when KIE rejects tools so the caller can fall
+ * Function-calling agent loop (Claude or Gemini via Router Cheap).
+ * Returns toolsSupported:false when a provider rejects tools so the caller can fall
  * back to streaming multipage text protocol.
  */
 export async function runToolCallingAgent(opts: {
@@ -1619,7 +1459,7 @@ export async function runToolCallingAgent(opts: {
   onStatus?: AgentStatusWriter;
   onContent?: AgentContentWriter;
   maxRounds?: number;
-  /** Default claude. Gemini uses KIE functionDeclarations. */
+  /** Default claude. Gemini uses Router Cheap OpenAI function calling. */
   provider?: "claude" | "gemini";
   /** Override tool list (edits use SITE_AGENT_EDIT_TOOLS by default). */
   tools?: readonly any[];

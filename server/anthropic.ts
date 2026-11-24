@@ -1,7 +1,7 @@
 /**
  * Anthropic SDK client for agent V1 via router.cheap.
  *
- * Key: ROUTER_CHEAP_API_KEY (Amvera env only — never expose to the frontend).
+ * Key: `ROUTER_CHEAP_API_KEY` in Amvera secret environment variables only. Never expose it to the frontend.
  * Base URL: https://router.cheap (Anthropic Messages API compatible).
  * Context: 1M window via anthropic-beta header when the model supports it.
  * Default model: claude-opus-5-5 (override with ROUTER_CHEAP_MODEL);

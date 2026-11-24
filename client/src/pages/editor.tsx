@@ -7,6 +7,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Input } from "@/components/ui/input";
 import { useAuth, clearClientAuth } from "@/lib/auth";
 import { useLocation, useParams } from "wouter";
+import { createOrderedTaskQueue } from "../lib/ordered-save";
+import { resolveActiveFileCode, retryOnceAfterConflict } from "../lib/editor-state";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -210,6 +212,7 @@ export default function EditorPage() {
   const [streamedFile, setStreamedFile] = useState("index.html");
   const [optimisticFiles, setOptimisticFiles] = useState<Record<string, string>>({});
   const saveSeqRef = useRef(0);
+  const editSaveQueueRef = useRef(createOrderedTaskQueue());
   const previewBlobUrlRef = useRef<string | null>(null);
   const [showCode, setShowCode] = useState(false);
   const [editableCode, setEditableCode] = useState("");
@@ -398,12 +401,14 @@ export default function EditorPage() {
     return fromServer;
   })();
 
-  const activeFileCode = (() => {
-    if (optimisticFiles[activeFile]) return optimisticFiles[activeFile];
-    if (streamedFile === activeFile && streamedCode) return streamedCode;
-    if (activeFile === "index.html") return streamedCode || project?.generatedCode || "";
-    return projectFiles.find(f => f.filename === activeFile)?.code || "";
-  })();
+  const activeFileCode = resolveActiveFileCode({
+    activeFile,
+    streamedFile,
+    streamedCode,
+    optimisticCode: optimisticFiles[activeFile] || "",
+    projectCode: project?.generatedCode || "",
+    fileCode: projectFiles.find((f) => f.filename === activeFile)?.code || "",
+  });
 
   const currentCode = activeFileCode;
 
@@ -773,12 +778,12 @@ export default function EditorPage() {
         ? { generatedCode: pendingHtml }
         : { code: pendingHtml };
       try {
-        const saveResp = await fetch(saveUrl, {
+        const saveResp = await editSaveQueueRef.current.enqueue(() => fetch(saveUrl, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(saveBody),
           credentials: "include",
-        });
+        }));
         if (!saveResp.ok) throw new Error(`save failed (${saveResp.status})`);
       } catch {
         toast({
@@ -918,23 +923,80 @@ export default function EditorPage() {
         const productUrl = interactiveProductImageUrl || interactiveOpts.productUrl;
         if (productUrl) bodyData.interactiveProductImageUrl = productUrl;
       }
-      let response = await fetch(`/api/projects/${projectId}/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(bodyData),
-        credentials: "include",
-      });
+      const requestGeneration = (body: any) => fetch(`/api/projects/${projectId}/generate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), credentials: "include" });
+      let response = await requestGeneration(bodyData);
       if (response.status === 401) {
         await new Promise((r) => setTimeout(r, 1200));
-        response = await fetch(`/api/projects/${projectId}/generate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(bodyData),
-          credentials: "include",
-        });
+        response = await requestGeneration(bodyData);
+      }
+
+      if (response.status === 409) {
+        const conflictData = await response.clone().json().catch(() => null);
+        if (conflictData?.editInProgress) {
+          toast({
+            title: "Запрос поставлен в ожидание",
+            description: "Другая задача ещё работает. После её завершения редактор автоматически повторит ваш запрос один раз.",
+          });
+          setGenerationStatus("Предыдущая задача ещё выполняется — ждём освобождения проекта…");
+          const retryResult = await retryOnceAfterConflict(
+            { status: response.status, editInProgress: Boolean(conflictData?.editInProgress) } as { status: number; editInProgress: boolean },
+            {
+              isConflict: (result) => result.status === 409 && result.editInProgress,
+              waitForIdle: async () => {
+                const pollStart = Date.now();
+                const pollTimeout = 12 * 60 * 1000;
+                while (Date.now() - pollStart <= pollTimeout) {
+                  try {
+                    const statusResp = await fetch(`/api/projects/${projectId}/generation-status`, { credentials: "include" });
+                    const status = statusResp.ok ? await statusResp.json().catch(() => null) : null;
+                    if (status && status.active === false && !status.generatingPlaceholder) {
+                      const projectResp = await fetch(`/api/projects/${projectId}`, { credentials: "include" });
+                      const proj = projectResp.ok ? await projectResp.json() : null;
+                      if (proj?.generatedCode && !isCraftGeneratingHtml(proj.generatedCode)) {
+                        applyBakedPreview(proj.generatedCode, proj);
+                      }
+                      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
+                      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "messages"] });
+                      queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
+                      return true;
+                    }
+                  } catch {}
+                  await new Promise((resolve) => setTimeout(resolve, GEN_STATUS_POLL_FAST_MS));
+                }
+                return false;
+              },
+              request: () => requestGeneration(bodyData),
+            },
+          );
+          if (retryResult.timedOut) {
+            handledWithoutStream = true;
+            setGenerationStatus(null);
+            toast({
+              title: "Не удалось повторить запрос",
+              description: "Предыдущая задача не освободила проект за 12 минут. Ваш текст остался в истории чата; отправьте его повторно, когда проект будет готов.",
+              variant: "destructive",
+            });
+            return;
+          }
+          response = retryResult.response as Response;
+          if (response.status === 409) {
+            const retryConflict = await response.clone().json().catch(() => null);
+            if (retryConflict?.editInProgress) {
+              handledWithoutStream = true;
+              setGenerationStatus(null);
+              toast({
+                title: "Проект занят другой задачей",
+                description: "Автоматический повтор уже выполнен, но задача всё ещё активна. Текст сохранён в чате; повторите запрос после завершения задачи.",
+                variant: "destructive",
+              });
+              return;
+            }
+          }
+        }
       }
 
       if (!response.ok) {
+
         const errData = await response.json().catch(() => null);
         if (response.status === 401) {
           clearClientAuth();
@@ -3063,29 +3125,34 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
     const persistHtml = (finalHtml: string, opts?: { invalidate?: boolean; updateState?: boolean }) => {
       const invalidate = opts?.invalidate ?? true;
       const updateState = opts?.updateState ?? true;
+      const saveSeq = ++saveSeqRef.current;
       latestEditHtmlRef.current = finalHtml;
       if (updateState) {
         if (activeFile === "index.html") setStreamedCode(finalHtml);
+        setOptimisticFiles((prev) => ({ ...prev, [activeFile]: finalHtml }));
       }
-      if (activeFile === "index.html") {
-        fetch(`/api/projects/${projectId}/code`, {
+      const url = activeFile === "index.html"
+        ? `/api/projects/${projectId}/code`
+        : `/api/projects/${projectId}/files/${encodeURIComponent(activeFile)}`;
+      const body = activeFile === "index.html" ? { generatedCode: finalHtml } : { code: finalHtml };
+      void editSaveQueueRef.current.enqueue(async () => {
+        const response = await fetch(url, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ generatedCode: finalHtml }),
+          body: JSON.stringify(body),
           credentials: "include",
-        }).then(() => {
-          if (invalidate) queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
-        }).catch(() => {});
-      } else {
-        fetch(`/api/projects/${projectId}/files/${activeFile}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code: finalHtml }),
-          credentials: "include",
-        }).then(() => {
-          if (invalidate) queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
-        }).catch(() => {});
-      }
+        });
+        if (!response.ok) throw new Error(`editor save failed (${response.status})`);
+        if (saveSeq === saveSeqRef.current && invalidate) {
+          queryClient.invalidateQueries({
+            queryKey: activeFile === "index.html" ? ["/api/projects", projectId] : ["/api/projects", projectId, "files"],
+          });
+        }
+      }).catch(() => {
+        if (saveSeq === saveSeqRef.current) {
+          toast({ title: "Не удалось сохранить правку", description: "Проверьте соединение и повторите действие.", variant: "destructive" });
+        }
+      });
     };
 
     const handler = (e: MessageEvent) => {
@@ -3110,11 +3177,19 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
           toast({ title: "Страница не найдена", description: filename, variant: "destructive" });
           return;
         }
-        setActiveFile(filename);
-        setSelectedElement(null);
-        setSelectorMode(false);
-        setStreamedCode("");
-        latestEditHtmlRef.current = null;
+        void (async () => {
+          await editSaveQueueRef.current.flush();
+          const pendingHtml = latestEditHtmlRef.current;
+          if (pendingHtml) {
+            setOptimisticFiles((prev) => ({ ...prev, [activeFile]: pendingHtml }));
+            setStreamedFile(activeFile);
+          }
+          setActiveFile(filename);
+          setSelectedElement(null);
+          setSelectorMode(false);
+          setStreamedCode("");
+          latestEditHtmlRef.current = null;
+        })();
       }
       if (e.data.type === 'nz-img-click' || e.data.type === 'nz-placeholder-click') {
         pendingImageTarget.current = e.data.path;
@@ -3143,27 +3218,37 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
     return () => window.removeEventListener('message', handler);
   }, [projectId, activeFile, isGenerating, toast]);
 
-  const flushPendingEditHtml = useCallback(() => {
+  const restorePendingHtml = useCallback(() => {
     const html = latestEditHtmlRef.current;
     if (!html) return;
+    setOptimisticFiles((prev) => ({ ...prev, [activeFile]: html }));
+    setStreamedFile(activeFile);
+    if (activeFile === "index.html") setStreamedCode(html);
+  }, [activeFile]);
+
+  const flushPendingEditHtml = useCallback(async () => {
+    await editSaveQueueRef.current.flush();
+    const html = latestEditHtmlRef.current;
+    if (!html) return;
+    restorePendingHtml();
     if (activeFile === "index.html") {
       setStreamedCode(html);
       queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId] });
     } else {
       queryClient.invalidateQueries({ queryKey: ["/api/projects", projectId, "files"] });
     }
-  }, [activeFile, projectId]);
+  }, [activeFile, projectId, restorePendingHtml]);
 
-  const togglePreviewMode = useCallback((mode: "edit" | "selector") => {
+  const togglePreviewMode = useCallback(async (mode: "edit" | "selector") => {
     if (mode === "edit") {
-      if (editMode) flushPendingEditHtml();
+      if (editMode) await flushPendingEditHtml();
       const next = !editMode;
       // Apply tools first (sync) so React re-render cannot remount before injection.
       if (next) setSelectorMode(false);
       applyInPlacePreviewMode(next ? "edit" : "view");
       setEditMode(next);
     } else {
-      if (selectorMode) flushPendingEditHtml();
+      if (selectorMode) await flushPendingEditHtml();
       const next = !selectorMode;
       if (next) {
         setEditMode(false);
@@ -3970,8 +4055,14 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
               {allFiles.map(f => (
                 <div key={f.filename} className={`flex items-center gap-0.5 rounded-lg text-xs font-medium transition-all whitespace-nowrap ${activeFile === f.filename ? "bg-slate-100 dark:bg-slate-700 text-slate-800 dark:text-slate-200" : "text-slate-400 dark:text-slate-500 hover:text-slate-700 hover:bg-slate-50"}`}>
                   <button
-                    onClick={() => {
+                    onClick={async () => {
                       if (isGenerating) return;
+                      await editSaveQueueRef.current.flush();
+                      const pendingHtml = latestEditHtmlRef.current;
+                      if (pendingHtml) {
+                        setOptimisticFiles((prev) => ({ ...prev, [activeFile]: pendingHtml }));
+                        setStreamedFile(activeFile);
+                      }
                       setActiveFile(f.filename);
                       latestEditHtmlRef.current = null;
                       setSelectedElement(null);
