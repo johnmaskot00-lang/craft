@@ -12,3 +12,10 @@ export function shouldUseOneShotEdit(opts: {
   if (!instruction || instruction.length > 240) return false;
   return !/(полностью|с\s+нуля|переработ|нов(?:ый|ую|ое)\s+(?:блок|секци|страниц)|анимац|three\s*\.\s*js|\b3d\b|несколько)/i.test(instruction);
 }
+
+export function shouldUseSinglePassEdit(opts: {
+  isEditMode: boolean;
+  mockupMode: boolean;
+}): boolean {
+  return opts.isEditMode && !opts.mockupMode;
+}

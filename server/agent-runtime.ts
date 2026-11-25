@@ -238,14 +238,21 @@ export async function ensureCraftMd(
   return md;
 }
 
+type CraftChangeNote = { userRequest: string; summary: string; changedFiles: string[] };
+
 export async function refreshCraftMdPages(
   projectId: number,
   pages: SitePage[],
-  changeNote?: { userRequest: string; summary: string; changedFiles: string[] },
+  changeNote?: CraftChangeNote,
 ): Promise<string> {
   const existing = await storage.getProjectFile(projectId, CRAFT_MD_FILENAME);
-  let md = existing?.code || "";
+  const md = buildUpdatedCraftMd(existing?.code || "", pages, changeNote);
+  await storage.upsertProjectFile({ projectId, filename: CRAFT_MD_FILENAME, code: md });
+  return md;
+}
 
+/** Build the agent's memory without persisting anything before an edit commits. */
+export function buildUpdatedCraftMd(md: string, pages: SitePage[], changeNote?: CraftChangeNote): string {
   const htmlPages = pages.filter((p) => isHtmlPage(p.filename));
   const pageLines = htmlPages.map((p) => {
     const t = extractPageTitle(p.code);
@@ -292,7 +299,6 @@ export async function refreshCraftMdPages(
     }
   }
 
-  await storage.upsertProjectFile({ projectId, filename: CRAFT_MD_FILENAME, code: md });
   return md;
 }
 
@@ -391,6 +397,48 @@ export function buildPagesContext(
   }
 
   return { context: parts.join("\n"), base64Maps };
+}
+
+export function buildSinglePassEditContext(
+  pages: SitePage[],
+  activeFile: string,
+  maxTotalChars = 160_000,
+): { context: string; files: string[] } {
+  if (!Number.isInteger(maxTotalChars) || maxTotalChars < 1) throw new Error("maxTotalChars must be positive");
+  const editable = pages.filter((page) => isEditableSiteFile(page.filename));
+  const targetFile = normalizeSiteFilename(activeFile);
+  const activeSource = editable.find((page) => normalizeSiteFilename(page.filename) === targetFile);
+  if (!activeSource) throw new Error(`Active file is missing from single-pass context: ${activeFile}`);
+  const ordered = [...editable].sort((a, b) => {
+    if (normalizeSiteFilename(a.filename) === targetFile) return -1;
+    if (normalizeSiteFilename(b.filename) === targetFile) return 1;
+    if (a.filename === "assets/style.css") return -1;
+    if (b.filename === "assets/style.css") return 1;
+    if (a.filename === "index.html") return -1;
+    if (b.filename === "index.html") return 1;
+    return a.filename.localeCompare(b.filename);
+  });
+
+  let used = 0;
+  const files: string[] = [];
+  const included: SitePage[] = [];
+  const parts: string[] = [
+    "═══ ТОЧНЫЙ ИСХОДНЫЙ КОД ДЛЯ ПЕРВОГО И ЕДИНСТВЕННОГО ОТВЕТА ═══",
+    "Код ниже уже прочитан сервером. Не вызывай read_page/ls: сразу применяй правки инструментами.",
+  ];
+  for (const page of ordered) {
+    const { stripped } = stripBase64Images(page.code || "");
+    const header = `\n─── FILE: ${page.filename} (${stripped.length} символов) ───\n`;
+    const remaining = maxTotalChars - used;
+    if (remaining <= 300 || stripped.length + header.length + 20 > remaining) continue;
+    parts.push(`${header}\`\`\`${page.filename.endsWith(".css") ? "css" : "html"}\n${stripped}\n\`\`\``);
+    files.push(page.filename);
+    included.push({ filename: page.filename, code: stripped });
+    used += stripped.length + header.length + 20;
+  }
+  const activeIncluded = included.find((page) => normalizeSiteFilename(page.filename) === targetFile);
+  if (!activeIncluded) throw new Error(`Active file exceeds the single-pass context budget: ${activeFile}`);
+  return { context: parts.join("\n"), files };
 }
 
 /** Build a compact cross-page comparison of the shared site chrome. */
@@ -696,6 +744,35 @@ export const SITE_AGENT_ONESHOT_TOOLS = SITE_AGENT_TOOLS.filter((t) =>
       : t,
 );
 
+/**
+ * Every ordinary editor request is executed in the first model response.
+ * The active file (and shared CSS when present) is seeded into the prompt, so
+ * the model can mutate immediately without a hidden read/repair round.
+ */
+export const SITE_AGENT_SINGLE_PASS_TOOLS = SITE_AGENT_TOOLS.filter((t) =>
+  ["apply_patch", "write_page", "finish"].includes(t.name),
+).map((t) =>
+  t.name === "apply_patch"
+    ? {
+        ...t,
+        description:
+          "Немедленно применить SEARCH/REPLACE к одному из файлов, код которого дан в запросе. " +
+          "SEARCH копируй дословно. Можно вызвать несколько apply_patch в ЭТОМ ЖЕ ответе.",
+      }
+    : t.name === "write_page"
+      ? {
+          ...t,
+          description:
+            "Немедленно полностью записать файл по коду из запроса. Используй для крупной правки; " +
+            "не жди отдельного read_page.",
+        }
+      : {
+          ...t,
+          description:
+            "Завершить ЭТОТ ЖЕ первый ответ после всех apply_patch/write_page. Нельзя завершать без изменения кода.",
+        },
+);
+
 export function applySinglePatch(
   originalCode: string,
   searchBlock: string,
@@ -899,6 +976,35 @@ function logValidation(filename: string, check: PatchValidation): void {
   console.warn(`[AGENT] patch validation ${filename}: ${parts.join(" ; ")}`);
 }
 
+/** Use the same source bundle to populate the prompt and workspace read permissions. */
+export function buildSinglePassEditSystemPrompt(opts: {
+  baseSystem: string;
+  activeFile: string;
+  craftMd: string;
+  pages: SitePage[];
+}): { systemPrompt: string; preReadFiles: string[] } {
+  const { context, files } = buildSinglePassEditContext(opts.pages, opts.activeFile);
+  const included = new Set(files);
+  const omitted = opts.pages.filter((page) => isEditableSiteFile(page.filename) && !included.has(page.filename));
+  return {
+    preReadFiles: files,
+    systemPrompt: `${opts.baseSystem}
+
+═══ РЕДАКТИРОВАНИЕ ЗА ОДИН ОТВЕТ ═══
+Активный файл: ${opts.activeFile}. Сервер уже передал точные исходники ниже.
+В первом и единственном ответе вызови apply_patch для точечных правок и write_page для крупных изменений или явно запрошенных новых страниц, затем finish. Можно сделать несколько вызовов инструментов в этом же ответе. Не запрашивай чтение и не обещай будущую работу: второго ответа не будет.
+Копируй SEARCH дословно из исходника, с уникальным контекстом. Если патчей несколько, учитывай предыдущие изменения из этого же ответа. Сохраняй __B64_N__ и существующие медиа, если пользователь не просил их заменить.
+Проверь по коду, что результат покрывает весь запрос. При правке CSS проверь селектор, родительский grid/flex, порядок правил, @media и !important. Правь CSS внутри страницы или в локальном файле, который страница подключает через link rel="stylesheet". Если создаёшь assets/style.css, добавь подключение в том же пакете. Не добавляй необязательные анимации/3D.
+Используй существующие или приложенные медиа. Не вставляй маркеры GENIMG, SCROLLANIM или ANIMATIONAL: в этом запросе медиа из этих маркеров не создаются.
+Если нужен существующий файл, которого нет среди переданных, не правь только часть запроса. Выбрать нужный файл можно в редакторе.${omitted.length ? `\nИсходники не вошли: ${omitted.map((page) => page.filename).join(", ")}.` : ""}
+
+═══ ПАМЯТЬ САЙТА ═══
+${opts.craftMd.slice(0, 2500)}
+
+${context}`,
+  };
+}
+
 export function buildMultipageEditSystemPrompt(opts: {
   baseSystem: string;
   activeFile: string;
@@ -1030,17 +1136,20 @@ async function kieClaudeToolsRound(
   systemPrompt: string,
   tools: readonly any[],
   forceToolUse = false,
+  singleAttempt = false,
 ): Promise<{ content: ClaudeContentBlock[]; stop_reason: string; toolsSupported: boolean }> {
   if (!isRouterCheapConfigured()) throw new Error("ROUTER_CHEAP_API_KEY missing");
 
+  const maxAttempts = singleAttempt ? 1 : CLAUDE_TOOL_ROUND_RETRIES;
   let lastErr: unknown;
-  for (let attempt = 0; attempt < CLAUDE_TOOL_ROUND_RETRIES; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       const round = await routerCheapToolsRound({
         messages,
         systemPrompt,
         tools,
         forceToolUse,
+        singleAttempt,
         maxTokens: ROUTER_CHEAP_TOOLS_MAX_TOKENS,
         // Prefer non-streaming — avoids router.cheap dropping SSE mid tool-call.
         preferNonStreaming: true,
@@ -1058,27 +1167,23 @@ async function kieClaudeToolsRound(
         // already handled inside routerCheapToolsRound as toolsSupported:false
       }
       // Anthropic SDK "Request timed out" / empty stream — retry on Claude before giving up.
-      if (
-        /request timed out|timed?\s*out|timeout of \d+ms|stream ended without producing|without producing a message/i.test(
-          msg,
-        )
-      ) {
-        if (attempt < CLAUDE_TOOL_ROUND_RETRIES - 1) {
+      if (/request timed out|timed?\s*out|timeout of \d+ms|stream ended without producing|without producing a message/i.test(msg)) {
+        if (attempt < maxAttempts - 1) {
           const delay = (attempt + 1) * 2500;
-          console.warn(`[AGENT] Claude tools stream/timeout, retry ${attempt + 1}/${CLAUDE_TOOL_ROUND_RETRIES} in ${delay}ms:`, msg.slice(0, 120));
+          console.warn(`[AGENT] Claude tools stream/timeout, retry ${attempt + 1}/${maxAttempts} in ${delay}ms:`, msg.slice(0, 120));
           await sleep(delay);
           continue;
         }
         if (e instanceof KieApiError) throw e;
         throw new KieApiError(
-          `Claude tools round failed after ${CLAUDE_TOOL_ROUND_RETRIES} retries: ${msg.slice(0, 180)}`,
+          `Claude tools round failed after ${maxAttempts} attempts: ${msg.slice(0, 180)}`,
           { source: "http", cause: e },
         );
       }
       const transient =
         (e as any)?.confirmedKieFailure === true ||
         /fetch failed|network|econnreset|etimedout|socket/i.test(msg);
-      if (transient && attempt < CLAUDE_TOOL_ROUND_RETRIES - 1) {
+      if (transient && attempt < maxAttempts - 1) {
         const delay = (attempt + 1) * 1500;
         console.warn(`[AGENT] Claude router.cheap network error, retry in ${delay}ms:`, msg.slice(0, 160));
         await sleep(delay);
@@ -1109,8 +1214,9 @@ async function kieGeminiToolsRound(
   systemPrompt: string,
   tools: readonly any[] = SITE_AGENT_EDIT_TOOLS,
   forceToolUse = false,
+  singleAttempt = false,
 ): Promise<GeminiToolsResult> {
-  const result = await routerCheapGeminiChatCompletion({ contents, systemPrompt, tools, forceToolUse });
+  const result = await routerCheapGeminiChatCompletion({ contents, systemPrompt, tools, forceToolUse, singleAttempt });
   return {
     text: result.text,
     functionCalls: result.functionCalls,
@@ -1447,8 +1553,7 @@ export type ToolAgentResult = {
 
 /**
  * Function-calling agent loop (Claude or Gemini via Router Cheap).
- * Returns toolsSupported:false when a provider rejects tools so the caller can fall
- * back to streaming multipage text protocol.
+ * Returns toolsSupported:false in legacy mode when a provider rejects tools.
  */
 export async function runToolCallingAgent(opts: {
   systemPrompt: string;
@@ -1463,23 +1568,90 @@ export async function runToolCallingAgent(opts: {
   provider?: "claude" | "gemini";
   /** Override tool list (edits use SITE_AGENT_EDIT_TOOLS by default). */
   tools?: readonly any[];
-  /**
-   * Files the caller already supplied context for (selected element / active
-   * page snippet). Marked as read so a point edit can apply_patch+finish in
-   * one model round instead of 6.
-   */
+  /** Files the caller already supplied context for. */
   preReadFiles?: string[];
-  /**
-   * Replit oneshot: force tool use and stop after one round (apply_patch+finish
-   * in a single API call). Caller should pass SITE_AGENT_ONESHOT_TOOLS + seed.
-   */
   oneShot?: boolean;
+  singlePass?: boolean;
 }): Promise<ToolAgentResult> {
+  if (opts.singlePass) return runSinglePassToolEdit(opts);
   const provider = opts.provider || "claude";
   if (provider === "gemini") {
     return runGeminiToolCallingAgent(opts);
   }
   return runClaudeToolCallingAgent(opts);
+}
+
+/** Validation failure safe to show to the user, unlike provider and database errors. */
+export class SinglePassEditError extends Error {}
+
+/** One provider reply, applied in a disposable workspace before anything is saved. */
+async function runSinglePassToolEdit(opts: Parameters<typeof runToolCallingAgent>[0]): Promise<ToolAgentResult> {
+  const workspace = new SiteWorkspace(opts.pages, opts.craftMd, opts.preReadFiles || []);
+  const history = [...(opts.history || []), { role: "user" as const, text: opts.userPrompt }];
+  const status = opts.provider === "gemini" ? "Gemini правит… (1 запрос)" : "Агент правит… (1 запрос)";
+  opts.onStatus?.(status);
+  const heartbeat = setInterval(() => opts.onStatus?.(status), 12_000);
+  heartbeat.unref?.();
+  let calls: { name: string; args: Record<string, unknown> }[];
+  try {
+    if (opts.provider === "gemini") {
+      const reply = await kieGeminiToolsRound(
+        history.map((h) => ({ role: h.role === "assistant" ? "model" : "user", parts: [{ text: h.text }] })),
+        opts.systemPrompt, SITE_AGENT_SINGLE_PASS_TOOLS, true, true,
+      );
+      calls = reply.functionCalls;
+    } else {
+      const reply = await kieClaudeToolsRound(
+        history.map((h) => ({ role: h.role, content: [{ type: "text", text: h.text }] })),
+        opts.systemPrompt, SITE_AGENT_SINGLE_PASS_TOOLS, true, true,
+      );
+      if (!reply.toolsSupported) throw new SinglePassEditError("Модель не поддержала инструменты правки.");
+      if (reply.stop_reason === "max_tokens" || reply.stop_reason === "model_context_window_exceeded") {
+        throw new SinglePassEditError("Ответ модели оборвался по лимиту длины.");
+      }
+      if (reply.stop_reason !== "tool_use") throw new SinglePassEditError("Модель не завершила ответ с инструментами правки.");
+      calls = reply.content.flatMap((block) => block.type === "tool_use" ? [{ name: block.name, args: block.input }] : []);
+    }
+  } finally {
+    clearInterval(heartbeat);
+  }
+
+  // Validate the whole batch in memory. No tool result goes back to the model.
+  if (!calls.length) throw new SinglePassEditError("Модель не вернула инструменты правки в первом ответе.");
+  let summary = "";
+  for (const [index, { name, args }] of calls.entries()) {
+    if (name === "finish") {
+      if (index !== calls.length - 1 || !workspace.patchCount || typeof args?.summary !== "string" || !args.summary.trim()) {
+        throw new SinglePassEditError("Некорректный finish: он должен завершать пакет после изменений.");
+      }
+      summary = args.summary.trim().slice(0, 900);
+      continue;
+    }
+    if (name !== "apply_patch" && name !== "write_page") {
+      throw new SinglePassEditError("Модель вызвала недоступный инструмент правки.");
+    }
+    if (typeof args?.filename !== "string" || (name === "apply_patch"
+      ? typeof args.search !== "string" || typeof args.replace !== "string"
+      : typeof args.code !== "string")) {
+      throw new SinglePassEditError(`Некорректные аргументы ${name}.`);
+    }
+    const filename = normalizeSiteFilename(args.filename);
+    const { result } = workspace.execute(name, { ...args, filename });
+    if (!(result as { ok?: boolean }).ok) {
+      throw new SinglePassEditError(`${name}: операция не применена. Уточните файл или участок кода.`);
+    }
+  }
+  if (!summary) throw new SinglePassEditError("Модель не завершила пакет вызовом finish.");
+  const result = finalizeToolAgentResult(workspace, summary, "");
+  const before = new Map(opts.pages.map((page) => [normalizeSiteFilename(page.filename), page.code]));
+  for (const [name, code] of result.changedFiles) {
+    if (before.get(name) === code) result.changedFiles.delete(name);
+    else if (isHtmlPage(name) && !/<[a-z][\w:-]*(?:\s|\/?>)/i.test(code)) {
+      throw new SinglePassEditError("Правка оставила страницу без HTML-разметки.");
+    }
+  }
+  if (!result.changedFiles.size) throw new SinglePassEditError("Модель не изменила код в первом ответе.");
+  return result;
 }
 
 /**
@@ -1534,6 +1706,7 @@ async function runClaudeToolCallingAgent(opts: {
   tools?: readonly any[];
   preReadFiles?: string[];
   oneShot?: boolean;
+  singlePass?: boolean;
 }): Promise<ToolAgentResult> {
   const workspace = new SiteWorkspace(opts.pages, opts.craftMd, opts.preReadFiles || []);
   const messages: any[] = [];
@@ -1629,7 +1802,6 @@ async function runClaudeToolCallingAgent(opts: {
       break;
     }
 
-    // Oneshot: stop after the single round even without finish — patches already count.
     if (oneShot) {
       summary = streamedText.trim().slice(0, 500) || (workspace.changedFiles.size > 0 ? "Правка применена" : "");
       break;
@@ -1656,6 +1828,7 @@ async function runGeminiToolCallingAgent(opts: {
   tools?: readonly any[];
   preReadFiles?: string[];
   oneShot?: boolean;
+  singlePass?: boolean;
 }): Promise<ToolAgentResult> {
   const workspace = new SiteWorkspace(opts.pages, opts.craftMd, opts.preReadFiles || []);
   const contents: any[] = [];

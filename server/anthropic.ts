@@ -291,6 +291,7 @@ export async function routerCheapToolsRound(opts: {
   tools: readonly Tool[] | readonly any[];
   maxTokens?: number;
   model?: string;
+  singleAttempt?: boolean;
   /** Force at least one tool call (Replit oneshot: apply_patch+finish in one round). */
   forceToolUse?: boolean;
   /** Prefer non-streaming (more reliable through router.cheap for tool rounds). */
@@ -339,27 +340,30 @@ export async function routerCheapToolsRound(opts: {
     };
   };
 
+  const requestOptions = opts.singleAttempt ? { maxRetries: 0, fetchOptions: { redirect: "error" as const } } : undefined;
   const runOnce = async (model: string): Promise<RouterCheapToolRoundResult> => {
     const requestBody = buildRequest(model);
     if (preferNonStream) {
       try {
-        const resp = await anthropic.messages.create(requestBody);
+        const resp = await anthropic.messages.create(requestBody, requestOptions);
         return toResult(resp);
       } catch (nonStreamErr: any) {
         const nsMsg = String(nonStreamErr?.message || nonStreamErr);
         // Fall through to streaming if router/SDK insists.
-        if (!/streaming is required|non-streaming|timeout/i.test(nsMsg)) {
+        if (opts.singleAttempt || !/streaming is required|non-streaming|timeout/i.test(nsMsg)) {
           throw nonStreamErr;
         }
         console.warn("[AGENT] Claude non-stream tools rejected, falling back to stream:", nsMsg.slice(0, 160));
       }
     }
-    const resp = await anthropic.messages.stream(requestBody).finalMessage();
+    const resp = await anthropic.messages.stream(requestBody, requestOptions).finalMessage();
     return toResult(resp);
   };
 
   try {
-    return await withModelFallback(opts.model, runOnce);
+    return opts.singleAttempt
+      ? await runOnce(opts.model || getActiveRouterCheapModel())
+      : await withModelFallback(opts.model, runOnce);
   } catch (err: any) {
     const status = Number(err?.status || err?.statusCode || 0);
     const msg = String(err?.message || err);
