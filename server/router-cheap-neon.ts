@@ -13,6 +13,7 @@ type ChatOptions = {
   systemPrompt?: string;
   tools?: readonly any[];
   forceToolUse?: boolean;
+  singleAttempt?: boolean;
   temperature?: number;
   maxTokens?: number;
 };
@@ -185,6 +186,7 @@ async function requestJson(model: string, options: ChatOptions): Promise<ChatRes
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal: controller.signal,
+      ...(options.singleAttempt ? { redirect: "error" } : {}),
     });
     const raw = await response.text();
     if (!response.ok) throw parseError(response.status, raw);
@@ -192,20 +194,34 @@ async function requestJson(model: string, options: ChatOptions): Promise<ChatRes
     let data: any;
     try { data = JSON.parse(raw); } catch { throw new Error("Router Cheap returned invalid JSON"); }
     if (data?.error) throw Object.assign(new Error(String(data.error.message || data.error)), { status: Number(data.error.code) || 502 });
-    const message = data?.choices?.[0]?.message;
+    const choice = data?.choices?.[0];
+    const message = choice?.message;
     if (!message || typeof message !== "object") throw new Error("Router Cheap returned an empty completion");
+    if (options.singleAttempt && choice.finish_reason != null && !["tool_calls", "stop", "function_call"].includes(choice.finish_reason)) {
+      throw new Error("Router Cheap did not complete the tool response");
+    }
+    if (options.singleAttempt && message.tool_calls != null && !Array.isArray(message.tool_calls)) {
+      throw new Error("Router Cheap returned an invalid tool list");
+    }
 
     const functionCalls: ToolCall[] = [];
     const modelParts: GeminiPart[] = [];
     if (typeof message.content === "string" && message.content) modelParts.push({ text: message.content });
     for (const call of message.tool_calls || []) {
       const name = String(call?.function?.name || "");
+      if (options.singleAttempt && (call?.type !== "function" || typeof call.function?.name !== "string" || !name.trim())) {
+        throw new Error("Router Cheap returned an invalid tool call");
+      }
       if (!name) continue;
       let args: Record<string, unknown> = {};
       try {
         const parsed = JSON.parse(String(call.function.arguments || "{}"));
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) args = parsed;
-      } catch { /* malformed arguments are returned as an empty object for the agent to correct */ }
+        else if (options.singleAttempt) throw new Error("Invalid arguments");
+      } catch {
+        if (options.singleAttempt) throw new Error("Router Cheap returned invalid tool arguments");
+        // Legacy agent can correct malformed arguments in another round.
+      }
       const id = String(call.id || "");
       functionCalls.push({ name, args, id });
       modelParts.push({ functionCall: { id, name, args } });
@@ -218,9 +234,13 @@ async function requestJson(model: string, options: ChatOptions): Promise<ChatRes
 
 export async function routerCheapGeminiChatCompletion(options: ChatOptions): Promise<ChatResult> {
   requireRouterCheapKey();
-  const models = modelCandidates();
+  if (options.singleAttempt) {
+    const [model] = routerCheapGeminiModels();
+    if (!model) throw new Error("Router Cheap: no editor model configured");
+    return requestJson(model, options);
+  }
   let lastError: unknown;
-  for (const model of models) {
+  for (const model of modelCandidates()) {
     try {
       return await requestJson(model, options);
     } catch (err) {

@@ -178,6 +178,7 @@ export interface IStorage {
   /** Clone code, files and image library into a fresh unpublished project. */
   duplicateProject(sourceId: number, userId: number): Promise<Project | undefined>;
   updateProject(id: number, data: Partial<Project>): Promise<Project | undefined>;
+  applyProjectEdit(projectId: number, changes: ReadonlyMap<string, string>): Promise<void>;
   deleteProject(id: number): Promise<void>;
 
   getProjectMessages(projectId: number, limit?: number): Promise<ProjectMessage[]>;
@@ -736,6 +737,48 @@ export class DatabaseStorage implements IStorage {
       console.warn(`[site-blobs] hydrate after update failed for project ${id}:`, e?.message || e);
       return project;
     });
+  }
+
+  /** Publish the complete edit at once. Failed transactions leave all code and pointers intact. */
+  async applyProjectEdit(projectId: number, changes: ReadonlyMap<string, string>): Promise<void> {
+    const index = changes.get("index.html");
+    const patch: Partial<Project> = { updatedAt: new Date() };
+    const stagedKeys: string[] = [];
+    let superseded: Array<string | null>;
+    try {
+      if (index !== undefined) {
+        const cols = await siteCodeColumns(projectId, index);
+        if (cols.codeBlobKey) stagedKeys.push(cols.codeBlobKey);
+        Object.assign(patch, deriveProjectContentMeta(index), { previewImage: extractPreviewImage(index) }, cols);
+      }
+      const files: Array<{ filename: string } & Awaited<ReturnType<typeof siteFileColumns>>> = [];
+      for (const [filename, code] of changes) {
+        if (filename === "index.html") continue;
+        const cols = await siteFileColumns(projectId, filename, code);
+        if (cols.blobKey) stagedKeys.push(cols.blobKey);
+        files.push({ filename, ...cols });
+      }
+
+      superseded = await db.transaction(async (tx) => {
+        const [current] = await tx.select({ codeBlobKey: projects.codeBlobKey })
+          .from(projects).where(eq(projects.id, projectId)).for("update");
+        if (!current) throw new Error("Проект не найден при сохранении правки.");
+        const previousKeys = index === undefined ? [] : [current.codeBlobKey];
+        await tx.update(projects).set(patch).where(eq(projects.id, projectId));
+        for (const { filename, ...cols } of files) {
+          const [previous] = await tx.select({ blobKey: projectFiles.blobKey }).from(projectFiles)
+            .where(and(eq(projectFiles.projectId, projectId), eq(projectFiles.filename, filename))).for("update");
+          if (previous?.blobKey) previousKeys.push(previous.blobKey);
+          await tx.insert(projectFiles).values({ projectId, filename, ...cols })
+            .onConflictDoUpdate({ target: [projectFiles.projectId, projectFiles.filename], set: cols });
+        }
+        return previousKeys;
+      });
+    } catch (err) {
+      await enqueueObjectDeletes(stagedKeys);
+      throw err;
+    }
+    await enqueueObjectDeletes(superseded);
   }
 
   async deleteProject(id: number): Promise<void> {

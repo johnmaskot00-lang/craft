@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import { resolveActiveFileCode, retryOnceAfterConflict } from "../client/src/lib/editor-state.ts";
+import { inlineProjectStylesheets, restoreProjectStylesheetLinks } from "../shared/project-files.ts";
 
 async function main() {
+  const link = `<link href="../assets/style.css?v=1" rel="stylesheet" media="screen">`;
+  const external = `<link rel="stylesheet" href="https://example.test/assets/style.css">`;
+  const commented = `<!-- ${link} -->`;
+  const html = `<!doctype html><head>${commented}${link}${external}</head><body><h1>Title</h1></body>`;
+  const styles = new Map([["assets/style.css", `h1 { color: red; } p::before { content: "</style>"; }`]]);
+  const preview = inlineProjectStylesheets(html, "pages/about.html", styles);
+  assert.match(preview, /<style data-craft-css-link="[^"]+" media="screen">h1 \{ color: red; \}/);
+  assert.equal(preview.match(/<\/style>/gi)?.length, 1, "stylesheet text must not end the preview style tag early");
+  assert.ok(preview.includes(external) && preview.includes(commented), "preserve external links and comments");
+  assert.equal(restoreProjectStylesheetLinks(preview), html, "visual saves must preserve the original link, not bake in preview CSS");
+  assert.equal(inlineProjectStylesheets(html, "pages/about.html", new Map()), html);
   assert.equal(resolveActiveFileCode({
     activeFile: "index.html",
     streamedFile: "index.html",

@@ -175,7 +175,7 @@ async function runNightlyBackup(label: string): Promise<{ ok: boolean; summary: 
 import { buildOmniVideoRequest, kieVideoResolution } from "./kie-video-model";
 import { redisEnabled, redisAcquireLease, redisReleaseLease } from "./redis";
 import { assertPublicHttpUrl, safeFetch } from "./url-guard";
-import { isPublishableProjectFile } from "@shared/project-files";
+import { isProjectStylesheet, isPublishableProjectFile, linkedProjectStylesheets } from "@shared/project-files";
 import { applyClientGeoToPublishFiles, sitePublicOrigin } from "./site-geo";
 import {
   withKieCallback,
@@ -197,19 +197,25 @@ import crypto from "crypto";
 import JSZip from "jszip";
 import {
   CRAFT_MD_FILENAME,
+  buildInitialCraftMd,
+  buildUpdatedCraftMd,
   ensureCraftMd,
   refreshCraftMdPages,
   buildSiteManifest,
   buildPagesContext,
   buildMultipageEditSystemPrompt,
+  buildSinglePassEditSystemPrompt,
+  SinglePassEditError,
   runToolCallingAgent,
   parseMultipageEditResponse,
   applyDiffPatchesToCode,
   isHtmlPage,
+  isEditableSiteFile,
+  normalizeSiteFilename,
   resolveEditContextBudget,
   type SitePage,
 } from "./agent-runtime";
-import { shouldUseOneShotEdit } from "./edit-routing";
+import { shouldUseOneShotEdit, shouldUseSinglePassEdit } from "./edit-routing";
 import { registerGeoRoutes } from "./geo";
 import {
   isRouterCheapConfigured,
@@ -2271,6 +2277,37 @@ function preserveFinishedCraftScrollAnim(origHtml: string, nextHtml: string): st
   return nextHtml;
 }
 
+/** Keep the pending replacement target and the finished hero engine across AI edits. */
+function preserveExistingCraftScrollAnim(origHtml: string, nextHtml: string, projectId: number): string {
+  const pendingMarker = 'data-scroll-anim-pending="1"';
+  if (origHtml.includes(pendingMarker) && nextHtml && !nextHtml.includes(pendingMarker)) {
+    const start = origHtml.lastIndexOf("<section", origHtml.indexOf(pendingMarker));
+    if (start !== -1) {
+      let depth = 0;
+      let pos = start + 1;
+      while (pos < origHtml.length) {
+        const open = origHtml.indexOf("<section", pos);
+        const close = origHtml.indexOf("</section>", pos);
+        if (close === -1) break;
+        if (open !== -1 && open < close) {
+          depth++;
+          pos = open + 1;
+        } else if (depth > 0) {
+          depth--;
+          pos = close + "</section>".length;
+        } else {
+          const block = origHtml.slice(start, close + "</section>".length);
+          nextHtml = nextHtml.replace(nextHtml.includes("</header>") ? /<\/header>/ : /<body[^>]*>/i,
+            (tag) => `${tag}\n${block}`);
+          console.log(`[EDIT] Re-injected scroll-anim-pending section into AI-edited code (project ${projectId})`);
+          break;
+        }
+      }
+    }
+  }
+  return preserveFinishedCraftScrollAnim(origHtml, nextHtml);
+}
+
 /** Map any craft-ai /objects URL to a storage path, or null if not ours. */
 function toObjectStoragePath(raw: string): string | null {
   const s = String(raw || "").trim();
@@ -4170,14 +4207,14 @@ function buildVerifiedEditSummary(changes: VerifiedEditChange[]): string {
 /**
  * CSS rules whose selector mentions `selector`, joined for before/after comparison.
  *
- * Linear scan over <style> blocks only. The previous implementation ran
+ * Linear scan over <style> blocks or a standalone stylesheet. The previous implementation ran
  * `[^{}]{0,180}${sel}[^{}]*\{[^{}]*\}` over the WHOLE page: on HTML the body has
  * no braces at all, so for every occurrence of a short tag selector ("a", "p",
  * "li", "section") the engine scanned to the end of the document and backtracked
  * — O(n²). Measured: 40 KB → 0.4 s, 80 KB → 1.5 s, 1.1 MB → minutes, which
  * froze the event loop after an edit (23.09, 06:03 → 07:16 UTC outage).
  */
-function selectorRules(source: string, selector: string): string {
+function selectorRules(source: string, selector: string, rawCss = false): string {
   const sel = selector.toLowerCase();
   if (!sel) return "";
   const out: string[] = [];
@@ -4198,8 +4235,11 @@ function selectorRules(source: string, selector: string): string {
       pos = close + 1;
     }
   };
-  let m: RegExpExecArray | null;
-  while ((m = styleRe.exec(source)) !== null && out.length < 400) scanCss(m[1]);
+  if (rawCss) scanCss(source);
+  else {
+    let m: RegExpExecArray | null;
+    while ((m = styleRe.exec(source)) !== null && out.length < 400) scanCss(m[1]);
+  }
   return out.join("\n");
 }
 
@@ -5602,6 +5642,8 @@ export async function registerRoutes(
 
   app.post("/api/projects/:id/generate", requireAuth, aiLimiter, async (req, res) => {
     let genBilled = false;
+    let singlePassEdit = false;
+    let editSaved = false;
     let generationCost = 0;
     let billedUserId: number | undefined;
     let genIkeyForRefund = "";
@@ -5979,6 +6021,7 @@ export async function registerRoutes(
       }
 
       const GENERATION_COST = isNewSite ? NEW_SITE_GENERATION_COST : EDIT_GENERATION_COST;
+      singlePassEdit = shouldUseSinglePassEdit({ isEditMode: !isNewSite, mockupMode: professionalMode });
 
       // Interactive new sites also spend video (120) + up to 6 images × 15 during the run.
       // Gate on the estimated total so users don't start with only the site-create balance.
@@ -6383,7 +6426,10 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
             systemContent += `- "${img.name}" — маркер: {{IMG:${img.name}}} (описание: ${img.prompt})\n`;
           }
         }
-        systemContent += `\nДля загруженных фото (с URL /uploads/... или /objects/...) — используй URL напрямую: <img src="URL" />\nДля изображений из библиотеки выше — используй маркер {{IMG:имя}}: <img src="{{IMG:имя}}" />\nДля НОВЫХ фото по теме (которых нет в библиотеке) — генерируй через {{GENIMG:промпт на английском|соотношение}} (см. правила изображений выше).`;
+        systemContent += `\nДля загруженных фото (с URL /uploads/... или /objects/...) — используй URL напрямую: <img src="URL" />\nДля изображений из библиотеки выше — используй маркер {{IMG:имя}}: <img src="{{IMG:имя}}" />`;
+        if (!singlePassEdit) {
+          systemContent += `\nДля НОВЫХ фото по теме (которых нет в библиотеке) — генерируй через {{GENIMG:промпт на английском|соотношение}} (см. правила изображений выше).`;
+        }
       }
 
       const videoArray: Array<{url: string, fileName: string}> = Array.isArray(videoUrls) ? videoUrls : [];
@@ -6432,10 +6478,7 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
       // Bug: `!!project.generatedCode` was true for the generating placeholder, so
       // Gemini took the edit tools path, never emitted SCROLLANIM, and only GENIMG
       // images ran — no Kling video task.
-      const isEditMode =
-        !!project.generatedCode &&
-        !isCraftGeneratingHtml(project.generatedCode) &&
-        !isNewSite;
+      const isEditMode = !isNewSite;
       const existingFiles = await storage.getProjectFiles(project.id);
 
       const stripBase64 = (code: string): { stripped: string; map: Map<string, string> } => {
@@ -6461,21 +6504,20 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
       const sitePages: SitePage[] = [
         { filename: "index.html", code: project.generatedCode || "" },
         ...existingFiles
-          .filter((f) => f.filename !== "index.html" && isHtmlPage(f.filename))
+          .filter((f) => f.filename !== "index.html" && (singlePassEdit ? isEditableSiteFile(f.filename) : isHtmlPage(f.filename)))
           .map((f) => ({ filename: f.filename, code: f.code || "" })),
       ];
       let craftMdForEdit = "";
-      let agentToolHandled = false;
-      let agentChangedFiles: Map<string, string> | null = null;
-      let agentSummary = "";
+      let preReadEditFiles: string[] = [];
+      let editBudgetForHistory: ReturnType<typeof resolveEditContextBudget> | undefined;
       let selectedEditTarget: SelectedEditTarget | null = null;
-
-      let editPromptBase = "";
+      let editActiveFile = "index.html";
       if (isEditMode) {
-        const editingFile = activeFile || "index.html";
-        // Validate active file exists; stale tabs fall back to index
-        const knownNames = new Set(sitePages.map((p) => p.filename));
+        const editingFile = singlePassEdit ? normalizeSiteFilename(activeFile || "index.html") : (activeFile || "index.html");
+        // Validate active file exists; stale tabs fall back to index.
+        const knownNames = new Set(sitePages.map((p) => singlePassEdit ? normalizeSiteFilename(p.filename) : p.filename));
         const safeEditingFile = knownNames.has(editingFile) ? editingFile : "index.html";
+        editActiveFile = safeEditingFile;
         if (selectedElement && typeof selectedElement === "object") {
           const rawClasses = String(selectedElement.classes || "")
             .split(/\s+/)
@@ -6503,37 +6545,48 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
           `context=${editBudget.label} max=${editBudget.maxTotalChars} siteChars=${sitePages.reduce((s, p) => s + (p.code?.length || 0), 0)}`,
         );
 
-        craftMdForEdit = await ensureCraftMd(project.id, {
+        const craftSeed = {
           title: project.title || "Сайт",
           description: project.description,
           userPrompt: prompt,
           pages: sitePages,
-        });
+        };
+        const storedCraftMd = existingFiles.find((file) => file.filename === CRAFT_MD_FILENAME)?.code;
+        craftMdForEdit = singlePassEdit
+          ? (storedCraftMd?.trim() ? storedCraftMd : buildInitialCraftMd(craftSeed))
+          : await ensureCraftMd(project.id, craftSeed);
 
-        editPromptBase = systemContent;
+        editBudgetForHistory = editBudget;
         const quickPatch = preferQuickPatchEdit(String(prompt || ""), !!selectedEditTarget);
         const fullRewrite = isFullSiteRewriteRequest(String(prompt || ""));
         // Drop image-library dump on selected-element tweaks — URL already in selection.
-        let baseForEdit = editPromptBase;
-        if (quickPatch && !fullRewrite) {
+        let baseForEdit = systemContent;
+        if (!singlePassEdit && quickPatch && !fullRewrite) {
           baseForEdit = baseForEdit
             .replace(/\nДОСТУПНЫЕ ИЗОБРАЖЕНИЯ В БИБЛИОТЕКЕ ПОЛЬЗОВАТЕЛЯ:[\s\S]*?(?=\n═══|\n⚡|\n🔧|$)/i, "\n")
             .replace(/\nДля загруженных фото[\s\S]*?{{GENIMG:[\s\S]*?\n/i, "\n");
         }
-        systemContent = buildMultipageEditSystemPrompt({
-          baseSystem: baseForEdit,
-          activeFile: safeEditingFile,
-          craftMd: craftMdForEdit,
-          pages: sitePages,
-          useToolsHint: true,
-          budget: editBudget,
-          preferQuickPatch: quickPatch,
-          fullRewrite,
-        });
-        // Stash on project-scoped locals via closure — conversation history uses the same budget.
-        (req as any)._craftEditBudget = editBudget;
-        (req as any)._craftQuickPatch = quickPatch;
-        (req as any)._craftFullRewrite = fullRewrite;
+        if (singlePassEdit) {
+          const seeded = buildSinglePassEditSystemPrompt({
+            baseSystem: baseForEdit.replace(" После неуспешного патча прочитай файл и повтори с точным контекстом.", ""),
+            activeFile: safeEditingFile,
+            craftMd: craftMdForEdit,
+            pages: sitePages,
+          });
+          preReadEditFiles = seeded.preReadFiles;
+          systemContent = seeded.systemPrompt;
+        } else {
+          systemContent = buildMultipageEditSystemPrompt({
+            baseSystem: baseForEdit,
+            activeFile: safeEditingFile,
+            craftMd: craftMdForEdit,
+            pages: sitePages,
+            useToolsHint: true,
+            budget: editBudget,
+            preferQuickPatch: quickPatch,
+            fullRewrite,
+          });
+        }
         if (selectedEditTarget) {
           systemContent += `\n\n🚨 ТОЧНАЯ ЦЕЛЬ ВЫБРАНА ПОЛЬЗОВАТЕЛЕМ:
 - Разрешённая страница: ${selectedEditTarget.page}
@@ -6541,9 +6594,9 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
 - Текст-якорь: ${selectedEditTarget.text || "(нет)"}
 - DOM-путь в preview: ${String(selectedElement.path || "").slice(0, 120)}
 
-Меняй именно этот элемент (или его обёртку), SEARCH бери из HTML_BEGIN/ФОКУС. Не трогай другие блоки. В finish перечисли только фактические изменения.\n`;
+Меняй именно этот элемент (или его обёртку), SEARCH бери ${singlePassEdit ? "из точного исходника; HTML_BEGIN только ориентир" : "из HTML_BEGIN/ФОКУС"}. Не трогай другие блоки. В finish перечисли только фактические изменения.\n`;
         }
-        if (fullRewrite) {
+        if (fullRewrite && !singlePassEdit) {
           systemContent += `\n${FULL_SITE_REWRITE_GUIDANCE}\n`;
         } else if (isDesignOnlyEditRequest(prompt)) {
           systemContent += `\n${DESIGN_ONLY_TEXT_LOCK}\n`;
@@ -6620,9 +6673,6 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
       let fullResponse = "";
 
       const conversationHistory: KieMessage[] = [];
-      const editBudgetForHistory = (req as any)._craftEditBudget as
-        | ReturnType<typeof resolveEditContextBudget>
-        | undefined;
       const histCount = editBudgetForHistory?.historyMessages ?? 6;
       const histChars = editBudgetForHistory?.historyMsgChars ?? 1500;
 
@@ -6698,417 +6748,126 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
 
       console.log(`[AGENT] Generate call. Agent: ${useGemini ? "v2/Gemini via Router Cheap" : `v1/${getActiveRouterCheapModel()} via Router Cheap`}, History: ${conversationHistory.length}, Edit: ${isEditMode}`);
 
-      // ── Multipage tool-calling agent (Claude + Gemini / Router Cheap) ─────────
-      // Tries function calling so the model can read/patch ANY page.
-      // If the provider rejects tools, fall through to the streaming multipage text protocol.
-      // Ordinary media insertion uses tools with persistent URLs. Mockup mode
-      // still needs vision pixels and therefore keeps the streaming vision path.
-      let lastError: any = null;
-      if (isEditMode && !mockupMode) {
-        try {
-          res.write(`data: ${JSON.stringify({ status: useGemini ? "Быстрая правка сайта…" : "Быстрая правка сайта…" })}\n\n`);
-          const hist = conversationHistory
-            .filter((m) => m.role === "user" || m.role === "assistant")
-            .slice(0, -1)
-            .slice(-8)
-            .map((m) => {
-              let text = m.content.map((c: any) => (c.type === "input_text" ? c.text : "")).join("\n").trim();
-              // Drop billing footers — they confuse tool-calling and bloat the payload.
-              text = text.replace(/\n?—\s*Списано[\s\S]*$/i, "").trim();
-              if (m.role === "user") {
-                // Keep the user's intent, not prior HTML dumps / selection blobs.
-                text = text
-                  .replace(/\[Выбранный элемент:[\s\S]*?\]\s*/gi, "")
-                  .replace(/═══\s*ФОКУС:[\s\S]*$/i, "")
-                  .replace(/```html[\s\S]*?```/gi, "")
-                  .replace(/\n{2,}/g, "\n")
-                  .trim()
-                  .slice(0, 280);
-              } else {
-                // Keep a short outcome note, drop mechanical «В index.html заменено…» walls.
-                text = text
-                  .replace(/^В\s+\S+\s+заменено[\s\S]*?(?=\n\n|$)/i, "")
-                  .trim()
-                  .slice(0, 220);
-                if (!text) text = "Правка применена.";
-              }
-              return { role: m.role as "user" | "assistant", text };
-            })
-            .filter((h) => h.text.length > 2);
+      // Ordinary editor requests commit here and never enter the generation / fallback pipeline.
+      if (singlePassEdit) {
+        const history = conversationHistory.slice(0, -1).slice(-4).flatMap(({ role, content }) => {
+          if (role !== "user" && role !== "assistant") return [];
+          const text = content.flatMap((part) => part.type === "input_text" ? [part.text] : []).join("\n")
+            .replace(/\n?—\s*Списано[\s\S]*$/i, "")
+            .replace(/\[Выбранный элемент:[\s\S]*?\]\s*/gi, "")
+            .replace(/```html[\s\S]*?```/gi, "")
+            .trim().slice(0, 320);
+          return text.length > 2 ? [{ role, text }] : [];
+        });
+        const text = userContent.flatMap((part) => part.type === "input_text" ? [part.text] : []).join("\n\n");
+        const imageList = [...new Set(savedImageUrls)];
+        const edit = await runToolCallingAgent({
+          singlePass: true,
+          provider: useGemini ? "gemini" : "claude",
+          systemPrompt: systemContent,
+          userPrompt: imageList.length ? `${text}\n\nПрикреплённые изображения (используй точные URL):\n${imageList.join("\n")}` : text,
+          pages: sitePages,
+          craftMd: craftMdForEdit,
+          preReadFiles: preReadEditFiles,
+          history,
+          onStatus: (status) => writeSseJson(res, { status }),
+        });
 
-          const mediaContextLines = [
-            ...[...new Set(savedImageUrls)].map((url) => `- image: ${url}`),
-            ...videoArray.map((media) => `- video (${media.fileName}): ${media.url}`),
-            ...modelArray.map((media) => `- 3D model (${media.fileName}): ${media.url}`),
-            ...audioArray.map((media) => `- audio (${media.fileName}): ${media.url}`),
-          ];
-          const mediaContext = mediaContextLines.length
-            ? `\n\nПРИКРЕПЛЁННЫЕ МЕДИАФАЙЛЫ (используй точные URL в нужном месте сайта):\n${mediaContextLines.join("\n")}`
-            : "";
-
-          const safeActive =
-            String(activeFile || "index.html").trim().toLowerCase() || "index.html";
-          const activePageCode =
-            sitePages.find((p) => p.filename.toLowerCase() === safeActive)?.code
-            || sitePages.find((p) => p.filename === "index.html")?.code
-            || "";
-          const quickPatch = preferQuickPatchEdit(String(prompt || ""), !!selectedEditTarget);
-          const fullRewrite = isFullSiteRewriteRequest(String(prompt || ""));
-          // Soft routing only: always full Replit tools. Never hard-oneshot (that blocked write_page).
-          let seededSnippet = "";
-          if (quickPatch && activePageCode) {
-            const focus = buildOneshotFocusSnippet(activePageCode, selectedEditTarget, String(prompt || ""));
-            if (focus) {
-              seededSnippet =
-                `\n\n═══ ФОКУС: ${safeActive} (SEARCH копируй отсюда ДОСЛОВНО) ═══\n` +
-                `\`\`\`html\n${focus}\n\`\`\`\n`;
-            }
+        const sources = new Map(sitePages.map((page) => [normalizeSiteFilename(page.filename), page]));
+        const changes = new Map<string, string>();
+        const verified: VerifiedEditChange[] = [];
+        for (const [name, code] of edit.changedFiles) {
+          const source = sources.get(name);
+          const filename = source?.filename || name;
+          const before = source?.code || "";
+          // Strip model framing, not HTML comments or fences inside a valid document.
+          const sourceCode = isHtmlPage(filename) && /<!DOCTYPE\s+html|<html[\s>]/i.test(code)
+            ? (code.trimStart().startsWith("<") ? code.replace(/(<\/html>)\s*```[ \t]*\s*$/i, "$1") : cleanHtmlDoc(code))
+            : code;
+          const resolved = sourceCode.replace(/\{\{IMG:([^}]+)\}\}/g, (marker, name: string) =>
+            projectImgs.find((image) => image.name.toLowerCase() === name.trim().toLowerCase())?.url ?? marker,
+          );
+          const after = filename === "index.html" ? preserveExistingCraftScrollAnim(before, resolved, project.id) : resolved;
+          // An ordinary edit uses existing media; do not start paid background jobs or publish raw markers.
+          const markers = after.match(/\{\{\s*(?:GENIMG|SCROLLANIM|ANIMATIONAL|IMG)\s*:[^}]*\}\}/gi) || [];
+          if (markers.some((marker) => !before.includes(marker))) {
+            throw new SinglePassEditError("Правка содержит незаменённые маркеры медиа. Используйте уже загруженный файл.");
           }
-          // Selected tweak can still finish in 1–2 rounds; leave headroom to escalate.
-          const editMaxRounds = fullRewrite ? 8 : quickPatch ? 4 : 6;
-          const oneShotEdit = shouldUseOneShotEdit({
-            quickPatch,
-            fullRewrite,
-            hasSelectedTarget: !!selectedEditTarget,
-            hasSeededSnippet: !!seededSnippet,
-            prompt: String(prompt || ""),
-          });
-          const agentHistory = hist.slice(-4);
-
-          const buildEditUserPrompt = (
-            escalate = false,
-            provider: "gemini" | "claude" = "gemini",
-          ) =>
-            `${prompt}${mediaContext}${seededSnippet}\n\n` +
-            (escalate
-              ? provider === "claude"
-                ? `Предыдущий проход недостаточен. Продолжи на Claude: read_page("${safeActive}"), затем ЕЩЁ крупные apply_patch пока не закрыты ВСЕ пункты запроса (дизайн/структура/анимации/3D), потом finish. write_page всего файла — только если патчами уже нельзя.`
-                : `Предыдущая попытка не изменила код. ОБЯЗАТЕЛЬНО измени файлы: read_page("${safeActive}") затем apply_patch и/или write_page, потом finish. `
-              : fullRewrite
-                ? provider === "claude"
-                  ? `Полная переработка (Claude/V1 — сам до конца): это НЕ один мелкий патч. ` +
-                    `1) read_page("${safeActive}") ` +
-                    `2) серия КРУПНЫХ apply_patch (можно несколько в одном ответе): (A) CDN+canvas Three.js в head/hero (B) переписать :root/<style> под новый дизайн (C) обновить ключевые <section> (D) JS анимации/3D-сцена. ` +
-                    `3) finish ТОЛЬКО когда визуально сайт другой и все пункты запроса закрыты. ` +
-                    `SEARCH — длинный уникальный фрагмент из прочитанного кода. Не патчь JSON-LD вместо CSS.`
-                  : `Полная переработка как Replit Agent: 1) read_page("${safeActive}") 2) write_page или крупные патчи + Three.js/анимации 3) finish когда ВЕСЬ запрос выполнен. `
-                : quickPatch
-                  ? `Как Replit Agent: предпочтительно в одном ответе apply_patch (SEARCH из HTML_BEGIN/ФОКУС) + finish. Если запрос шире элемента — read_page/write_page. `
-                  : `Как Replit Agent: сам выбери инструмент — apply_patch для точечного, write_page для крупного. Можно несколько tool_use в одном ответе. `) +
-            `Выполни ВСЕ пункты запроса. ` +
-            (fullRewrite
-              ? `Закрой ВСЕ пункты запроса (дизайн + структура + анимации/3D), сохранив тексты и медиа пользователя. Не останавливайся после одного патча. `
-              : quickPatch
-                ? `Меняй выбранный элемент / его обёртку, если запрос точечный. `
-                : `Если указан hero / выбранный элемент / секция — меняй только её. `) +
-            `Не вызывай finish без реального изменения кода. Не удаляй контент, который не просили. ` +
-            `Тексты не переписывай, если не просили явно.`;
-
-          const runEditTools = (
-            provider: "gemini" | "claude",
-            opts?: { escalate?: boolean; maxRounds?: number; extraNote?: string },
-          ) => {
-            const retryNote = /вс[её] ещ[её]|до сих пор|опять|снова не|не помогло|не работает|не применил|не изменил/i.test(String(prompt || ""))
-              ? "\n\n⚠️ ПОВТОРНАЯ ПРОСЬБА: прошлая правка не дала видимого результата. Не повторяй то же свойство с другим значением. " +
-                "Сначала найди настоящую причину: grep класс блока и его родителей (grid-template-columns, flex, width, max-width, @media, !important), " +
-                "исправь именно то правило и проверь, что его ничего не перебивает. В finish честно напиши, что именно было причиной."
-              : "";
-            const note = (opts?.extraNote || "") + retryNote;
-            return runToolCallingAgent({
-              systemPrompt: systemContent + note,
-              userPrompt: buildEditUserPrompt(!!opts?.escalate, provider) + note,
-              pages: sitePages,
-              craftMd: craftMdForEdit,
-              history: agentHistory,
-              maxRounds: opts?.maxRounds ?? (oneShotEdit && !opts?.escalate ? 1 : editMaxRounds),
-              // A failed one-shot is retried with the full tool loop below.
-              preReadFiles: quickPatch ? [safeActive] : [],
-              oneShot: oneShotEdit && !opts?.escalate,
-              provider,
-              onStatus: (status) => {
-                try { res.write(`data: ${JSON.stringify({ status })}\n\n`); } catch {}
-              },
-              onContent: (chunk) => {
-                if (!chunk) return;
-                // Tool-agent prose is provisional until a patch is successfully
-                // applied. Buffer it; never show «Сайт обновлён» before validation.
-                fullResponse += chunk;
-              },
-            });
-          };
-
-          // Respect agent version: V1 = Claude, V2 = Gemini. No silent provider swap.
-          const primaryProvider: "gemini" | "claude" = useGemini ? "gemini" : "claude";
-          const alternateProvider: "gemini" | "claude" = useGemini ? "claude" : "gemini";
-          let toolResult;
-          let toolProviderUsed = primaryProvider;
-          try {
-            toolResult = await runEditTools(primaryProvider);
-          } catch (primaryErr: any) {
-            // V1 must finish on Claude: retry escalate on same provider before any cross-model hop.
-            if (primaryProvider === "claude") {
-              console.warn(`[AGENT] Claude error — V1 self-retry escalate:`, primaryErr?.message);
-              try {
-                res.write(`data: ${JSON.stringify({ status: "Claude оборвался — повторяю на V1 меньшими патчами…" })}\n\n`);
-              } catch {}
-              fullResponse = "";
-              try {
-                toolResult = await runEditTools("claude", { escalate: true, maxRounds: 8 });
-              } catch (retryErr: any) {
-                if (!canSafelyFallbackKieModel(retryErr)) throw retryErr;
-                console.warn(`[AGENT] Claude escalate failed; last-resort → ${alternateProvider}:`, retryErr?.message);
-                res.write(`data: ${JSON.stringify({ status: "V1 не смог — запасной проход Gemini…" })}\n\n`);
-                fullResponse = "";
-                toolProviderUsed = alternateProvider;
-                toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
-              }
-            } else {
-              if (!canSafelyFallbackKieModel(primaryErr)) {
-                throw primaryErr;
-              }
-              console.warn(`[AGENT] ${primaryProvider} completed with error; fallback → ${alternateProvider}:`, primaryErr?.message);
-              res.write(`data: ${JSON.stringify({ status: `${primaryProvider === "gemini" ? "Gemini" : "Claude"} вернул ошибку — переключаюсь на ${alternateProvider === "gemini" ? "Gemini" : "Claude"}…` })}\n\n`);
-              if (isDefinitelyUnsentTransportError(primaryErr)) {
-                await new Promise((resolve) => setTimeout(resolve, 2000));
-              }
-              fullResponse = "";
-              toolProviderUsed = alternateProvider;
-              toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
-            }
-          }
-          if (!toolResult.toolsSupported && toolProviderUsed === primaryProvider) {
-            // V1: stay on Claude if tools somehow unsupported mid-call (rare).
-            if (primaryProvider === "claude") {
-              console.warn(`[AGENT] Claude tools unsupported flag — escalate Claude anyway`);
-              fullResponse = "";
-              toolResult = await runEditTools("claude", { escalate: true, maxRounds: 8 });
-            } else {
-              console.warn(`[AGENT] ${primaryProvider} tools unsupported; fallback tools → ${alternateProvider}`);
-              fullResponse = "";
-              toolProviderUsed = alternateProvider;
-              toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
-            }
-          }
-          // If the first one-shot call returns no applied patch, escalate in the same model with full tools.
-          if (
-            oneShotEdit &&
-            toolResult.toolsSupported &&
-            toolResult.changedFiles.size === 0 &&
-            toolProviderUsed === primaryProvider
-          ) {
-            res.write(`data: ${JSON.stringify({ status: "Патч не применился — уточняю фрагмент…" })}\n\n`);
-            fullResponse = "";
-            toolResult = await runEditTools(primaryProvider, { escalate: true, maxRounds: editMaxRounds });
-          }
-          // Same-provider escalate whenever the first pass changed nothing (V1 stays on Claude).
-          if (
-            toolResult.toolsSupported &&
-            toolResult.changedFiles.size === 0 &&
-            toolProviderUsed === primaryProvider &&
-            !oneShotEdit
-          ) {
-            console.warn(`[AGENT] ${primaryProvider} produced 0 changes — escalate same provider`);
-            res.write(`data: ${JSON.stringify({
-              status: primaryProvider === "claude"
-                ? "V1: углубляю — только apply_patch по частям…"
-                : "Углубляю правку — читаю файл и применяю шире…",
-            })}\n\n`);
-            fullResponse = "";
-            toolResult = await runEditTools(primaryProvider, { escalate: true, maxRounds: 8 });
-          }
-          if (
-            toolResult.toolsSupported &&
-            toolResult.changedFiles.size === 0 &&
-            toolProviderUsed === primaryProvider &&
-            !oneShotEdit
-          ) {
-            // Last resort other model (V1 only after Claude already self-retried).
-            console.warn(`[AGENT] ${primaryProvider} still 0 changes; last-resort → ${alternateProvider}`);
-            res.write(`data: ${JSON.stringify({
-              status: `${primaryProvider === "gemini" ? "Gemini" : "Claude"} не внёс правки — запасной проход ${alternateProvider === "gemini" ? "Gemini" : "Claude"}…`,
-            })}\n\n`);
-            fullResponse = "";
-            toolProviderUsed = alternateProvider;
-            toolResult = await runEditTools(alternateProvider, { escalate: true, maxRounds: 8 });
-          }
-
-          // Full redesign quality gate: CSS-variable tweaks ≠ Three.js / structural redesign.
-          if (fullRewrite && toolResult.toolsSupported && toolResult.changedFiles.size > 0) {
-            const afterCode =
-              toolResult.changedFiles.get(safeActive)
-              || toolResult.changedFiles.get("index.html")
-              || [...toolResult.changedFiles.values()][0]
-              || "";
-            if (
-              isInsufficientFullRewriteResult(
-                String(prompt || ""),
-                activePageCode,
-                afterCode,
-                toolResult.patchCount ?? 1,
-              )
-            ) {
-              console.warn(
-                `[AGENT] full rewrite too trivial (patches=${toolResult.patchCount ?? "?"}, delta=${afterCode.length - activePageCode.length}) — escalate`,
-              );
-              try {
-                res.write(`data: ${JSON.stringify({
-                  status: "Слишком мало изменений — добавляю Three.js и полный редизайн…",
-                })}\n\n`);
-              } catch {}
-              fullResponse = "";
-              const insufficiencyNote =
-                `\n\n⚠ ПРОШЛЫЙ ПРОХОД ОТКЛОНЁН: были только мелкие CSS/косметические правки. ` +
-                `Сейчас ОБЯЗАТЕЛЬНО: CDN three.js + <canvas> 3D-сцена + заметный редизайн секций/анимаций. ` +
-                `Нельзя finish на смене --text-main / цветов.`;
-              toolResult = await runEditTools(toolProviderUsed, {
-                escalate: true,
-                maxRounds: 8,
-                extraNote: insufficiencyNote,
-              });
-              const after2 =
-                toolResult.changedFiles.get(safeActive)
-                || toolResult.changedFiles.get("index.html")
-                || [...toolResult.changedFiles.values()][0]
-                || "";
-              if (
-                toolResult.toolsSupported
-                && (
-                  toolResult.changedFiles.size === 0
-                  || isInsufficientFullRewriteResult(
-                    String(prompt || ""),
-                    activePageCode,
-                    after2,
-                    toolResult.patchCount ?? 1,
-                  )
-                )
-                && toolProviderUsed === primaryProvider
-              ) {
-                console.warn(`[AGENT] full rewrite still trivial after escalate — try ${alternateProvider}`);
-                try {
-                  res.write(`data: ${JSON.stringify({
-                    status: `Всё ещё мало — пробую ${alternateProvider === "gemini" ? "Gemini" : "Claude"}…`,
-                  })}\n\n`);
-                } catch {}
-                fullResponse = "";
-                toolProviderUsed = alternateProvider;
-                toolResult = await runEditTools(alternateProvider, {
-                  escalate: true,
-                  maxRounds: 8,
-                  extraNote: insufficiencyNote,
-                });
-              }
-            }
-          }
-
-          if (toolResult.toolsSupported && toolResult.changedFiles.size > 0) {
-            const finalAfter =
-              toolResult.changedFiles.get(safeActive)
-              || toolResult.changedFiles.get("index.html")
-              || [...toolResult.changedFiles.values()][0]
-              || "";
-            if (
-              fullRewrite
-              && isInsufficientFullRewriteResult(
-                String(prompt || ""),
-                activePageCode,
-                finalAfter,
-                toolResult.patchCount ?? 1,
-              )
-            ) {
-              // Still cosmetic after all retries — refund rather than fake success.
-              console.warn(`[AGENT] full rewrite remained trivial — refusing fake success`);
-              let refunded = false;
-              if (genBilled && user?.id && GENERATION_COST > 0) {
-                try {
-                  await storage.refundCredits(user.id, GENERATION_COST, genIkey);
-                  refunded = true;
-                  genBilled = false;
-                  console.log(`[REFUND] edit-trivial-redesign: +${GENERATION_COST} tokens`);
-                } catch (re: any) {
-                  console.warn("[REFUND] edit-trivial-redesign failed:", re?.message);
-                }
-              }
-              const freshBal = user?.id ? (await storage.getUser(user.id))?.credits : undefined;
-              const failMsg = refunded
-                ? "Редизайн не выполнен (только косметика без Three.js/анимаций). Токены возвращены — повторите запрос."
-                : "Редизайн не выполнен (только косметика без Three.js/анимаций). Повторите запрос.";
-              try {
-                await storage.createProjectMessage({ projectId: project.id, role: "model", content: failMsg });
-              } catch {}
-              res.write(`data: ${JSON.stringify({ done: true, error: failMsg, newBalance: freshBal, refunded, refundAmount: refunded ? GENERATION_COST : 0 })}\n\n`);
-              res.end();
-              return;
-            }
-            agentToolHandled = true;
-            agentChangedFiles = toolResult.changedFiles;
-            agentSummary = toolResult.summary;
-            craftMdForEdit = toolResult.craftMd;
-            if (!fullResponse.trim()) fullResponse = toolResult.summary;
-            console.log(`[AGENT] ${toolProviderUsed === "gemini" ? "Gemini" : "Claude"} tool-calling success. Changed: ${[...toolResult.changedFiles.keys()].join(", ")} patches=${toolResult.patchCount ?? "?"}`);
-          } else if (toolResult.toolsSupported && toolResult.changedFiles.size === 0) {
-            // Tools work on KIE — model finished without mutating code.
-            // Do NOT burn a second stream call (that was discarding paid KIE work and
-            // still reporting «Сайт обновлён»). Fail + refund instead.
-            console.warn(`[AGENT] ${useGemini ? "Gemini" : "Claude"} tools ok but 0 file changes — refusing fake success (no stream fallback)`);
-            let refunded = false;
-            if (genBilled && user?.id && GENERATION_COST > 0) {
-              try {
-                await storage.refundCredits(user.id, GENERATION_COST, genIkey);
-                refunded = true;
-                genBilled = false;
-                console.log(`[REFUND] edit-no-patch: +${GENERATION_COST} tokens`);
-              } catch (re: any) {
-                console.warn("[REFUND] edit-no-patch failed:", re?.message);
-              }
-            }
-            const freshBal = user?.id ? (await storage.getUser(user.id))?.credits : undefined;
-            const failMsg = refunded
-              ? "ИИ не внёс изменений в код сайта. Токены возвращены — переформулируйте запрос или выберите элемент точнее."
-              : "ИИ не внёс изменений в код сайта. Переформулируйте запрос или выберите элемент точнее.";
-            try {
-              await storage.createProjectMessage({ projectId: project.id, role: "model", content: failMsg });
-            } catch {}
-            res.write(`data: ${JSON.stringify({ done: true, error: failMsg, newBalance: freshBal, refunded, refundAmount: refunded ? GENERATION_COST : 0 })}\n\n`);
-            res.end();
-            return;
-          } else {
-            console.log(`[AGENT] ${useGemini ? "Gemini" : "Claude"} tools unsupported by provider — using multipage stream protocol`);
-            systemContent = buildMultipageEditSystemPrompt({
-              baseSystem: editPromptBase || SYSTEM_PROMPT,
-              activeFile: activeFile || "index.html",
-              craftMd: craftMdForEdit,
-              pages: sitePages,
-              useToolsHint: false,
-              budget: (req as any)._craftEditBudget || resolveEditContextBudget(sitePages),
-            });
-          }
-        } catch (agentErr: any) {
-          // A failed tool HTTP request has already received a cross-model
-          // fallback above. A transport failure is ambiguous and MUST NOT start
-          // another KIE task while the first may still be running.
-          console.warn("[AGENT] Tool-calling failed; trying Kimi K3 text fallback:", agentErr?.message || agentErr);
-          try {
-            systemContent = buildMultipageEditSystemPrompt({
-              baseSystem: editPromptBase || SYSTEM_PROMPT,
-              activeFile: activeFile || "index.html",
-              craftMd: craftMdForEdit,
-              pages: sitePages,
-              useToolsHint: false,
-              budget: (req as any)._craftEditBudget || resolveEditContextBudget(sitePages),
-            });
-            fullResponse = await kimiK3GenerateSync({
-              messages: toClaudeMessages(conversationHistory),
-              systemPrompt: systemContent,
-              maxTokens: 32000,
-            });
-          } catch (kimiErr: any) {
-            console.warn("[AGENT] Kimi K3 fallback failed:", kimiErr?.message || kimiErr);
-            throw agentErr;
-          }
+          if (before === after) continue;
+          changes.set(filename, after);
+          verified.push({ filename, before, after });
         }
+        if (!verified.length) throw new SinglePassEditError("Модель не изменила код в первом ответе.");
+        const selected = selectedEditTarget;
+        const selectedPage = selected ? sources.get(selected.page) : undefined;
+        const selectedStylesheets = selectedPage && verified.some((change) => isProjectStylesheet(change.filename))
+          ? linkedProjectStylesheets(changes.get(selectedPage.filename) ?? selectedPage.code, selectedPage.filename)
+          : new Set<string>();
+        if (selected && !verified.some((change) => {
+          if (normalizeSiteFilename(change.filename) === selected.page && isHtmlPage(change.filename)) return selectedTargetWasTouched(change, selected);
+          if (!selectedStylesheets.has(change.filename)) return false;
+          const selectors = [...selected.classes.map((name) => `.${name}`), selected.tag].filter(Boolean);
+          return selectors.some((selector) => selectorRules(change.before, selector, true) !== selectorRules(change.after, selector, true));
+        })) {
+          throw new SinglePassEditError("Агент изменил не выбранный элемент, поэтому правка не сохранена.");
+        }
+        const principalChange = verified.find((change) => normalizeSiteFilename(change.filename) === editActiveFile) || verified[0];
+        if (isInsufficientFullRewriteResult(String(prompt || ""), principalChange.before, principalChange.after, edit.patchCount)) {
+          throw new SinglePassEditError("Агент не выполнил запрошенную переработку с первого ответа.");
+        }
+
+        const editedFiles = [...changes.keys()];
+        const editedFile = editedFiles.find((name) => normalizeSiteFilename(name) === editActiveFile && isHtmlPage(name))
+          || editedFiles.find(isHtmlPage) || sources.get(editActiveFile)?.filename || "index.html";
+        const code = changes.get("index.html") ?? project.generatedCode;
+        const reply = edit.summary.length >= 24 && !/сайт обновл|готово\.?$/i.test(edit.summary)
+          ? edit.summary : buildVerifiedEditSummary(verified);
+        const pagesNow = new Map(sitePages.map(({ filename, code }) => [filename, code]));
+        for (const [filename, updated] of changes) pagesNow.set(filename, updated);
+        changes.set(CRAFT_MD_FILENAME, buildUpdatedCraftMd(craftMdForEdit, [...pagesNow].map(([filename, code]) => ({ filename, code })), {
+          userRequest: prompt,
+          summary: reply,
+          changedFiles: editedFiles,
+        }));
+        await storage.applyProjectEdit(project.id, changes);
+        editSaved = true;
+        genBilled = false; // A committed edit must not be refunded for a later history or transport failure.
+
+        if (durableJobId) {
+          await completeGenerationJob(durableJobId, { codeBytes: code.length, editedFiles }).catch((err) => {
+            console.warn("[EDIT] job update failed:", err?.message);
+          });
+        }
+        try {
+          const files = existingFiles.map(({ filename, code }) => ({ filename, code }));
+          await storage.createProjectVersion({
+            projectId: project.id, code: project.generatedCode,
+            label: `До: "${prompt.substring(0, 50)}${prompt.length > 50 ? "..." : ""}"`,
+            files: files.length ? files : null,
+          });
+          const message = await storage.createProjectMessage({
+            projectId: project.id, role: "model", content: `${reply}\n\n— Списано ${GENERATION_COST} ток. (редактирование)`,
+          });
+          await saveChatResultVersion(project.id, code, prompt, undefined, message.id);
+        } catch (err: any) {
+          console.warn("[EDIT] history save failed:", err?.message);
+        }
+
+        const freshUser = await storage.getUser(user.id).catch(() => undefined);
+        writeSseJson(res, {
+          done: true, code, reply, editedFile, editedFiles,
+          editedCode: editedFile !== "index.html" ? pagesNow.get(editedFile) : undefined,
+          fetchCode: editedFiles.some((file) => file !== "index.html" && file !== editedFile),
+          creditsUsed: genBilledFlag ? GENERATION_COST : 0,
+          newBalance: freshUser?.credits ?? genDeduction.newBalance,
+          jobId: durableJobId,
+        });
+        res.end();
+        return;
       }
 
-      if (!agentToolHandled) {
+      {
+        let lastError: unknown;
         const primaryProvider: "gemini" | "claude" = useGemini ? "gemini" : "claude";
         const alternateProvider: "gemini" | "claude" =
           primaryProvider === "gemini" ? "claude" : "gemini";
@@ -7291,7 +7050,7 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
       const hasFileMarkers = fullResponse.includes("--- FILE:");
       const htmlBlockCount = (fullResponse.match(/```html/g) || []).length;
       const diffBlockCount = (fullResponse.match(/```diff/g) || []).length;
-      console.log("Full response length:", fullResponse.length, "Has FILE markers:", hasFileMarkers, "HTML blocks:", htmlBlockCount, "Diff blocks:", diffBlockCount, "Has SEARCH/REPLACE:", hasDiffBlocks, "AgentTools:", agentToolHandled);
+      console.log("Full response length:", fullResponse.length, "Has FILE markers:", hasFileMarkers, "HTML blocks:", htmlBlockCount, "Diff blocks:", diffBlockCount, "Has SEARCH/REPLACE:", hasDiffBlocks);
 
       const applyDiffPatches = (originalCode: string, response: string): { code: string; applied: number; total: number } =>
         applyDiffPatchesToCode(originalCode, response);
@@ -7314,21 +7073,7 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
       let mainHtmlCode: string;
       let editedFilesList: string[] = [];
 
-      if (agentToolHandled && agentChangedFiles && agentChangedFiles.size > 0) {
-        aiTextReply = agentSummary || aiTextReply || "Сайт обновлён";
-        mainHtmlCode = project.generatedCode || "";
-        for (const [fn, code] of agentChangedFiles) {
-          const finalCode = replaceImgMarkers(code);
-          editedFilesList.push(fn);
-          if (fn === "index.html") mainHtmlCode = finalCode;
-          else await storage.upsertProjectFile({ projectId: project.id, filename: fn, code: finalCode });
-        }
-        if (!agentChangedFiles.has("index.html")) mainHtmlCode = project.generatedCode || "";
-        editingFile = editedFilesList.includes(activeFile || "")
-          ? (activeFile || "index.html")
-          : (editedFilesList[0] || editingFile);
-        await storage.upsertProjectFile({ projectId: project.id, filename: CRAFT_MD_FILENAME, code: craftMdForEdit });
-      } else if (isEditMode && (hasDiffBlocks || (hasFileMarkers && (diffBlockCount > 0 || htmlBlockCount > 0)))) {
+      if (isEditMode && (hasDiffBlocks || (hasFileMarkers && (diffBlockCount > 0 || htmlBlockCount > 0)))) {
         // Multipage edit protocol: --- FILE: x.html --- + diff/html per file
         const filesMap = new Map<string, string>();
         filesMap.set("index.html", project.generatedCode || "");
@@ -7574,15 +7319,7 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
           }
         };
 
-        if (agentToolHandled && agentChangedFiles && agentChangedFiles.size > 0) {
-          for (const [fn, code] of agentChangedFiles) {
-            const prev =
-              fn === "index.html"
-                ? origIndex
-                : (existingFiles.find((f) => f.filename === fn)?.code || "");
-            addVerifiedChange(fn, prev, code || "");
-          }
-        } else if (editedFilesList.length > 0) {
+        if (editedFilesList.length > 0) {
           if (editedFilesList.includes("index.html")) {
             addVerifiedChange("index.html", origIndex, mainHtmlCode || "");
           }
@@ -7692,19 +7429,7 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
           return;
         }
 
-        // Prefer the agent's finish() summary when it is substantive.
-        // buildVerifiedEditSummary turns CSS-var swaps into a fake "success log"
-        // that looks like a redesign happened when the preview barely changed.
-        const finishSummary = String(agentSummary || "").trim();
-        if (
-          agentToolHandled
-          && finishSummary.length >= 24
-          && !/сайт обновл|готово\.?$/i.test(finishSummary)
-        ) {
-          aiTextReply = finishSummary.slice(0, 900);
-        } else {
-          aiTextReply = buildVerifiedEditSummary(verifiedEditChanges);
-        }
+        aiTextReply = buildVerifiedEditSummary(verifiedEditChanges);
       }
 
       // Final safety net: if any parsing path still left conversational preamble
@@ -7714,45 +7439,7 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
         mainHtmlCode = cleanHtmlDoc(mainHtmlCode);
       }
 
-      // ── Re-inject scroll-anim-pending if AI full-HTML edit stripped it ────────
-      // When the user edits while BG ANIM is still running, the AI may output a
-      // full HTML replacement that drops the pending spinner. BG ANIM then finds
-      // nothing to replace and the animation is permanently lost. Fix: if the
-      // ORIGINAL project code had the pending section and the AI-produced code
-      // does NOT, extract and re-inject it after </header> (or <body>).
-      {
-        const PEND_MARKER = 'data-scroll-anim-pending="1"';
-        const origCode = project.generatedCode || "";
-        if (origCode.includes(PEND_MARKER) && mainHtmlCode && !mainHtmlCode.includes(PEND_MARKER)) {
-          // Extract the full <section data-scroll-anim-pending...>...</section> from original
-          const mIdx = origCode.indexOf(PEND_MARKER);
-          const secStart = origCode.lastIndexOf('<section', mIdx);
-          if (secStart !== -1) {
-            let depth = 0, pos = secStart, secEnd = -1;
-            while (pos < origCode.length) {
-              const nextOpen = origCode.indexOf('<section', pos + 1);
-              const nextClose = origCode.indexOf('</section>', pos);
-              if (nextClose === -1) break;
-              if (nextOpen !== -1 && nextOpen < nextClose) { depth++; pos = nextOpen; }
-              else { if (depth === 0) { secEnd = nextClose + '</section>'.length; break; } depth--; pos = nextClose + 1; }
-            }
-            if (secEnd !== -1) {
-              const pendingBlock = origCode.slice(secStart, secEnd);
-              if (mainHtmlCode.includes('</header>')) {
-                mainHtmlCode = mainHtmlCode.replace('</header>', `</header>\n${pendingBlock}`);
-              } else {
-                mainHtmlCode = mainHtmlCode.replace(/<body([^>]*)>/i, (_m, attrs) => `<body${attrs}>\n${pendingBlock}`);
-              }
-              console.log(`[EDIT] Re-injected scroll-anim-pending section into AI-edited code (project ${project.id})`);
-            }
-          }
-        }
-        // Finished interactive heroes: AI edits often rewrite index.html and drop
-        // data-craft-scrollanim + trailing engine → permanent black hero.
-        if (mainHtmlCode) {
-          mainHtmlCode = preserveFinishedCraftScrollAnim(origCode, mainHtmlCode);
-        }
-      }
+      mainHtmlCode = preserveExistingCraftScrollAnim(project.generatedCode || "", mainHtmlCode, project.id);
 
       // Generate on-theme photos for any {{GENIMG:...}} markers and bake the
       // resulting /objects/ URLs into the main page + all secondary files BEFORE
@@ -8342,7 +8029,13 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
         })();
       }
     } catch (err: any) {
-      console.error("Generation error:", err?.message || err);
+      if (singlePassEdit) {
+        console.error("[EDIT] failed:", err instanceof SinglePassEditError ? err.message : {
+          name: err?.name, status: err?.status, code: err?.cause?.code || err?.code,
+        });
+      } else {
+        console.error("Generation error:", err?.message || err);
+      }
       // Clear the generating placeholder so the user can retry (and polling stops).
       if (wroteGeneratingPlaceholder && generateProjectId) {
         try {
@@ -8363,13 +8056,17 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
         ) {
           await storage.refundCredits(billedUserId, generationCost, genIkeyForRefund);
           refunded = true;
-          console.log(`[REFUND] site-generate: +${generationCost} tokens (${localStorageFailure ? "local storage failure" : "confirmed KIE failure"})`);
+          console.log(`[REFUND] site-generate: +${generationCost} tokens (${singlePassEdit ? "edit not saved" : localStorageFailure ? "local storage failure" : "confirmed KIE failure"})`);
         } else if (genBilled) {
           console.log(`[REFUND-SKIP] site-generate: not a confirmed KIE failure — keeping charge (${err?.message?.slice(0, 120)})`);
         }
-      } catch {}
-      const _em = err?.message || "";
-      const errMsg = (_em.includes("503") || _em.includes("UNAVAILABLE") || _em.includes("high demand"))
+      } catch (refundErr: any) {
+        console.warn("[REFUND] site-generate refund failed:", refundErr?.cause?.code || refundErr?.code || refundErr?.name);
+      }
+      const _em = String(err?.message || "");
+      const errMsg = singlePassEdit
+        ? `Правка не выполнена с первого запроса. ${err instanceof SinglePassEditError ? err.message : "Не удалось получить или сохранить изменения."}`
+        : (_em.includes("503") || _em.includes("UNAVAILABLE") || _em.includes("high demand"))
         ? "Сервер ИИ временно перегружен. Основная и резервная модели не смогли завершить запрос."
         : (_em.toLowerCase().includes("overloaded") || _em.includes("529") || _em.includes("overloaded_error"))
         ? "Серверы ИИ перегружены. Попробуйте снова через 5 минут."
@@ -8389,7 +8086,7 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
               : "Серверы ИИ временно недоступны. Попробуйте снова через несколько минут.";
           })()
         : `Ошибка генерации: ${_em.substring(0, 150) || "неизвестная ошибка"}`;
-      const freshBal = billedUserId ? (await storage.getUser(billedUserId))?.credits : undefined;
+      const freshBal = billedUserId ? (await storage.getUser(billedUserId).catch(() => undefined))?.credits : undefined;
       const errPayload = {
         done: true,
         error: refunded ? `${errMsg} Токены возвращены.` : errMsg,
@@ -8403,6 +8100,11 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
         } catch (messageErr: any) {
           console.warn("[GENERATE] failed to persist error message:", messageErr?.message || messageErr);
         }
+      }
+      if (singlePassEdit && durableJobId && !editSaved) {
+        await failGenerationJob(durableJobId, errPayload.error).catch((jobErr) => {
+          console.warn("[EDIT] failed to record job failure:", jobErr?.message);
+        });
       }
       if (res.headersSent) {
         res.write(`data: ${JSON.stringify(errPayload)}\n\n`);
@@ -8434,11 +8136,9 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
           // Prefer complete when project has real HTML.
           try {
             const p = generateProjectId ? await storage.getProject(generateProjectId) : null;
-            const ok =
-              p?.generatedCode &&
-              !isCraftGeneratingHtml(p.generatedCode) &&
-              p.generatedCode.length > 80;
-            if (ok) await completeGenerationJob(durableJobId, { codeBytes: p!.generatedCode.length });
+            const ok = singlePassEdit ? editSaved :
+              p?.generatedCode && !isCraftGeneratingHtml(p.generatedCode) && p.generatedCode.length > 80;
+            if (ok) await completeGenerationJob(durableJobId, { codeBytes: p?.generatedCode?.length ?? 0 });
             else await failGenerationJob(durableJobId, "generation ended without durable complete");
           } catch {
             /* ignore */
@@ -9917,6 +9617,10 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
       files.push({ filename: "index.html", content: mainHtml });
 
       for (const f of extraFiles) {
+        if (isProjectStylesheet(f.filename)) {
+          files.push({ filename: f.filename, content: f.code });
+          continue;
+        }
         if (!isPublishableProjectFile(f.filename)) continue;
         let code = f.code;
         for (const img of projectImages) {
@@ -10094,17 +9798,18 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
           }
         }
         console.log(`[Publish] Bundled ${mediaMap.size}/${localMediaUrls.size} media file(s) for project ${projectId} — total media payload ${(bundledBytes / 1024 / 1024).toFixed(1)} MB`);
-        // Rewrite references in ALL html pages: relative paths AND their absolute counterparts
+        // CSS resolves URLs relative to its own file, not the HTML that links it.
         for (const f of files) {
           if (!f.content) continue;
+          const toRoot = isProjectStylesheet(f.filename) ? "../".repeat(f.filename.split("/").length - 1) : "";
           // Rewrite absolute same-origin URLs first (longer strings → no partial clobber)
-          for (const [absUrl, relPath] of Array.from(absoluteToRelative.entries())) {
+          for (const [absUrl, relPath] of absoluteToRelative) {
             const localPath = mediaMap.get(relPath);
-            if (localPath) f.content = f.content.split(absUrl).join(localPath);
+            if (localPath) f.content = f.content.split(absUrl).join(toRoot + localPath);
           }
           // Then rewrite relative paths
-          for (const [relPath, localPath] of Array.from(mediaMap.entries())) {
-            f.content = f.content.split(relPath).join(localPath);
+          for (const [relPath, localPath] of mediaMap) {
+            f.content = f.content.split(relPath).join(toRoot + localPath);
           }
         }
       }

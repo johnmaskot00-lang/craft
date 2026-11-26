@@ -22,7 +22,13 @@ type VersionSummary = {
   codeBytes?: number;
   hasFiles?: boolean;
 };
-import { isEditorVisibleProjectFile, isInternalAgentFile } from "@shared/project-files";
+import {
+  inlineProjectStylesheets,
+  isEditorVisibleProjectFile,
+  isInternalAgentFile,
+  isProjectStylesheet,
+  restoreProjectStylesheetLinks,
+} from "@shared/project-files";
 import JSZip from "jszip";
 import { UITemplatesModal } from "@/components/ui-templates";
 
@@ -202,7 +208,7 @@ export default function EditorPage() {
   const isMobile = useIsMobile();
 
   const [prompt, setPrompt] = useState("");
-  const [agentMode, setAgentMode] = useState<"auto" | "edit" | "chat">("auto");
+  const [agentMode, setAgentMode] = useState<"auto" | "edit" | "chat">("edit");
   const [isGenerating, setIsGenerating] = useState(false);
   /** Site HTML is ready; Kling/motion still baking — show preview, not blackout. */
   const [animBaking, setAnimBaking] = useState(false);
@@ -726,7 +732,7 @@ export default function EditorPage() {
       const onMsg = (e: MessageEvent) => {
         if (e.source !== win) return;
         if (e.data?.type === "nz-html-snapshot") {
-          finish(typeof e.data.html === "string" ? e.data.html : null);
+          finish(typeof e.data.html === "string" ? restoreProjectStylesheetLinks(e.data.html) : null);
         }
       };
       window.addEventListener("message", onMsg);
@@ -1152,8 +1158,9 @@ export default function EditorPage() {
               }
             }
           }
-          if (data.done) {
+          if (data.done && !data.error) {
             setGenerationStatus(null);
+            if (typeof data.reply === "string") setStreamingReply(data.reply);
             if (data.chatOnly) {
               gotFinalCode = true;
               setStreamingReply(data.reply || fullText);
@@ -1624,6 +1631,12 @@ export default function EditorPage() {
       : (htmlCode.includes('</html>') ? htmlCode.replace('</html>', leadExportScript + '\n</html>') : htmlCode + '\n' + leadExportScript);
 
     zip.file("index.html", htmlCode);
+    for (const [filename, css] of projectStylesheets) {
+      let code = css;
+      const toRoot = "../".repeat(filename.split("/").length - 1);
+      allImageUrls.forEach((localPath, remoteUrl) => { code = code.split(remoteUrl).join(toRoot + localPath); });
+      zip.file(filename, code);
+    }
 
     for (const pf of projectFiles) {
       if (!isEditorVisibleProjectFile(pf.filename)) continue;
@@ -2797,11 +2810,22 @@ window.__PROJECT_ID__=${projectId};
     return code + previewInject;
   }, [projectId]);
 
+  const projectStylesheets = useMemo(() => {
+    const styles = new Map<string, string>();
+    for (const file of projectFiles) {
+      if (isProjectStylesheet(file.filename)) styles.set(file.filename, file.code);
+    }
+    for (const [filename, code] of Object.entries(optimisticFiles)) {
+      if (isProjectStylesheet(filename)) styles.set(filename, code);
+    }
+    return styles;
+  }, [projectFiles, optimisticFiles]);
+
   // Stable preview HTML — never depends on edit/selector mode (avoids iframe remount + scroll jump to hero).
-  const getPreviewCode = useCallback((code: string) => {
+  const getPreviewCode = useCallback((code: string, filename: string) => {
     if (!code) return code;
-    return injectProjectId(code);
-  }, [injectProjectId]);
+    return injectProjectId(inlineProjectStylesheets(code, filename, projectStylesheets));
+  }, [injectProjectId, projectStylesheets]);
 
   const clearInPlacePreviewTools = useCallback((doc: Document) => {
     try {
@@ -3122,7 +3146,9 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
   }, []);
 
   useEffect(() => {
-    const persistHtml = (finalHtml: string, opts?: { invalidate?: boolean; updateState?: boolean }) => {
+    const persistHtml = (previewHtml: string, opts?: { invalidate?: boolean; updateState?: boolean }) => {
+      if (typeof previewHtml !== "string") return;
+      const finalHtml = restoreProjectStylesheetLinks(previewHtml);
       const invalidate = opts?.invalidate ?? true;
       const updateState = opts?.updateState ?? true;
       const saveSeq = ++saveSeqRef.current;
@@ -3271,8 +3297,9 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
     const live = isGenerating || animBaking
       ? (streamedCode || project?.generatedCode || "")
       : currentCode;
-    return isPreviewReady(live) ? getPreviewCode(live) || "" : "";
-  }, [isGenerating, animBaking, project?.generatedCode, streamedCode, currentCode, getPreviewCode]);
+    const filename = isGenerating || animBaking ? (streamedCode ? streamedFile : "index.html") : activeFile;
+    return isPreviewReady(live) ? getPreviewCode(live, filename) || "" : "";
+  }, [isGenerating, animBaking, project?.generatedCode, streamedCode, streamedFile, activeFile, currentCode, getPreviewCode]);
 
   const deviceWidths = { desktop: "100%", tablet: "768px", mobile: isMobile ? "100%" : "375px" };
 
