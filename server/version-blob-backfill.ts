@@ -76,6 +76,16 @@ export async function processObjectDeleteOutbox(): Promise<void> {
             continue;
           }
         }
+        if (row.objectKey.startsWith("uploads/")) {
+          // This is rollback-only cleanup. A lost commit acknowledgement can queue a
+          // committed image; cancel that delete (removing a library row later need
+          // not remove the same image from published HTML or saved versions).
+          const live = await db.execute(sql`SELECT 1 FROM project_images WHERE url = ${`/objects/${row.objectKey}`} LIMIT 1`);
+          if (live.rows.length) {
+            await db.execute(sql`DELETE FROM object_delete_outbox WHERE id = ${row.id}`);
+            continue;
+          }
+        }
         const { ycMediaDelete } = await import("./yc-media-bucket");
         await ycMediaDelete(row.objectKey);
         await db.execute(sql`DELETE FROM object_delete_outbox WHERE id = ${row.id}`);

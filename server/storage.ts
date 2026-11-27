@@ -144,6 +144,21 @@ export type ProjectListRow = Omit<
   | "codeBlobKey"
 > & { generatedCode: ""; hasPreview: boolean };
 
+// Pending holds reduce spendable credits but are excluded from the ledger view.
+const EDIT_IMAGE_HOLD = "editor-image-hold";
+const EDIT_IMAGE_HOLD_CUTOFF = sql`CURRENT_TIMESTAMP - interval '1 hour'`;
+type CreditClaim = { success: boolean; newBalance: number; alreadyProcessed?: boolean; conflict?: boolean };
+
+type ProjectEditImages = {
+  userId: number;
+  editCost: number;
+  unitCost: number;
+  holdKey: string;
+  items: readonly Pick<InsertProjectImage, "name" | "url" | "prompt">[];
+};
+
+export class EditImageHoldExpired extends Error {}
+
 export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
   getUserByEmail(email: string): Promise<User | undefined>;
@@ -153,9 +168,13 @@ export interface IStorage {
   createTelegramUser(data: { telegramId: string; displayName: string; avatarUrl?: string }): Promise<User>;
   createYandexUser(data: { yandexId: string; displayName: string; email?: string; avatarUrl?: string }): Promise<User>;
   updateUserCredits(id: number, credits: number): Promise<User | undefined>;
-  deductCredits(userId: number, amount: number, operation: string, idempotencyKey: string): Promise<{ success: boolean; newBalance: number; alreadyProcessed?: boolean; conflict?: boolean }>;
-  /** Refund credits and invalidate the debit idempotency key so the same key cannot free-replay. */
-  refundCredits(userId: number, amount: number, idempotencyKey: string): Promise<number>;
+  deductCredits(userId: number, amount: number, operation: string, idempotencyKey: string): Promise<CreditClaim>;
+  reserveEditImageCredits(userId: number, amount: number, holdKey: string): Promise<CreditClaim>;
+  hasActiveEditImageHold(userId: number, holdKey: string): Promise<boolean>;
+  releaseEditImageHold(userId: number, holdKey: string): Promise<number>;
+  recoverExpiredEditImageHolds(): Promise<void>;
+  /** Refund once. Keep the debit key when the caller rejects duplicate requests. */
+  refundCredits(userId: number, amount: number, idempotencyKey: string, retainDebitKey?: boolean): Promise<number>;
   addCredits(userId: number, amount: number): Promise<number>;
   creditPayment(userId: number, amount: number, idempotencyKey: string, note: string): Promise<{ credited: boolean; newBalance: number }>;
   settlePaymentOrder(orderId: number, userId: number, amount: number, tokens: number, paymentProviderId: string, note: string): Promise<{ already: boolean; credited: boolean; newBalance: number }>;
@@ -178,7 +197,8 @@ export interface IStorage {
   /** Clone code, files and image library into a fresh unpublished project. */
   duplicateProject(sourceId: number, userId: number): Promise<Project | undefined>;
   updateProject(id: number, data: Partial<Project>): Promise<Project | undefined>;
-  applyProjectEdit(projectId: number, changes: ReadonlyMap<string, string>): Promise<void>;
+  applyProjectEdit(projectId: number, changes: ReadonlyMap<string, string>, images?: ProjectEditImages): Promise<void>;
+  discardEditImageUploads(urls: readonly string[]): Promise<void>;
   deleteProject(id: number): Promise<void>;
 
   getProjectMessages(projectId: number, limit?: number): Promise<ProjectMessage[]>;
@@ -373,7 +393,15 @@ export class DatabaseStorage implements IStorage {
     return user;
   }
 
-  async deductCredits(userId: number, amount: number, operation: string, idempotencyKey: string): Promise<{ success: boolean; newBalance: number; alreadyProcessed?: boolean; conflict?: boolean }> {
+  deductCredits(userId: number, amount: number, operation: string, idempotencyKey: string): Promise<CreditClaim> {
+    return this.claimCredits(userId, amount, operation, idempotencyKey, "debit");
+  }
+
+  reserveEditImageCredits(userId: number, amount: number, holdKey: string): Promise<CreditClaim> {
+    return this.claimCredits(userId, amount, EDIT_IMAGE_HOLD, holdKey, "hold");
+  }
+
+  private async claimCredits(userId: number, amount: number, operation: string, idempotencyKey: string, type: "debit" | "hold"): Promise<CreditClaim> {
     // Atomic: claim idempotency key first, then debit. Concurrent same-key callers
     // cannot both debit. Replays only succeed when user/operation/amount match.
     try {
@@ -386,7 +414,7 @@ export class DatabaseStorage implements IStorage {
             row.userId === userId
             && row.operation === operation
             && row.amount === amount
-            && (row.type || "debit") === "debit"
+            && (row.type || "debit") === type
           ) {
             return { success: true, newBalance: user?.credits ?? 0, alreadyProcessed: true };
           }
@@ -398,7 +426,7 @@ export class DatabaseStorage implements IStorage {
           amount,
           operation,
           idempotencyKey,
-          type: "debit",
+          type,
         }).returning();
         if (!inserted.length) {
           const [user] = await tx.select().from(users).where(eq(users.id, userId));
@@ -429,7 +457,7 @@ export class DatabaseStorage implements IStorage {
           row.userId === userId
           && row.operation === operation
           && row.amount === amount
-          && (row.type || "debit") === "debit"
+          && (row.type || "debit") === type
         ) {
           return { success: true, newBalance: user?.credits ?? 0, alreadyProcessed: true };
         }
@@ -439,7 +467,42 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-  async refundCredits(userId: number, amount: number, idempotencyKey: string): Promise<number> {
+  async hasActiveEditImageHold(userId: number, holdKey: string): Promise<boolean> {
+    const result = await db.execute(sql`
+      SELECT 1 FROM credit_transactions
+      WHERE user_id = ${userId} AND idempotency_key = ${holdKey}
+        AND operation = ${EDIT_IMAGE_HOLD} AND type = 'hold' AND created_at >= ${EDIT_IMAGE_HOLD_CUTOFF}
+    `);
+    return result.rows.length === 1;
+  }
+
+  async releaseEditImageHold(userId: number, holdKey: string): Promise<number> {
+    return db.transaction(async (tx) => {
+      // Only a pending hold can be released. A committed edit converts it to a debit.
+      const [hold] = (await tx.execute(sql`
+        UPDATE credit_transactions SET type = 'released'
+        WHERE user_id = ${userId} AND idempotency_key = ${holdKey}
+          AND operation = ${EDIT_IMAGE_HOLD} AND type = 'hold'
+        RETURNING amount
+      `)).rows as { amount: number }[];
+      if (!hold) return 0;
+      await tx.execute(sql`UPDATE users SET credits = credits + ${hold.amount} WHERE id = ${userId}`);
+      return hold.amount;
+    });
+  }
+
+  async recoverExpiredEditImageHolds(): Promise<void> {
+    const result = await db.execute(sql`
+      SELECT user_id, idempotency_key FROM credit_transactions
+      WHERE operation = ${EDIT_IMAGE_HOLD} AND type = 'hold' AND created_at < ${EDIT_IMAGE_HOLD_CUTOFF}
+      ORDER BY created_at LIMIT 50
+    `);
+    for (const hold of result.rows as { user_id: number; idempotency_key: string }[]) {
+      await this.releaseEditImageHold(hold.user_id, hold.idempotency_key);
+    }
+  }
+
+  async refundCredits(userId: number, amount: number, idempotencyKey: string, retainDebitKey = false): Promise<number> {
     // Every refund must be tied to the original debit. An unkeyed refund can be
     // replayed by duplicate callbacks and mint credits, so fail closed.
     if (!idempotencyKey) throw new Error("REFUND_IDEMPOTENCY_KEY_REQUIRED");
@@ -460,11 +523,12 @@ export class DatabaseStorage implements IStorage {
           return user?.credits ?? 0;
         }
 
-        // Free the original debit key for a future legitimate retry.
-        const freedKey = `${idempotencyKey}:refunded:${Date.now()}`;
+        // Ordinary editor submissions retain their key. Clicking Send again
+        // intentionally creates a new key; resending the same POST does not.
+        const debitKey = retainDebitKey ? idempotencyKey : `${idempotencyKey}:refunded:${Date.now()}`;
         await tx.execute(sql`
           UPDATE credit_transactions
-          SET idempotency_key = ${freedKey},
+          SET idempotency_key = ${debitKey},
               note = COALESCE(note, '') || ' [refunded]'
           WHERE idempotency_key = ${idempotencyKey}
             AND user_id = ${userId}
@@ -739,12 +803,12 @@ export class DatabaseStorage implements IStorage {
     });
   }
 
-  /** Publish the complete edit at once. Failed transactions leave all code and pointers intact. */
-  async applyProjectEdit(projectId: number, changes: ReadonlyMap<string, string>): Promise<void> {
+  /** Publish code, library entries and image debits together. */
+  async applyProjectEdit(projectId: number, changes: ReadonlyMap<string, string>, images?: ProjectEditImages): Promise<void> {
     const index = changes.get("index.html");
     const patch: Partial<Project> = { updatedAt: new Date() };
     const stagedKeys: string[] = [];
-    let superseded: Array<string | null>;
+    let previousKeys: Array<string | null>;
     try {
       if (index !== undefined) {
         const cols = await siteCodeColumns(projectId, index);
@@ -759,10 +823,28 @@ export class DatabaseStorage implements IStorage {
         files.push({ filename, ...cols });
       }
 
-      superseded = await db.transaction(async (tx) => {
-        const [current] = await tx.select({ codeBlobKey: projects.codeBlobKey })
+      previousKeys = await db.transaction(async (tx) => {
+        const [current] = await tx.select({ codeBlobKey: projects.codeBlobKey, userId: projects.userId })
           .from(projects).where(eq(projects.id, projectId)).for("update");
         if (!current) throw new Error("Проект не найден при сохранении правки.");
+        if (images?.items.length) {
+          const { userId, editCost, unitCost, holdKey, items } = images;
+          if (current.userId !== userId) throw new Error("Project owner changed during edit");
+          const reservedCost = editCost + items.length * unitCost;
+          const settled = await tx.execute(sql`
+            UPDATE credit_transactions SET operation = 'generate', type = 'debit', amount = ${editCost}
+            WHERE user_id = ${userId} AND idempotency_key = ${holdKey}
+              AND operation = ${EDIT_IMAGE_HOLD} AND type = 'hold' AND amount = ${reservedCost}
+              AND created_at >= ${EDIT_IMAGE_HOLD_CUTOFF}
+            RETURNING id
+          `);
+          if (!settled.rows.length) throw new EditImageHoldExpired();
+          await tx.insert(creditTransactions).values(items.map((image, index) => ({
+            userId, amount: unitCost, operation: "image", type: "debit",
+            idempotencyKey: `editor-image:${holdKey}:${index + 1}`, note: `Editor image: ${image.name}`,
+          })));
+          await tx.insert(projectImages).values(items.map((image) => ({ ...image, projectId, userId })));
+        }
         const previousKeys = index === undefined ? [] : [current.codeBlobKey];
         await tx.update(projects).set(patch).where(eq(projects.id, projectId));
         for (const { filename, ...cols } of files) {
@@ -778,7 +860,12 @@ export class DatabaseStorage implements IStorage {
       await enqueueObjectDeletes(stagedKeys);
       throw err;
     }
-    await enqueueObjectDeletes(superseded);
+    await enqueueObjectDeletes(previousKeys);
+  }
+
+  async discardEditImageUploads(urls: readonly string[]): Promise<void> {
+    await enqueueObjectDeletes(urls.filter((url) => /^\/objects\/uploads\/[a-f0-9-]{36}\.(png|jpg|webp|gif)$/.test(url))
+      .map((url) => url.slice("/objects/".length)));
   }
 
   async deleteProject(id: number): Promise<void> {
@@ -1408,19 +1495,22 @@ export class DatabaseStorage implements IStorage {
   }
 
   async adminGetUserTransactions(userId: number): Promise<CreditTransaction[]> {
-    return db.select().from(creditTransactions).where(eq(creditTransactions.userId, userId)).orderBy(desc(creditTransactions.createdAt));
+    return db.select().from(creditTransactions)
+      .where(and(eq(creditTransactions.userId, userId), sql`${creditTransactions.operation} <> ${EDIT_IMAGE_HOLD}`))
+      .orderBy(desc(creditTransactions.createdAt));
   }
 
   async getUserTransactionsPage(userId: number, limit: number, offset: number): Promise<{ items: CreditTransaction[]; total: number }> {
+    const visible = and(eq(creditTransactions.userId, userId), sql`${creditTransactions.operation} <> ${EDIT_IMAGE_HOLD}`);
     const countResult = await db
       .select({ count: sql<number>`count(*)::int` })
       .from(creditTransactions)
-      .where(eq(creditTransactions.userId, userId));
+      .where(visible);
     const total = Number(countResult[0]?.count ?? 0);
     const items = await db
       .select()
       .from(creditTransactions)
-      .where(eq(creditTransactions.userId, userId))
+      .where(visible)
       .orderBy(desc(creditTransactions.createdAt))
       .limit(limit)
       .offset(offset);
