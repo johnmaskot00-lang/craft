@@ -982,6 +982,7 @@ export function buildSinglePassEditSystemPrompt(opts: {
   activeFile: string;
   craftMd: string;
   pages: SitePage[];
+  imageCount?: number;
 }): { systemPrompt: string; preReadFiles: string[] } {
   const { context, files } = buildSinglePassEditContext(opts.pages, opts.activeFile);
   const included = new Set(files);
@@ -995,7 +996,10 @@ export function buildSinglePassEditSystemPrompt(opts: {
 В первом и единственном ответе вызови apply_patch для точечных правок и write_page для крупных изменений или явно запрошенных новых страниц, затем finish. Можно сделать несколько вызовов инструментов в этом же ответе. Не запрашивай чтение и не обещай будущую работу: второго ответа не будет.
 Копируй SEARCH дословно из исходника, с уникальным контекстом. Если патчей несколько, учитывай предыдущие изменения из этого же ответа. Сохраняй __B64_N__ и существующие медиа, если пользователь не просил их заменить.
 Проверь по коду, что результат покрывает весь запрос. При правке CSS проверь селектор, родительский grid/flex, порядок правил, @media и !important. Правь CSS внутри страницы или в локальном файле, который страница подключает через link rel="stylesheet". Если создаёшь assets/style.css, добавь подключение в том же пакете. Не добавляй необязательные анимации/3D.
-Используй существующие или приложенные медиа. Не вставляй маркеры GENIMG, SCROLLANIM или ANIMATIONAL: в этом запросе медиа из этих маркеров не создаются.
+Используй существующие или приложенные медиа. Не вставляй SCROLLANIM или ANIMATIONAL.
+${opts.imageCount
+  ? `В этой правке создай ровно ${opts.imageCount} новых изображений. Вставь каждое в видимую часть HTML: <img src="{{GENIMG:детальное описание сцены на английском|16:9}}" alt="описание">. Для разных изображений напиши разные описания. Допустимые пропорции: 16:9, 9:16, 1:1, 4:3, 3:4. Сервер запустит KIE по этим маркерам после ответа, заменит их постоянными URL и применит правку целиком. Не вызывай отдельный инструмент для изображения и не жди его результата. В том же ответе внеси все изменения через apply_patch/write_page и вызови finish.`
+  : "Создание новых изображений в этой правке не запрошено. Не вставляй GENIMG."}
 Если нужен существующий файл, которого нет среди переданных, не правь только часть запроса. Выбрать нужный файл можно в редакторе.${omitted.length ? `\nИсходники не вошли: ${omitted.map((page) => page.filename).join(", ")}.` : ""}
 
 ═══ ПАМЯТЬ САЙТА ═══
@@ -1572,6 +1576,7 @@ export async function runToolCallingAgent(opts: {
   preReadFiles?: string[];
   oneShot?: boolean;
   singlePass?: boolean;
+  allowImageBatchWithoutFinish?: boolean;
 }): Promise<ToolAgentResult> {
   if (opts.singlePass) return runSinglePassToolEdit(opts);
   const provider = opts.provider || "claude";
@@ -1641,7 +1646,11 @@ async function runSinglePassToolEdit(opts: Parameters<typeof runToolCallingAgent
       throw new SinglePassEditError(`${name}: операция не применена. Уточните файл или участок кода.`);
     }
   }
-  if (!summary) throw new SinglePassEditError("Модель не завершила пакет вызовом finish.");
+  // For an explicit image edit the completed provider response can omit finish.
+  // The route still requires every requested image slot and every mutation to validate.
+  if (!summary && !opts.allowImageBatchWithoutFinish) {
+    throw new SinglePassEditError("Модель не завершила пакет вызовом finish.");
+  }
   const result = finalizeToolAgentResult(workspace, summary, "");
   const before = new Map(opts.pages.map((page) => [normalizeSiteFilename(page.filename), page.code]));
   for (const [name, code] of result.changedFiles) {

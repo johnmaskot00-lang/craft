@@ -9,6 +9,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { generateDrizzleJson, generateMigration } from "drizzle-kit/api";
 import express from "express";
+import { objects } from "./media-stub.ts";
 
 const originalFetch = globalThis.fetch;
 const originalCwd = process.cwd();
@@ -21,7 +22,17 @@ const oldCss = "h1 { color: black; }\np { color: gray; }\n";
 const newCss = oldCss.replace("color: black", "color: red");
 const patch = (filename: string, search: string, replace: string) => ({ name: "apply_patch", args: { filename, search, replace } });
 const finish = { name: "finish", args: { summary: "Применены запрошенные изменения в исходном коде." } };
-const scenarios = ["patch", "write", "partial", "css", "stream-only", "db-reject", "malformed-tool", "truncated", "provider-error", "empty-html"] as const;
+const ctaPrompt = "придумай еще неколко блоков CTA можешь создать 2 изображения для этого";
+const ctaHtml = '<section id="cta-one"><h2>Начните сегодня</h2><img src="{{GENIMG:Editorial still life with gold accents|16:9}}" alt="Золотые акценты"></section>'
+  + '<section id="cta-two"><h2>Получите консультацию</h2><img src="{{GENIMG:Quiet interior in warm natural light|16:9}}" alt="Светлый интерьер"></section>';
+const ctaPatch = patch("index.html", "</main>", `${ctaHtml}</main>`);
+const fixtureImages = [
+  "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAE0lEQVR4nGN8tLuYAQaY4Cy8HABokwIYmLKRSwAAAABJRU5ErkJggg==",
+  "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAE0lEQVR4nGOsndXKAANMcBZeDgBRdAGkrPTO6AAAAABJRU5ErkJggg==",
+].map((png) => Buffer.from(png, "base64"));
+const imageScenarios = ["cta-images", "cta-concurrent", "cta-low-balance", "cta-kie-fail", "cta-invalid-image", "cta-db-reject", "cta-not-requested", "cta-hidden-image"] as const;
+const scenarios = ["patch", "write", "partial", "css", "stream-only", "db-reject", "malformed-tool", "truncated", "provider-error", "empty-html", ...imageScenarios] as const;
+const isImageScenario = (scenario: string) => imageScenarios.some((name) => name === scenario);
 
 async function main() {
   // Only this child test process is affected. Don't let inherited service
@@ -34,7 +45,7 @@ async function main() {
     NODE_ENV: "test", REDIS_URL: "", DB_POOL_MAX: "1", CRAFT_RUN_WORKER: "0",
     ROUTER_CHEAP_API_KEY: "test", ROUTER_CHEAP_BASE_URL: "https://router.cheap",
     CRAFT_GEMINI_ROUTER_MODELS: "gemini-4-neon,gpt-6.2-sol,kimi-k3.1-pro",
-    CRAFT_SITE_BLOB_MIN_BYTES: "256",
+    CRAFT_SITE_BLOB_MIN_BYTES: "256", KIE_API_KEY: "fixture",
   });
   const pgl = await PGlite.create();
   const dbServer = new PGLiteSocketServer({ db: pgl, host: "127.0.0.1", port: 0 });
@@ -42,9 +53,40 @@ async function main() {
   let origin = "";
   let mode: (typeof scenarios)[number] = "patch";
   const modelRequests: Array<{ pathname: string; body: any }> = [];
+  const imageRequests: Array<{ model: string; input: { prompt: string; aspect_ratio: string; resolution: string } }> = [];
+  let concurrentKie: { started: () => void; release: Promise<void> } | undefined;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     if (origin && url.origin === origin) return originalFetch(input, init);
+    if (url.origin === "https://api.kie.ai") {
+      if (url.pathname === "/api/v1/jobs/createTask") {
+        imageRequests.push(JSON.parse(String(init?.body)));
+        assert.ok(["cta-images", "cta-concurrent", "cta-kie-fail", "cta-invalid-image", "cta-db-reject"].includes(mode), "image generation only for the authorized CTA batch");
+        assert.equal(init?.method, "POST");
+        assert.equal(modelRequests.length, 1);
+        assert.ok(imageRequests.length <= 2, "no duplicate KIE creates");
+        const taskId = `cta-${imageRequests.length}`;
+        if (concurrentKie && taskId === "cta-1") {
+          concurrentKie.started();
+          await concurrentKie.release;
+        }
+        return Response.json({ code: 200, data: { taskId } });
+      }
+      assert.equal(url.pathname, "/api/v1/jobs/recordInfo");
+      const taskId = url.searchParams.get("taskId");
+      assert.match(taskId || "", /^cta-[12]$/);
+      if (mode === "cta-kie-fail" && taskId === "cta-2") {
+        return Response.json({ code: 200, data: { taskId, state: "fail", failMsg: "Provider rejected the task" } });
+      }
+      return Response.json({ code: 200, data: { taskId, state: "success", resultJson: JSON.stringify({ resultUrls: [`https://203.0.113.10/${taskId}.png`] }) } });
+    }
+    if (url.origin === "https://203.0.113.10") {
+      assert.match(url.pathname, /^\/cta-[12]\.png$/);
+      const bytes = mode === "cta-invalid-image" && url.pathname === "/cta-2.png"
+        ? fixtureImages[1].subarray(0, 16) // PNG signature and a truncated header.
+        : fixtureImages[url.pathname.includes("cta-1") ? 0 : 1];
+      return new Response(new Uint8Array(bytes), { headers: { "Content-Type": "image/png" } });
+    }
     assert.equal(url.origin, "https://router.cheap", `unexpected outbound request: ${url.origin}`);
     const body = JSON.parse(String(init?.body || "{}"));
     modelRequests.push({ pathname: url.pathname, body });
@@ -54,6 +96,10 @@ async function main() {
     const calls = mode === "write" ? [{ name: "write_page", args: { filename: "index.html", code: `Код страницы:\n\`\`\`html\n${newIndex}\n\`\`\`` } }, finish]
       : mode === "partial" ? [patch("about.html", "<p>Old description</p>", "<p>New description</p>"), patch("index.html", "<div>Not present</div>", "<div>Discard me</div>"), finish]
       : mode === "css" ? [patch(cssFilename, "color: black", "color: red"), finish]
+      : mode === "cta-db-reject" ? [ctaPatch, patch("about.html", "<p>Old description</p>", "<p>DB_REJECT</p>"), finish]
+      : mode === "cta-images" ? [ctaPatch]
+      : mode === "cta-hidden-image" ? [patch("index.html", "</main>", `${ctaHtml.replace('id="cta-two"', 'id="cta-two" hidden')}</main>`), finish]
+      : isImageScenario(mode) ? [ctaPatch, finish]
       : mode === "empty-html" ? [patch("index.html", oldIndex, ""), finish]
       : mode === "db-reject" ? [patch("index.html", "<h1>Old title</h1>", "<h1>New title</h1>"), patch("about.html", "<p>Old description</p>", "<p>DB_REJECT</p>"), finish]
       : [patch("index.html", "<h1>Old title</h1>", "<h1>New title</h1>"), patch("about.html", "<p>Old description</p>", "<p>New description</p>"), finish];
@@ -86,6 +132,7 @@ async function main() {
     closePool = () => pool.end();
     const { storage } = await import("../server/storage.ts");
     const { registerRoutes } = await import("../server/routes.ts");
+    const { processObjectDeleteOutbox } = await import("../server/version-blob-backfill.ts");
     const { sql } = await import("drizzle-orm");
     process.chdir(scratch);
     await registerRoutes(http, app);
@@ -103,50 +150,138 @@ async function main() {
     const userId: number = (await register.json()).id;
     const cookie = register.headers.get("set-cookie")?.split(";", 1)[0];
     assert.ok(cookie);
-    await db.execute(sql`UPDATE users SET credits = 300 WHERE id = ${userId}`);
     await db.execute(sql`ALTER TABLE project_files ADD CONSTRAINT test_file_write_rejection CHECK (code NOT LIKE '%DB_REJECT%')`);
 
-    const selectedScenario = process.argv[2];
-    const selectedScenarios = selectedScenario ? scenarios.filter((scenario) => scenario === selectedScenario) : scenarios;
-    assert.ok(selectedScenarios.length, `unknown scenario: ${selectedScenario}`);
+    const requestedScenarios = process.argv.slice(2).flatMap((name) => name === "kie" ? [...imageScenarios] : [name]);
+    const selectedScenarios = requestedScenarios.length ? scenarios.filter((scenario) => requestedScenarios.includes(scenario)) : scenarios;
+    assert.ok(!requestedScenarios.length || selectedScenarios.length === new Set(requestedScenarios).size, "unknown scenario");
     for (const scenario of selectedScenarios) {
       mode = scenario;
       modelRequests.length = 0;
+      imageRequests.length = 0;
+      const before = scenario === "cta-low-balance" ? 59 : scenario === "cta-images" ? 60 : scenario === "cta-concurrent" ? 90 : 300;
+      await db.execute(sql`UPDATE users SET credits = ${before} WHERE id = ${userId}`);
+      const creditRows = await db.execute(sql`SELECT count(*)::integer AS count, COALESCE(max(id), 0) AS last_id FROM credit_transactions WHERE user_id = ${userId}`);
+      const creditsBefore = Number(creditRows.rows[0]?.count);
+      const lastCreditId = Number(creditRows.rows[0]?.last_id);
+      const imageDebits = () => db.execute(sql`SELECT amount FROM credit_transactions WHERE user_id = ${userId} AND type = 'debit' AND operation = 'image' ORDER BY id`);
+      const imageDebitsBefore = (await imageDebits()).rows.length;
+      const uploadsBefore = [...objects.keys()].filter((key) => key.startsWith("uploads/")).sort();
       const initialIndex = scenario === "write" ? oldIndex.replace("<body>", `<body>${finishedHero}`)
         : scenario === "css" ? oldIndex.replace("</head>", `<link rel="stylesheet" href="/${cssFilename}"></head>`) : oldIndex;
       const project = await storage.createProject({ userId, title: "Site", generatedCode: initialIndex });
       await storage.upsertProjectFile({ projectId: project.id, filename: "about.html", code: oldAbout });
       if (scenario === "css") await storage.upsertProjectFile({ projectId: project.id, filename: cssFilename, code: oldCss });
-      const before = (await storage.getUser(userId))!.credits;
-      const version = scenario === "write" || scenario === "stream-only" || scenario === "truncated" ? "v1" : "v2";
-      const response = await fetch(`${origin}/api/projects/${project.id}/generate`, {
+      const version = ["write", "stream-only", "truncated", "cta-kie-fail"].includes(scenario) ? "v1" : "v2";
+      const submit = (projectId = project.id) => fetch(`${origin}/api/projects/${projectId}/generate`, {
         method: "POST", headers: { "content-type": "application/json", cookie },
         body: JSON.stringify({
           prompt: scenario === "write" ? "Полностью переделай дизайн страницы"
-            : scenario === "css" ? "Сделай заголовок красным" : "Обнови тексты на указанных страницах",
+            : scenario === "css" ? "Сделай заголовок красным"
+            : scenario === "cta-not-requested" ? 'Добавь текст «создай 2 изображения» в подпись, фото не нужны'
+            : isImageScenario(scenario) ? ctaPrompt : "Обнови тексты на указанных страницах",
+          idempotencyKey: `same-request-${projectId}`,
           activeFile: "index.html", agentMode: "edit", agentVersion: version, mockupMode: false,
           ...(scenario === "css" ? { selectedElement: { tag: "h1", text: "Old title", outerSnippet: "<h1>Old title</h1>" } } : {}),
         }),
         signal: AbortSignal.timeout(15_000),
       });
-      assert.equal(response.status, 200);
-      const frames = (await response.text()).split("\n").filter((line) => line.startsWith("data: ")).map((line) => JSON.parse(line.slice(6)));
-      assert.equal(modelRequests.length, 1, `${scenario}: one model request`);
-      const { pathname, body } = modelRequests[0];
-      assert.equal(pathname, version === "v1" ? "/v1/messages" : "/v1/chat/completions");
-      const prompt = pathname === "/v1/messages" ? body.system : body.messages[0].content;
-      assert.ok(prompt.includes(initialIndex) && prompt.includes(oldAbout), `${scenario}: exact sources in first request`);
-      assert.deepEqual(body.tools.map((t: any) => t.name || t.function.name), ["apply_patch", "write_page", "finish"]);
-      assert.ok(frames.some((frame) => /1 запрос/.test(frame.status || "")), `${scenario}: one-request status`);
-      assert.ok(!frames.some((frame) => /шаг\s+\d+\//i.test(frame.status || "")));
+      const framesFrom = async (response: Response) => {
+        assert.equal(response.status, 200);
+        return (await response.text()).split("\n").filter((line) => line.startsWith("data: ")).map((line) => JSON.parse(line.slice(6)));
+      };
+      let frames;
+      if (scenario === "cta-concurrent") {
+        const second = await storage.createProject({ userId, title: "Second site", generatedCode: oldIndex });
+        let startedKie!: () => void;
+        let releaseKie!: () => void;
+        const started = new Promise<void>((resolve) => { startedKie = resolve; });
+        const release = new Promise<void>((resolve) => { releaseKie = resolve; });
+        concurrentKie = { started: startedKie, release };
+        const first = submit().then(framesFrom);
+        try {
+          await Promise.race([started, first.then(() => { throw new Error("First request ended before KIE started"); })]);
+          const secondFrames = await framesFrom(await submit(second.id));
+          assert.equal(modelRequests.length, 1, "second edit must not call the text model using the first edit's reserved balance");
+          assert.match(secondFrames.find((frame) => frame.done)?.error, /60 токенов.*30/);
+          assert.equal((await storage.getProject(second.id))?.generatedCode, oldIndex);
+        } finally {
+          releaseKie();
+          concurrentKie = undefined;
+          frames = await first;
+        }
+      } else {
+        frames = await framesFrom(await submit());
+      }
+      const readJson = async (url: string) => {
+        const response = await fetch(`${origin}${url}`, { headers: { cookie } });
+        assert.equal(response.status, 200, url);
+        return response.json();
+      };
+      assert.equal(modelRequests.length, scenario === "cta-low-balance" ? 0 : 1, `${scenario}: at most one model request`);
+      let prompt = "";
+      if (modelRequests.length) {
+        const { pathname, body } = modelRequests[0];
+        assert.equal(pathname, version === "v1" ? "/v1/messages" : "/v1/chat/completions");
+        prompt = pathname === "/v1/messages" ? body.system : body.messages[0].content;
+        assert.ok(prompt.includes(initialIndex) && prompt.includes(oldAbout), `${scenario}: exact sources in first request`);
+        assert.deepEqual(body.tools.map((t: any) => t.name || t.function.name), ["apply_patch", "write_page", "finish"]);
+        assert.ok(frames.some((frame) => /1 запрос/.test(frame.status || "")), `${scenario}: one-request status`);
+        assert.ok(!frames.some((frame) => /шаг\s+\d+\//i.test(frame.status || "")));
+      }
       const done = frames.filter((frame) => frame.done);
       assert.equal(done.length, 1, `${scenario}: one final SSE event`);
       const result = done[0];
       const after = (await storage.getUser(userId))!.credits;
       const actualIndex = (await storage.getProject(project.id))!.generatedCode;
       const actualAbout = (await storage.getProjectFile(project.id, "about.html"))!.code;
-      const jobs = await db.execute(sql`SELECT state FROM generation_jobs WHERE project_id = ${project.id}`);
-      if (scenario === "patch" || scenario === "write" || scenario === "css") {
+      const jobs = await db.execute(sql`SELECT state, result FROM generation_jobs WHERE project_id = ${project.id}`);
+      if (isImageScenario(scenario)) {
+        assert.equal((await readJson("/api/auth/user")).credits, after);
+        assert.equal((await readJson(`/api/projects/${project.id}`)).generatedCode, actualIndex);
+      }
+      if (scenario === "cta-images" || scenario === "cta-concurrent") {
+        assert.equal(result.error, undefined, "the valid first response with the two requested images must be applied");
+        assert.equal(imageRequests.length, 2);
+        assert.match(prompt, /ровно 2 новых изображений/);
+        assert.ok(imageRequests.every((job) => job.model === "gpt-image-2-text-to-image" && job.input.aspect_ratio === "16:9" && job.input.resolution === "1K"));
+        assert.equal(new Set(imageRequests.map((job) => job.input.prompt)).size, 2);
+        const library: Array<{ url: string }> = await readJson(`/api/projects/${project.id}/images`);
+        assert.equal(library.length, 2);
+        const urls = [...actualIndex!.matchAll(/<img src="([^"]+)"/g)].map((match) => match[1]);
+        assert.deepEqual([...urls].sort(), library.map((image) => image.url).sort());
+        assert.equal(new Set(urls).size, 2);
+        for (const [index, url] of urls.entries()) {
+          assert.match(url, /^\/objects\/uploads\/.+\.png$/);
+          const asset = await fetch(`${origin}${url}`);
+          assert.equal(asset.status, 200);
+          assert.equal(asset.headers.get("content-type"), "image/png");
+          assert.deepEqual(Buffer.from(await asset.arrayBuffer()), fixtureImages[index]);
+        }
+        assert.match(actualIndex!, /id="cta-one"/);
+        assert.match(actualIndex!, /id="cta-two"/);
+        assert.doesNotMatch(actualIndex!, /GENIMG|IMGPENDING/);
+        assert.equal(result.creditsUsed, 60);
+        assert.equal(result.imagesGenerated, 2);
+        assert.equal(result.creditBreakdown?.images, 30);
+        assert.equal(result.creditBreakdown?.imagesCount, 2);
+        assert.equal(result.newBalance, before - 60);
+        assert.equal(after, before - 60);
+        assert.deepEqual((await imageDebits()).rows.slice(imageDebitsBefore).map((row) => row.amount), [15, 15]);
+        const charges = await db.execute(sql`SELECT amount FROM credit_transactions WHERE user_id = ${userId} AND type = 'debit' AND operation = 'generate' AND id > ${lastCreditId}`);
+        assert.deepEqual(charges.rows.map((row) => row.amount), [30], "the reservation is recorded as a 30-token edit, plus the two image debits");
+        const messages = await storage.getProjectMessages(project.id);
+        assert.ok(messages.some((message) => /Списано 60 ток\..*2×15=30/.test(message.content)), "chat records the itemized charge");
+        assert.deepEqual(jobs.rows.map((job) => job.state), ["completed"]);
+        assert.equal((jobs.rows[0].result as { imagesGenerated: number }).imagesGenerated, 2);
+      } else if (scenario === "cta-low-balance") {
+        assert.match(result.error, /60 токенов/);
+        assert.equal(imageRequests.length, 0);
+        assert.equal(after, before);
+        assert.equal(actualIndex, oldIndex);
+        assert.equal((await db.execute(sql`SELECT count(*)::integer AS count FROM credit_transactions WHERE user_id = ${userId}`)).rows[0]?.count, creditsBefore, "no debit/refund churn when total is unaffordable");
+        assert.equal(jobs.rows.length, 0, "inadmissible work did not start");
+      } else if (scenario === "patch" || scenario === "write" || scenario === "css") {
         assert.equal(result.error, undefined);
         assert.equal(result.creditsUsed, 30);
         assert.equal(after, before - 30);
@@ -167,14 +302,58 @@ async function main() {
         assert.ok(result.error, `${scenario}: fail without recovery`);
         assert.doesNotMatch(result.error, /PRIVATE_UPSTREAM_DETAIL|DB_REJECT|Failed query/i);
         assert.equal(result.refunded, true);
-        assert.equal(result.refundAmount, 30);
+        assert.equal(result.refundAmount, isImageScenario(scenario) && scenario !== "cta-not-requested" ? 60 : 30);
         assert.equal(after, before);
         assert.equal(actualIndex, oldIndex, `${scenario}: no index write`);
         assert.equal(actualAbout, oldAbout, `${scenario}: no partial file write`);
         assert.equal(await storage.getProjectFile(project.id, "craft.md"), undefined);
         assert.deepEqual(jobs.rows.map((job) => job.state), ["failed"]);
+        if (isImageScenario(scenario)) {
+          const shouldGenerate = scenario !== "cta-not-requested" && scenario !== "cta-hidden-image";
+          assert.equal(imageRequests.length, shouldGenerate ? 2 : 0, `${scenario}: KIE calls`);
+          if (scenario === "cta-kie-fail" || scenario === "cta-invalid-image") {
+            assert.match(result.error, /Готово 1 из 2 изображений KIE/);
+          }
+          assert.deepEqual(await readJson(`/api/projects/${project.id}/images`), []);
+          assert.equal((await imageDebits()).rows.length, imageDebitsBefore);
+          const history = await readJson("/api/credits/history");
+          assert.ok(history.items.every((row: { operation: string }) => row.operation !== "editor-image-hold"));
+          await processObjectDeleteOutbox();
+          assert.deepEqual([...objects.keys()].filter((key) => key.startsWith("uploads/")).sort(), uploadsBefore);
+        }
+      }
+      if (scenario === "cta-images" || scenario === "cta-kie-fail") {
+        const historyBefore = await storage.getProjectMessages(project.id);
+        const replay = (await framesFrom(await submit())).filter((frame) => frame.done);
+        assert.equal(replay.length, 1);
+        assert.match(replay[0].error, /уже обрабатывался/);
+        assert.equal(replay[0].newBalance, after);
+        assert.equal(modelRequests.length, 1);
+        assert.equal(imageRequests.length, 2);
+        assert.equal((await readJson("/api/auth/user")).credits, after);
+        assert.equal((await storage.getProjectMessages(project.id)).length, historyBefore.length, "retry did not append duplicate messages");
+        assert.equal((await db.execute(sql`SELECT id FROM generation_jobs WHERE project_id = ${project.id}`)).rows.length, 1, "retry did not create another job");
       }
       console.log(`single-pass HTTP: ${scenario} passed`);
+    }
+    if (selectedScenarios.includes("cta-concurrent")) {
+      // Simulate a process dying with a hold while another request is still active.
+      const initial = 150;
+      await db.execute(sql`UPDATE users SET credits = ${initial} WHERE id = ${userId}`);
+      const expired = "itest-expired-hold";
+      const active = "itest-active-hold";
+      assert.equal((await storage.reserveEditImageCredits(userId, 60, expired)).newBalance, 90);
+      assert.equal((await storage.reserveEditImageCredits(userId, 45, active)).newBalance, 45);
+      await db.execute(sql`UPDATE credit_transactions SET created_at = CURRENT_TIMESTAMP - interval '2 hours' WHERE idempotency_key = ${expired}`);
+      assert.equal(await storage.hasActiveEditImageHold(userId, expired), false);
+      await Promise.all([storage.recoverExpiredEditImageHolds(), storage.recoverExpiredEditImageHolds()]);
+      assert.equal((await storage.getUser(userId))?.credits, 105, "only the expired reservation was restored, once");
+      assert.equal(await storage.hasActiveEditImageHold(userId, active), true);
+      const replay = await storage.reserveEditImageCredits(userId, 60, expired);
+      assert.equal(replay.conflict, true, "a recovered request cannot hold the same funds again");
+      assert.equal(await storage.releaseEditImageHold(userId, active), 45);
+      assert.equal((await storage.getUser(userId))?.credits, initial);
+      console.log("editor image holds: expired balance restored exactly once");
     }
   } finally {
     globalThis.fetch = originalFetch;

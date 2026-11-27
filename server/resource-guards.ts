@@ -213,6 +213,8 @@ export function buildSseDataFrame(
     if (body.animPending) tiny.animPending = true;
     if (body.newBalance !== undefined) tiny.newBalance = body.newBalance;
     if (body.creditsUsed !== undefined) tiny.creditsUsed = body.creditsUsed;
+    if (body.creditBreakdown !== undefined) tiny.creditBreakdown = body.creditBreakdown;
+    if (body.imagesGenerated !== undefined) tiny.imagesGenerated = body.imagesGenerated;
     if (body.editedFile) tiny.editedFile = body.editedFile;
     if (body.editedFiles) tiny.editedFiles = body.editedFiles;
     if (typeof body.reply === "string") tiny.reply = body.reply.slice(0, 2000);

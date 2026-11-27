@@ -905,6 +905,9 @@ export default function EditorPage() {
       // otherwise keep the UI toggle (do not force v2 over an explicit Professional/v1 choice).
       const siteEmpty = !project?.generatedCode || isCraftGeneratingHtml(project?.generatedCode || "");
       const isMockupGen = !!(isMockupActive && hasMockupRefs);
+      if (!siteEmpty && !isMockupGen && agentMode !== "chat") {
+        bodyData.idempotencyKey = globalThis.crypto?.randomUUID?.();
+      }
       if (siteEmpty) {
         const forced = firstCreateAgentRef.current;
         if (firstCreateProRef.current) {
@@ -1252,8 +1255,9 @@ export default function EditorPage() {
             if (data.creditBreakdown || data.creditsUsed) {
               const b = data.creditBreakdown;
               const parts: string[] = [];
+              if (b?.edit) parts.push(`редактирование ${b.edit}`);
               if (b?.generate) parts.push(`генерация ${b.generate}`);
-              if (b?.images) parts.push(`изображения ${b.imagesCount || "?"}×15=${b.images}`);
+              if (b?.images) parts.push(`изображения ${b.imagesCount || "?"}×${b.imageUnitCost ?? 15}=${b.images}`);
               if (b?.videoPending) parts.push(`видео −120 при успехе`);
               const total = b?.total ?? data.creditsUsed;
               toast({
@@ -3989,7 +3993,7 @@ img:hover,.image-placeholder:hover,[data-image-hint]:hover,[class*="placeholder"
               <div className="flex items-center gap-1 mb-2" data-testid="agent-mode-switcher">
                 {([
                   ["auto", "Авто", "Агент сам поймёт: обсудить или изменить сайт (−30 ток.)"],
-                  ["edit", "Изменить", "Внести правки в код сайта (−30 ток.)"],
+                  ["edit", "Изменить", "Правка сайта — 30 ток. Новые изображения по запросу — 15 ток. за каждое"],
                   ["chat", "Обсудить", "Советы и вопросы без изменения кода (−30 ток.)"],
                 ] as const).map(([mode, label, title]) => (
                   <button
