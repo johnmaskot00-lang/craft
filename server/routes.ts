@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { intParam, idParam } from "./route-params";
-import { storage, VERSION_RETENTION_PER_PROJECT, publicUser, EditImageHoldExpired } from "./storage";
+import { storage, VERSION_RETENTION_PER_PROJECT, publicUser, EditImageHoldExpired, EditCommitStatusUnknown } from "./storage";
 import { EDIT_IMAGE_LIMIT, planEditorImageSlots, replaceEditorImageSlots, requestedEditorImageCount } from "./editor-image-plan";
 import { generateEditorImage } from "./kie-editor-image";
 import {
@@ -5655,11 +5655,12 @@ export async function registerRoutes(
     let genBilled = false;
     let singlePassEdit = false;
     let editSaved = false;
+    let editCommitUnconfirmed = false;
     const stagedEditImageUrls: string[] = [];
     let generationCost = 0;
     let billedUserId: number | undefined;
     let genIkeyForRefund = "";
-    let editImageHoldKey = "";
+    let editHoldKey = "";
     let wroteGeneratingPlaceholder = false;
     let generateProjectId: number | undefined;
     let dropGenerateSlot: (() => void) | null = null;
@@ -5921,11 +5922,9 @@ export async function registerRoutes(
           }
         }
         const required = GENERATION_COST + (requestedImages ?? 0) * AUTO_IMAGE_COST;
-        // Hold the entire image batch before either provider sees the request.
-        // The save converts the hold into the edit and individual image debits.
-        editDeduction = requestedImages
-          ? await storage.reserveEditImageCredits(user.id, required, genIkey)
-          : await storage.deductCredits(user.id, GENERATION_COST, "generate", genIkey);
+        // Reserve the whole request before provider work. Only the transaction
+        // that publishes the edit converts the reservation into ledger debits.
+        editDeduction = await storage.reserveEditImageCredits(user.id, required, genIkey);
         const duplicate = editDeduction.alreadyProcessed || editDeduction.conflict;
         if (duplicate || !editDeduction.success) {
           const error = duplicate ? "Этот запрос уже обрабатывался. Повторного списания нет. Если правка не сохранилась, отправьте её заново."
@@ -5937,7 +5936,7 @@ export async function registerRoutes(
         genBilled = true;
         generationCost = GENERATION_COST;
         genIkeyForRefund = genIkey;
-        if (requestedImages) editImageHoldKey = genIkey;
+        editHoldKey = genIkey;
       }
 
       try {
@@ -5956,6 +5955,7 @@ export async function registerRoutes(
           res.write(`data: ${JSON.stringify({ status: "Генерируем сайт...", generating: true, jobId: job.id })}\n\n`);
         } catch { /* ignore */ }
       } catch (e: any) {
+        if (singlePassEdit) throw e;
         console.warn("[GENERATE] durable job create failed:", e?.message || e);
       }
 
@@ -6809,8 +6809,9 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
 
       console.log(`[AGENT] Generate call. Agent: ${useGemini ? "v2/Gemini via Router Cheap" : `v1/${getActiveRouterCheapModel()} via Router Cheap`}, History: ${conversationHistory.length}, Edit: ${isEditMode}`);
 
-      // Ordinary editor requests commit here and never enter the generation / fallback pipeline.
+      // Ordinary editor requests validate and save the winning tool batch here.
       if (singlePassEdit) {
+        if (!durableJobId) throw new Error("Edit job was not created");
         const history = conversationHistory.slice(0, -1).slice(-4).flatMap(({ role, content }) => {
           if (role !== "user" && role !== "assistant") return [];
           const text = content.flatMap((part) => part.type === "input_text" ? [part.text] : []).join("\n")
@@ -6824,7 +6825,6 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
         const imageList = [...new Set(savedImageUrls)];
         const edit = await runToolCallingAgent({
           singlePass: true,
-          allowImageBatchWithoutFinish: requestedImages !== undefined,
           provider: useGemini ? "gemini" : "claude",
           systemPrompt: systemContent,
           userPrompt: imageList.length ? `${text}\n\nПрикреплённые изображения (используй точные URL):\n${imageList.join("\n")}` : text,
@@ -6886,7 +6886,7 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
         }
         const savedImages: Array<{ name: string; url: string; prompt: string }> = [];
         if (requestedImages) {
-          if (!await storage.hasActiveEditImageHold(user.id, editImageHoldKey)) throw new EditImageHoldExpired();
+          if (!await storage.hasActiveEditImageHold(user.id, editHoldKey)) throw new EditImageHoldExpired();
           const key = KIE_API_KEY!; // checked before submitting any provider work
           dropGenerateSlot?.();
           const status = `Создаём изображения через KIE (${requestedImages})…`;
@@ -6943,33 +6943,22 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
         const creditBreakdown = {
           edit: GENERATION_COST, images: imageCredits, imagesCount, imageUnitCost: AUTO_IMAGE_COST, total: creditsUsed,
         };
-        await storage.applyProjectEdit(project.id, changes, imagesCount ? {
-          userId: user.id, editCost: GENERATION_COST, unitCost: AUTO_IMAGE_COST, holdKey: editImageHoldKey, items: savedImages,
-        } : undefined);
+        const beforeFiles = existingFiles.map(({ filename, code }) => ({ filename, code }));
+        const afterFiles = new Map(beforeFiles.map(({ filename, code }) => [filename, code]));
+        for (const [filename, changedCode] of changes) {
+          if (filename !== "index.html") afterFiles.set(filename, changedCode);
+        }
+        const imageNote = imagesCount ? ` + изображения ${imagesCount}×${AUTO_IMAGE_COST}=${imageCredits}` : "";
+        await storage.applyProjectEdit(project.id, changes, {
+          before: { code: project.generatedCode, files: beforeFiles.length ? beforeFiles : null },
+          after: { code, files: [...afterFiles].map(([filename, code]) => ({ filename, code })) },
+          prompt,
+          message: `${reply}\n\n— Списано ${creditsUsed} ток. (редактирование${imageNote})`,
+          billing: { userId: user.id, editCost: GENERATION_COST, unitCost: AUTO_IMAGE_COST, holdKey: editHoldKey, images: savedImages },
+          job: { id: durableJobId, result: { codeBytes: Buffer.byteLength(code), editedFiles, creditsUsed, creditBreakdown, imagesGenerated: imagesCount } },
+        });
         editSaved = true;
-        genBilled = false; // A committed edit must not be refunded for a later history or transport failure.
-
-        if (durableJobId) {
-          await completeGenerationJob(durableJobId, { codeBytes: code.length, editedFiles, creditsUsed, creditBreakdown, imagesGenerated: imagesCount }).catch((err) => {
-            console.warn("[EDIT] job update failed:", err?.message);
-          });
-        }
-        try {
-          const files = existingFiles.map(({ filename, code }) => ({ filename, code }));
-          await storage.createProjectVersion({
-            projectId: project.id, code: project.generatedCode,
-            label: `До: "${prompt.substring(0, 50)}${prompt.length > 50 ? "..." : ""}"`,
-            files: files.length ? files : null,
-          });
-          const imageNote = imagesCount ? ` + изображения ${imagesCount}×${AUTO_IMAGE_COST}=${imageCredits}` : "";
-          const message = await storage.createProjectMessage({
-            projectId: project.id, role: "model",
-            content: `${reply}\n\n— Списано ${creditsUsed} ток. (редактирование${imageNote})`,
-          });
-          await saveChatResultVersion(project.id, code, prompt, undefined, message.id);
-        } catch (err: any) {
-          console.warn("[EDIT] history save failed:", err?.message);
-        }
+        genBilled = false;
 
         const freshUser = await storage.getUser(user.id).catch(() => undefined);
         writeSseJson(res, {
@@ -8147,6 +8136,18 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
         })();
       }
     } catch (err: any) {
+      if (err instanceof EditCommitStatusUnknown) {
+        editCommitUnconfirmed = true;
+        console.warn("[EDIT] could not confirm commit for job", durableJobId);
+        const error = "Связь с базой прервалась. Обновите редактор, чтобы проверить, сохранилась ли правка.";
+        if (res.headersSent) {
+          writeSseJson(res, { done: true, error, jobId: durableJobId });
+          res.end();
+        } else {
+          res.status(503).json({ message: error, jobId: durableJobId });
+        }
+        return;
+      }
       if (!editSaved && stagedEditImageUrls.length) await storage.discardEditImageUploads(stagedEditImageUrls);
       if (singlePassEdit) {
         console.error("[EDIT] failed:", err instanceof SinglePassEditError ? err.message : {
@@ -8167,8 +8168,8 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
       let refundAmount = 0;
       const localStorageFailure = ["EACCES", "EROFS", "ENOSPC"].includes(String(err?.code || ""));
       try {
-        if (editImageHoldKey && billedUserId && !editSaved) {
-          refundAmount = await storage.releaseEditImageHold(billedUserId, editImageHoldKey);
+        if (editHoldKey && billedUserId && !editSaved) {
+          refundAmount = await storage.releaseEditImageHold(billedUserId, editHoldKey);
         } else if (
           genBilled &&
           billedUserId &&
@@ -8187,7 +8188,7 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
       const _em = String(err?.message || "");
       const errMsg = singlePassEdit
         ? `Правка не выполнена с первого запроса. ${err instanceof SinglePassEditError ? err.message
-            : err instanceof EditImageHoldExpired ? "Истекло время, отведённое на правку с изображениями. Отправьте запрос заново."
+            : err instanceof EditImageHoldExpired ? "Истекло время, отведённое на правку. Отправьте запрос заново."
             : "Не удалось получить или сохранить изменения."}`
         : (_em.includes("503") || _em.includes("UNAVAILABLE") || _em.includes("high demand"))
         ? "Сервер ИИ временно перегружен. Основная и резервная модели не смогли завершить запрос."
@@ -8252,7 +8253,7 @@ VIDEO_PROMPT (на английском) — ты КИНОРЕЖИССЁР го�
         void redisReleaseLease(`project:${generateProjectId}`, distributedGenerationToken);
         distributedGenerationLeaseHeld = false;
       }
-      if (durableJobId && !projectGenerationContinuesInBackground) {
+      if (durableJobId && !projectGenerationContinuesInBackground && !editCommitUnconfirmed) {
         const st = await getGenerationJob(durableJobId).catch(() => null);
         if (st && (st.state === "queued" || st.state === "running")) {
           // Success path should have completed the job; if still open, mark failed only on error paths that forgot.
