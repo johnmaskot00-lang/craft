@@ -14,6 +14,9 @@ type ChatOptions = {
   tools?: readonly any[];
   forceToolUse?: boolean;
   singleAttempt?: boolean;
+  model?: string;
+  timeoutMs?: number;
+  streamTools?: boolean;
   temperature?: number;
   maxTokens?: number;
 };
@@ -163,6 +166,82 @@ function requireRouterCheapKey(): string {
   return key;
 }
 
+const MAX_EDITOR_STREAM_BYTES = 4 * 1024 * 1024;
+const MAX_EDITOR_TOOL_CALLS = 64;
+const invalidCompletion = (message: string, cause?: unknown) =>
+  Object.assign(new Error(message, { cause }), { status: 502 });
+
+/** Assemble one OpenAI-compatible response without exposing partial tool calls. */
+async function readToolStream(response: Response) {
+  const reader = response.body?.getReader();
+  if (!reader) throw invalidCompletion("Router Cheap returned an empty tool stream");
+  const decoder = new TextDecoder();
+  const toolCalls = new Map<number, { id: string; type: string; function: { name: string; arguments: string } }>();
+  let buffer = "";
+  let text = "";
+  let finishReason: string | undefined;
+  let bytes = 0;
+  let done = false;
+  const readLine = (line: string) => {
+    if (!line.startsWith("data:")) return;
+    const value = line.slice(5).trim();
+    if (value === "[DONE]") { done = true; return; }
+    let event;
+    try { event = JSON.parse(value); }
+    catch { throw invalidCompletion("Router Cheap returned a malformed tool event"); }
+    if (event?.error) throw parseError(Number(event.error.code) || 502, value);
+    const choice = event?.choices?.[0];
+    if (!choice) return; // Provider metadata and usage events.
+    if (choice.finish_reason != null) finishReason = choice.finish_reason;
+    const delta = choice.delta;
+    if (delta?.refusal) throw Object.assign(new Error("Router Cheap refused the request"), { status: 403 });
+    if (typeof delta?.content === "string") text += delta.content;
+    if (delta?.tool_calls != null && !Array.isArray(delta.tool_calls)) {
+      throw invalidCompletion("Router Cheap returned an invalid tool delta");
+    }
+    for (const part of delta?.tool_calls ?? []) {
+      const index = part?.index;
+      if (!Number.isInteger(index) || index < 0 || index >= MAX_EDITOR_TOOL_CALLS) {
+        throw invalidCompletion("Router Cheap returned an invalid tool index");
+      }
+      const call = toolCalls.get(index) ?? { id: "", type: "function", function: { name: "", arguments: "" } };
+      if (typeof part.id === "string") call.id = part.id;
+      if (typeof part.type === "string") call.type = part.type;
+      if (typeof part.function?.name === "string") call.function.name += part.function.name;
+      if (typeof part.function?.arguments === "string") call.function.arguments += part.function.arguments;
+      toolCalls.set(index, call);
+    }
+  };
+  try {
+    while (!done) {
+      const chunk = await reader.read().catch((cause) => {
+        throw invalidCompletion("Router Cheap tool stream was interrupted", cause);
+      });
+      if (chunk.done) {
+        readLine(buffer + decoder.decode());
+        break;
+      }
+      bytes += chunk.value.byteLength;
+      if (bytes > MAX_EDITOR_STREAM_BYTES) throw invalidCompletion("Router Cheap tool stream exceeded its size limit");
+      buffer += decoder.decode(chunk.value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        readLine(line);
+        if (done) break;
+      }
+    }
+    if (!done || !finishReason) throw invalidCompletion("Router Cheap tool stream ended before completion");
+    const ordered = [...toolCalls.entries()].sort(([a], [b]) => a - b);
+    if (ordered.some(([index], position) => index !== position)) {
+      throw invalidCompletion("Router Cheap returned an incomplete tool list");
+    }
+    return { choices: [{ finish_reason: finishReason, message: { content: text, tool_calls: ordered.map(([, call]) => call) } }] };
+  } finally {
+    void reader.cancel().catch(() => undefined);
+  }
+}
+
 async function requestJson(model: string, options: ChatOptions): Promise<ChatResult> {
   const key = requireRouterCheapKey();
 
@@ -171,6 +250,7 @@ async function requestJson(model: string, options: ChatOptions): Promise<ChatRes
     messages: toOpenAiMessages(options.contents, options.systemPrompt),
     temperature: options.temperature ?? 0.2,
     max_tokens: options.maxTokens ?? 32_000,
+    ...(options.streamTools ? { stream: true } : {}),
   };
   if (options.tools?.length) {
     body.tools = openAiTools(options.tools);
@@ -178,7 +258,7 @@ async function requestJson(model: string, options: ChatOptions): Promise<ChatRes
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? REQUEST_TIMEOUT_MS);
   timer.unref?.();
   try {
     const response = await fetch(ROUTER_CHEAP_BASE_URL, {
@@ -188,16 +268,20 @@ async function requestJson(model: string, options: ChatOptions): Promise<ChatRes
       signal: controller.signal,
       ...(options.singleAttempt ? { redirect: "error" } : {}),
     });
-    const raw = await response.text();
-    if (!response.ok) throw parseError(response.status, raw);
+    if (!response.ok) throw parseError(response.status, await response.text());
 
-    let data: any;
-    try { data = JSON.parse(raw); } catch { throw new Error("Router Cheap returned invalid JSON"); }
-    if (data?.error) throw Object.assign(new Error(String(data.error.message || data.error)), { status: Number(data.error.code) || 502 });
+    const isEventStream = /^text\/event-stream\b/i.test(response.headers.get("content-type") || "");
+    const data = options.streamTools && isEventStream
+      ? await readToolStream(response)
+      : await response.json().catch((err) => {
+          if (controller.signal.aborted) throw err;
+          throw invalidCompletion("Router Cheap returned invalid JSON");
+        });
+    if (data?.error) throw parseError(Number(data.error.code) || 502, JSON.stringify(data));
     const choice = data?.choices?.[0];
     const message = choice?.message;
-    if (!message || typeof message !== "object") throw new Error("Router Cheap returned an empty completion");
-    if (options.singleAttempt && choice.finish_reason != null && !["tool_calls", "stop", "function_call"].includes(choice.finish_reason)) {
+    if (!message || typeof message !== "object") throw invalidCompletion("Router Cheap returned an empty completion");
+    if (options.singleAttempt && !["tool_calls", "stop", "function_call"].includes(choice.finish_reason)) {
       throw new Error("Router Cheap did not complete the tool response");
     }
     if (options.singleAttempt && message.tool_calls != null && !Array.isArray(message.tool_calls)) {
@@ -235,7 +319,7 @@ async function requestJson(model: string, options: ChatOptions): Promise<ChatRes
 export async function routerCheapGeminiChatCompletion(options: ChatOptions): Promise<ChatResult> {
   requireRouterCheapKey();
   if (options.singleAttempt) {
-    const [model] = routerCheapGeminiModels();
+    const model = options.model ?? routerCheapGeminiModels()[0];
     if (!model) throw new Error("Router Cheap: no editor model configured");
     return requestJson(model, options);
   }

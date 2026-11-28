@@ -54,7 +54,7 @@ export function shouldOffloadVersion(codeBytes: number): boolean {
   return codeBytes >= MIN_OFFLOAD_BYTES && codeBytes <= MAX_OFFLOAD_BYTES;
 }
 
-export function versionBlobKey(projectId: number, versionId: number): string {
+export function versionBlobKey(projectId: number, versionId: number | string): string {
   return `drafts/p${projectId}/versions/${versionId}.json.gz`;
 }
 

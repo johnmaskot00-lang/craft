@@ -292,6 +292,7 @@ export async function routerCheapToolsRound(opts: {
   maxTokens?: number;
   model?: string;
   singleAttempt?: boolean;
+  timeoutMs?: number;
   /** Force at least one tool call (Replit oneshot: apply_patch+finish in one round). */
   forceToolUse?: boolean;
   /** Prefer non-streaming (more reliable through router.cheap for tool rounds). */
@@ -340,7 +341,12 @@ export async function routerCheapToolsRound(opts: {
     };
   };
 
-  const requestOptions = opts.singleAttempt ? { maxRetries: 0, fetchOptions: { redirect: "error" as const } } : undefined;
+  const requestOptions = opts.singleAttempt ? {
+    maxRetries: 0,
+    timeout: opts.timeoutMs,
+    signal: opts.timeoutMs === undefined ? undefined : AbortSignal.timeout(opts.timeoutMs),
+    fetchOptions: { redirect: "error" as const },
+  } : undefined;
   const runOnce = async (model: string): Promise<RouterCheapToolRoundResult> => {
     const requestBody = buildRequest(model);
     if (preferNonStream) {
@@ -365,6 +371,7 @@ export async function routerCheapToolsRound(opts: {
       ? await runOnce(opts.model || getActiveRouterCheapModel())
       : await withModelFallback(opts.model, runOnce);
   } catch (err: any) {
+    if (opts.singleAttempt) throw err;
     const status = Number(err?.status || err?.statusCode || 0);
     const msg = String(err?.message || err);
     // Tools rejected by the router → signal multipage stream fallback.

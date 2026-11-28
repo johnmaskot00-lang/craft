@@ -12,10 +12,13 @@
  */
 
 import { storage } from "./storage";
-import { KieApiError, kieHttpError, nestedErrorCode } from "./kie-errors";
+import { KieApiError, isDefinitelyUnsentTransportError, kieHttpError, nestedErrorCode } from "./kie-errors";
 import { KIE_GEMINI_ATTEMPTS } from "./kie-gemini";
-import { routerCheapGeminiChatCompletion } from "./router-cheap-neon";
-import { routerCheapToolsRound, isRouterCheapConfigured, ROUTER_CHEAP_TOOLS_MAX_TOKENS } from "./anthropic";
+import { routerCheapGeminiChatCompletion, routerCheapGeminiModels } from "./router-cheap-neon";
+import {
+  routerCheapToolsRound, isRouterCheapConfigured, ROUTER_CHEAP_TOOLS_MAX_TOKENS,
+  getActiveRouterCheapModel, ROUTER_CHEAP_FALLBACK_MODEL,
+} from "./anthropic";
 import {
   LineIndex,
   buildPatchDiagnostics,
@@ -1576,7 +1579,6 @@ export async function runToolCallingAgent(opts: {
   preReadFiles?: string[];
   oneShot?: boolean;
   singlePass?: boolean;
-  allowImageBatchWithoutFinish?: boolean;
 }): Promise<ToolAgentResult> {
   if (opts.singlePass) return runSinglePassToolEdit(opts);
   const provider = opts.provider || "claude";
@@ -1589,39 +1591,92 @@ export async function runToolCallingAgent(opts: {
 /** Validation failure safe to show to the user, unlike provider and database errors. */
 export class SinglePassEditError extends Error {}
 
-/** One provider reply, applied in a disposable workspace before anything is saved. */
+const EDIT_MODEL_TIMEOUT_MS = 120_000;
+const MAX_EDIT_MODEL_ATTEMPTS = 3;
+
+type EditModel = { model: string; protocol: "messages" | "completions" };
+
+/** Try a different model only when the provider could not deliver a usable response. */
+function canSwitchEditModel(error: unknown): boolean {
+  const err = error as { name?: string; status?: number; message?: string } | undefined;
+  const status = err?.status ?? 0;
+  if (status === 401 || status === 403) return false;
+  if (status === 408 || status === 429 || (status >= 500 && status < 600)) return true;
+  if (status === 404) return true;
+  if (status === 400 || status === 422) {
+    return /streaming is required|model_not_found|no (?:available )?channel|does not support (?:tools|function calling)/i.test(err?.message || "");
+  }
+  return isDefinitelyUnsentTransportError(error) ||
+    ["TimeoutError", "AbortError", "APIConnectionTimeoutError", "APIUserAbortError"].includes(err?.name || "");
+}
+
+function editModelCandidates(preferGemini: boolean): EditModel[] {
+  const claude: EditModel[] = [getActiveRouterCheapModel(), ROUTER_CHEAP_FALLBACK_MODEL]
+    .map((model) => ({ model, protocol: "messages" }));
+  const gemini: EditModel[] = routerCheapGeminiModels().map((model) => ({ model, protocol: "completions" }));
+  const ordered = preferGemini ? [...gemini, ...claude] : [...claude, ...gemini];
+  return ordered.filter((candidate, index) => ordered.findIndex(({ model }) => model === candidate.model) === index);
+}
+
+/** Each candidate receives the original prompt. Only one whole batch reaches the workspace. */
 async function runSinglePassToolEdit(opts: Parameters<typeof runToolCallingAgent>[0]): Promise<ToolAgentResult> {
-  const workspace = new SiteWorkspace(opts.pages, opts.craftMd, opts.preReadFiles || []);
   const history = [...(opts.history || []), { role: "user" as const, text: opts.userPrompt }];
-  const status = opts.provider === "gemini" ? "Gemini правит… (1 запрос)" : "Агент правит… (1 запрос)";
-  opts.onStatus?.(status);
+  const models = editModelCandidates(opts.provider === "gemini");
+  let attempts = 0;
+  let skipMessages = false;
+  let lastError: unknown;
+  let status = "Агент правит сайт…";
   const heartbeat = setInterval(() => opts.onStatus?.(status), 12_000);
   heartbeat.unref?.();
-  let calls: { name: string; args: Record<string, unknown> }[];
   try {
-    if (opts.provider === "gemini") {
-      const reply = await kieGeminiToolsRound(
-        history.map((h) => ({ role: h.role === "assistant" ? "model" : "user", parts: [{ text: h.text }] })),
-        opts.systemPrompt, SITE_AGENT_SINGLE_PASS_TOOLS, true, true,
-      );
-      calls = reply.functionCalls;
-    } else {
-      const reply = await kieClaudeToolsRound(
-        history.map((h) => ({ role: h.role, content: [{ type: "text", text: h.text }] })),
-        opts.systemPrompt, SITE_AGENT_SINGLE_PASS_TOOLS, true, true,
-      );
-      if (!reply.toolsSupported) throw new SinglePassEditError("Модель не поддержала инструменты правки.");
-      if (reply.stop_reason === "max_tokens" || reply.stop_reason === "model_context_window_exceeded") {
-        throw new SinglePassEditError("Ответ модели оборвался по лимиту длины.");
+    for (const { model, protocol } of models) {
+      if (attempts >= MAX_EDIT_MODEL_ATTEMPTS) break;
+      if (skipMessages && protocol === "messages") continue;
+      if (attempts++) status = "Агент правит сайт через резервную модель…";
+      opts.onStatus?.(status);
+      const options = {
+        model, systemPrompt: opts.systemPrompt, tools: SITE_AGENT_SINGLE_PASS_TOOLS,
+        forceToolUse: true, singleAttempt: true, timeoutMs: EDIT_MODEL_TIMEOUT_MS,
+      };
+      try {
+        if (protocol === "completions") {
+          const reply = await routerCheapGeminiChatCompletion({
+            ...options, streamTools: true,
+            contents: history.map((turn) => ({ role: turn.role === "assistant" ? "model" : "user", parts: [{ text: turn.text }] })),
+          });
+          return validateSinglePassEdit(opts, reply.functionCalls);
+        }
+        const reply = await routerCheapToolsRound({
+          ...options,
+          messages: history.map((turn) => ({ role: turn.role, content: turn.text })),
+        });
+        if (reply.stop_reason === "max_tokens" || reply.stop_reason === "model_context_window_exceeded") {
+          throw new SinglePassEditError("Ответ модели оборвался по лимиту длины.");
+        }
+        if (reply.stop_reason !== "tool_use") throw new SinglePassEditError("Модель не завершила ответ с инструментами правки.");
+        return validateSinglePassEdit(opts, reply.content.flatMap((block) =>
+          block.type === "tool_use" ? [{ name: block.name, args: block.input }] : [],
+        ));
+      } catch (error) {
+        if (!canSwitchEditModel(error)) throw error;
+        const err = error as Error & { status?: number };
+        if (protocol === "messages" && err.status === 400 && /streaming is required/i.test(err.message)) skipMessages = true;
+        lastError = error;
+        console.warn("[EDIT] model attempt failed", { model, attempt: attempts, status: err.status, name: err.name });
       }
-      if (reply.stop_reason !== "tool_use") throw new SinglePassEditError("Модель не завершила ответ с инструментами правки.");
-      calls = reply.content.flatMap((block) => block.type === "tool_use" ? [{ name: block.name, args: block.input }] : []);
     }
+    throw lastError ?? new SinglePassEditError("Модели правки временно недоступны.");
   } finally {
     clearInterval(heartbeat);
   }
+}
 
-  // Validate the whole batch in memory. No tool result goes back to the model.
+function validateSinglePassEdit(
+  opts: Parameters<typeof runToolCallingAgent>[0],
+  calls: ReadonlyArray<{ name: string; args: Record<string, unknown> }>,
+): ToolAgentResult {
+  const workspace = new SiteWorkspace(opts.pages, opts.craftMd, opts.preReadFiles || []);
+  // Validate the entire batch in memory before allowing any persistent side effects.
   if (!calls.length) throw new SinglePassEditError("Модель не вернула инструменты правки в первом ответе.");
   let summary = "";
   for (const [index, { name, args }] of calls.entries()) {
@@ -1646,11 +1701,8 @@ async function runSinglePassToolEdit(opts: Parameters<typeof runToolCallingAgent
       throw new SinglePassEditError(`${name}: операция не применена. Уточните файл или участок кода.`);
     }
   }
-  // For an explicit image edit the completed provider response can omit finish.
-  // The route still requires every requested image slot and every mutation to validate.
-  if (!summary && !opts.allowImageBatchWithoutFinish) {
-    throw new SinglePassEditError("Модель не завершила пакет вызовом finish.");
-  }
+  // The provider's completion confirms delivery of the batch. An optional
+  // finish call supplies the summary, but does not determine whether it is safe to save.
   const result = finalizeToolAgentResult(workspace, summary, "");
   const before = new Map(opts.pages.map((page) => [normalizeSiteFilename(page.filename), page.code]));
   for (const [name, code] of result.changedFiles) {

@@ -76,6 +76,14 @@ export async function processObjectDeleteOutbox(): Promise<void> {
             continue;
           }
         }
+        if (/^drafts\/p\d+\/versions\//.test(row.objectKey)) {
+          // A lost commit acknowledgement can queue a version that was committed.
+          const live = await db.execute(sql`SELECT 1 FROM project_versions WHERE blob_key = ${row.objectKey} LIMIT 1`);
+          if (live.rows.length) {
+            await db.execute(sql`DELETE FROM object_delete_outbox WHERE id = ${row.id}`);
+            continue;
+          }
+        }
         if (row.objectKey.startsWith("uploads/")) {
           // This is rollback-only cleanup. A lost commit acknowledgement can queue a
           // committed image; cancel that delete (removing a library row later need

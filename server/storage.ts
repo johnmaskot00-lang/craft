@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { users, projects, projectMessages, projectImages, projectVersions, projectFiles, leads, creditTransactions, paymentOrders, promoCodes, promoRedemptions, referralRewards, referralExchanges, type User, type InsertUser, type Project, type InsertProject, type ProjectMessage, type InsertProjectMessage, type ProjectImage, type InsertProjectImage, type ProjectVersion, type InsertProjectVersion, type ProjectFile, type InsertProjectFile, type Lead, type InsertLead, type CreditTransaction, type PaymentOrder, type PromoCode, type ReferralExchange } from "@shared/schema";
+import { users, projects, projectMessages, projectImages, projectVersions, projectFiles, generationJobs, leads, creditTransactions, paymentOrders, promoCodes, promoRedemptions, referralRewards, referralExchanges, type User, type InsertUser, type Project, type InsertProject, type ProjectMessage, type InsertProjectMessage, type ProjectImage, type InsertProjectImage, type ProjectVersion, type InsertProjectVersion, type ProjectFile, type InsertProjectFile, type Lead, type InsertLead, type CreditTransaction, type PaymentOrder, type PromoCode, type ReferralExchange } from "@shared/schema";
 import { eq, desc, and, sql, gte, isNull } from "drizzle-orm";
 import crypto from "crypto";
 import { referralBonusTokens, normalizeReferralCode } from "./referral";
@@ -149,15 +149,23 @@ const EDIT_IMAGE_HOLD = "editor-image-hold";
 const EDIT_IMAGE_HOLD_CUTOFF = sql`CURRENT_TIMESTAMP - interval '1 hour'`;
 type CreditClaim = { success: boolean; newBalance: number; alreadyProcessed?: boolean; conflict?: boolean };
 
-type ProjectEditImages = {
-  userId: number;
-  editCost: number;
-  unitCost: number;
-  holdKey: string;
-  items: readonly Pick<InsertProjectImage, "name" | "url" | "prompt">[];
+type ProjectEditCommit = {
+  before: VersionPayload;
+  after: VersionPayload;
+  prompt: string;
+  message: string;
+  billing: {
+    userId: number;
+    editCost: number;
+    unitCost: number;
+    holdKey: string;
+    images: readonly Pick<InsertProjectImage, "name" | "url" | "prompt">[];
+  };
+  job: { id: number; result: Record<string, unknown> };
 };
 
 export class EditImageHoldExpired extends Error {}
+export class EditCommitStatusUnknown extends Error {}
 
 export interface IStorage {
   getUser(id: number): Promise<User | undefined>;
@@ -197,7 +205,7 @@ export interface IStorage {
   /** Clone code, files and image library into a fresh unpublished project. */
   duplicateProject(sourceId: number, userId: number): Promise<Project | undefined>;
   updateProject(id: number, data: Partial<Project>): Promise<Project | undefined>;
-  applyProjectEdit(projectId: number, changes: ReadonlyMap<string, string>, images?: ProjectEditImages): Promise<void>;
+  applyProjectEdit(projectId: number, changes: ReadonlyMap<string, string>, commit: ProjectEditCommit): Promise<void>;
   discardEditImageUploads(urls: readonly string[]): Promise<void>;
   deleteProject(id: number): Promise<void>;
 
@@ -322,6 +330,29 @@ export const NEW_USER_CREDITS = 0;
 
 /** Per-message cap for project chat history (characters). */
 const MESSAGE_MAX_CHARS = Math.max(4000, Number(process.env.CRAFT_MESSAGE_MAX_CHARS) || 60000);
+
+function capProjectMessage(content: string): string {
+  return content.length > MESSAGE_MAX_CHARS
+    ? `${content.slice(0, MESSAGE_MAX_CHARS)}\n…[сообщение сокращено: ${content.length} символов]`
+    : content;
+}
+
+/** Stage immutable snapshots before taking DB locks. */
+async function stageEditVersion(projectId: number, payload: VersionPayload, stagedKeys: string[]) {
+  const codeBytes = payloadBytes(payload);
+  const meta = { codeBytes, hasFiles: !!payload.files?.length, healthy: isHealthySnapshot(payload.code) };
+  if (shouldOffloadVersion(codeBytes)) {
+    const key = versionBlobKey(projectId, crypto.randomUUID());
+    try {
+      await putVersionBlob(key, payload);
+      stagedKeys.push(key);
+      return { ...meta, blobKey: key, code: "", files: null };
+    } catch (err: any) {
+      console.warn("[versions] edit snapshot upload failed, saving inline:", err?.name);
+    }
+  }
+  return { ...meta, blobKey: null, ...payload };
+}
 
 /** Max version snapshots kept per project (full HTML). Was 80 — blew heap on list. */
 export const VERSION_RETENTION_PER_PROJECT = Math.max(
@@ -803,12 +834,12 @@ export class DatabaseStorage implements IStorage {
     });
   }
 
-  /** Publish code, library entries and image debits together. */
-  async applyProjectEdit(projectId: number, changes: ReadonlyMap<string, string>, images?: ProjectEditImages): Promise<void> {
+  /** Commit the edit, history, billing and completion status together. */
+  async applyProjectEdit(projectId: number, changes: ReadonlyMap<string, string>, commit: ProjectEditCommit): Promise<void> {
     const index = changes.get("index.html");
     const patch: Partial<Project> = { updatedAt: new Date() };
     const stagedKeys: string[] = [];
-    let previousKeys: Array<string | null>;
+    let supersededKeys: Array<string | null> | undefined;
     try {
       if (index !== undefined) {
         const cols = await siteCodeColumns(projectId, index);
@@ -823,27 +854,28 @@ export class DatabaseStorage implements IStorage {
         files.push({ filename, ...cols });
       }
 
-      previousKeys = await db.transaction(async (tx) => {
+      const before = await stageEditVersion(projectId, commit.before, stagedKeys);
+      const after = await stageEditVersion(projectId, commit.after, stagedKeys);
+      const { userId, editCost, unitCost, holdKey, images } = commit.billing;
+      await db.transaction(async (tx) => {
         const [current] = await tx.select({ codeBlobKey: projects.codeBlobKey, userId: projects.userId })
           .from(projects).where(eq(projects.id, projectId)).for("update");
-        if (!current) throw new Error("Проект не найден при сохранении правки.");
-        if (images?.items.length) {
-          const { userId, editCost, unitCost, holdKey, items } = images;
-          if (current.userId !== userId) throw new Error("Project owner changed during edit");
-          const reservedCost = editCost + items.length * unitCost;
-          const settled = await tx.execute(sql`
-            UPDATE credit_transactions SET operation = 'generate', type = 'debit', amount = ${editCost}
-            WHERE user_id = ${userId} AND idempotency_key = ${holdKey}
-              AND operation = ${EDIT_IMAGE_HOLD} AND type = 'hold' AND amount = ${reservedCost}
-              AND created_at >= ${EDIT_IMAGE_HOLD_CUTOFF}
-            RETURNING id
-          `);
-          if (!settled.rows.length) throw new EditImageHoldExpired();
-          await tx.insert(creditTransactions).values(items.map((image, index) => ({
+        if (!current || current.userId !== userId) throw new Error("Project unavailable during edit");
+        const reservedCost = editCost + images.length * unitCost;
+        const settled = await tx.execute(sql`
+          UPDATE credit_transactions SET operation = 'generate', type = 'debit', amount = ${editCost}
+          WHERE user_id = ${userId} AND idempotency_key = ${holdKey}
+            AND operation = ${EDIT_IMAGE_HOLD} AND type = 'hold' AND amount = ${reservedCost}
+            AND created_at >= ${EDIT_IMAGE_HOLD_CUTOFF}
+          RETURNING id
+        `);
+        if (!settled.rows.length) throw new EditImageHoldExpired();
+        if (images.length) {
+          await tx.insert(creditTransactions).values(images.map((image, index) => ({
             userId, amount: unitCost, operation: "image", type: "debit",
             idempotencyKey: `editor-image:${holdKey}:${index + 1}`, note: `Editor image: ${image.name}`,
           })));
-          await tx.insert(projectImages).values(items.map((image) => ({ ...image, projectId, userId })));
+          await tx.insert(projectImages).values(images.map((image) => ({ ...image, projectId, userId })));
         }
         const previousKeys = index === undefined ? [] : [current.codeBlobKey];
         await tx.update(projects).set(patch).where(eq(projects.id, projectId));
@@ -854,13 +886,53 @@ export class DatabaseStorage implements IStorage {
           await tx.insert(projectFiles).values({ projectId, filename, ...cols })
             .onConflictDoUpdate({ target: [projectFiles.projectId, projectFiles.filename], set: cols });
         }
-        return previousKeys;
+        const versions = await tx.select({ label: projectVersions.label }).from(projectVersions)
+          .where(eq(projectVersions.projectId, projectId))
+          .orderBy(desc(projectVersions.createdAt), desc(projectVersions.id)).limit(VERSION_RETENTION_PER_PROJECT);
+        const number = 1 + versions.reduce((max, { label }) => {
+          const version = Number(label.match(/^v(\d{1,9})\b/)?.[1] || 0);
+          return Math.max(max, version);
+        }, 0);
+        const [message] = await tx.insert(projectMessages).values({
+          projectId, role: "model", content: capProjectMessage(commit.message),
+        }).returning({ id: projectMessages.id });
+        const promptLabel = (limit: number) => commit.prompt.slice(0, limit) + (commit.prompt.length > limit ? "..." : "");
+        await tx.insert(projectVersions).values([
+          { projectId, ...before, label: `До: "${promptLabel(50)}"` },
+          { projectId, ...after, label: `v${number} [msg:${message.id}]: "${promptLabel(48)}"` },
+        ]);
+        const now = new Date();
+        const [finished] = await tx.update(generationJobs).set({
+          state: "completed", result: commit.job.result, error: null, finishedAt: now, updatedAt: now,
+        }).where(and(
+          eq(generationJobs.id, commit.job.id), eq(generationJobs.projectId, projectId),
+          eq(generationJobs.userId, userId), eq(generationJobs.state, "running"), sql`worker_id IS NULL`,
+        )).returning({ id: generationJobs.id });
+        if (!finished) throw new Error("Edit job unavailable during commit");
+        // The callback has finished. From here, a connection error may only
+        // mean that the COMMIT acknowledgement could not be read.
+        supersededKeys = previousKeys;
       });
     } catch (err) {
-      await enqueueObjectDeletes(stagedKeys);
-      throw err;
+      if (!supersededKeys) {
+        await enqueueObjectDeletes(stagedKeys);
+        throw err;
+      }
+      // A row lock waits out the original transaction if its COMMIT is still
+      // being resolved. The completion row is committed with the site and debit.
+      const [job] = await db.select({ state: generationJobs.state }).from(generationJobs).where(and(
+        eq(generationJobs.id, commit.job.id), eq(generationJobs.projectId, projectId),
+        eq(generationJobs.userId, commit.billing.userId),
+      )).for("update").catch((lookupError: unknown) => {
+        throw new EditCommitStatusUnknown("Could not confirm edit commit", { cause: lookupError });
+      });
+      if (job?.state !== "completed") {
+        await enqueueObjectDeletes(stagedKeys);
+        throw err;
+      }
     }
-    await enqueueObjectDeletes(previousKeys);
+    await enqueueObjectDeletes(supersededKeys ?? []);
+    await this.pruneProjectVersions(projectId);
   }
 
   async discardEditImageUploads(urls: readonly string[]): Promise<void> {
@@ -918,11 +990,8 @@ export class DatabaseStorage implements IStorage {
   async createProjectMessage(message: InsertProjectMessage): Promise<ProjectMessage> {
     // Chat history is display + short agent context, not storage for whole pages a
     // user pasted or a model echoed back. Cap each message.
-    const content = message.content || "";
-    const capped = content.length > MESSAGE_MAX_CHARS
-      ? `${content.slice(0, MESSAGE_MAX_CHARS)}\n…[сообщение сокращено: ${content.length} символов]`
-      : content;
-    const [msg] = await db.insert(projectMessages).values({ ...message, content: capped }).returning();
+    const content = capProjectMessage(message.content || "");
+    const [msg] = await db.insert(projectMessages).values({ ...message, content }).returning();
     return msg;
   }
 
@@ -1124,15 +1193,19 @@ export class DatabaseStorage implements IStorage {
       }
     }
 
-    // Version snapshots contain full HTML + multipage files and can be hundreds
-    // of KB–MB each. Keep a tight history per project to protect Postgres + Node RAM.
+    await this.pruneProjectVersions(version.projectId);
+    return saved ? { ...saved, code: payload.code, files: payload.files } : saved;
+  }
+
+  /** Keep a bounded history without making retention cleanup part of the save. */
+  private async pruneProjectVersions(projectId: number): Promise<void> {
     try {
       const pruned = await db.execute(sql`
         DELETE FROM project_versions
         WHERE id IN (
           SELECT id
           FROM project_versions
-          WHERE project_id = ${version.projectId}
+          WHERE project_id = ${projectId}
           ORDER BY created_at DESC, id DESC
           OFFSET ${VERSION_RETENTION_PER_PROJECT}
         )
@@ -1143,7 +1216,6 @@ export class DatabaseStorage implements IStorage {
     } catch (err: any) {
       console.warn("[versions] retention cleanup failed:", err?.message || err);
     }
-    return saved ? { ...saved, code: payload.code, files: payload.files } : saved;
   }
 
   async updateProjectVersion(

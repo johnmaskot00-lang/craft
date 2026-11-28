@@ -33,7 +33,7 @@ globalThis.fetch = (async (_input: any, init?: any) => {
       { id: "finish-1", type: "function", function: { name: "finish", arguments: JSON.stringify({ summary: "Two changes complete" }) } },
     );
   }
-  return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: null, tool_calls: calls } }] }), {
+  return new Response(JSON.stringify({ choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: calls } }] }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
@@ -133,16 +133,21 @@ async function main() {
   }), /apply_patch|SEARCH/i, "a failed tool must invalidate the whole batch");
   assert.equal(hits.length, 1);
 
-  for (const scenario of ["missing-finish", "early-finish"] as const) {
-    mode = scenario;
-    hits.length = 0;
-    await assert.rejects(runToolCallingAgent({
-      provider: "gemini", singlePass: true, preReadFiles: ["index.html"],
-      systemPrompt: "Apply the patch, then finish.", userPrompt: "Change the paragraph.", craftMd: "",
-      pages: [{ filename: "index.html", code: "<!doctype html><html><body><p>Old text</p></body></html>" }],
-    }), /finish/i, `${scenario}: an incomplete response must not be saved`);
-    assert.equal(hits.length, 1);
-  }
+  const paragraphEdit = {
+    provider: "gemini" as const, singlePass: true, preReadFiles: ["index.html"],
+    systemPrompt: "Apply the patch, then finish.", userPrompt: "Change the paragraph.", craftMd: "",
+    pages: [{ filename: "index.html", code: "<!doctype html><html><body><p>Old text</p></body></html>" }],
+  };
+  mode = "missing-finish";
+  hits.length = 0;
+  const completedBatch = await runToolCallingAgent(paragraphEdit);
+  assert.match(completedBatch.changedFiles.get("index.html") || "", /<p>New text<\/p>/);
+  assert.equal(hits.length, 1, "a complete tool response needs no follow-up summary call");
+
+  mode = "early-finish";
+  hits.length = 0;
+  await assert.rejects(runToolCallingAgent(paragraphEdit), /finish/i, "finish must follow any mutations");
+  assert.equal(hits.length, 1);
 
   hits.length = 0;
   mode = "invalid";
